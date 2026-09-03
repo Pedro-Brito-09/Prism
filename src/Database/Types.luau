@@ -14,9 +14,9 @@ export type Metadata = {
     [number]: PropertyTypes.Property<any>,
 }
 
-export type DatabaseConfig = {
+export type DatabaseConfig<T> = {
     Key: string,
-    InitialMetadata: {[string]: MetadataValue},
+    InitialMetadata: {PropertyTypes.Property<T>},
 }
 
 export type Cache = {

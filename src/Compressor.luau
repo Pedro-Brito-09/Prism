@@ -34,11 +34,7 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?)
         buffer.writeu16(Compressed, 0, #Value :: string)
         buffer.writestring(Compressed, 2, Value :: string)
         return Compressed
-    elseif Type == "Integer" then
-        const Compressed = buffer.create(4)
-        buffer.writei32(Compressed, 0, Value :: number)
-        return Compressed
-    elseif Type == "Float" then
+    elseif Type == "Number" then
         const Compressed = buffer.create(4)
         buffer.writef32(Compressed, 0, Value :: number)
         return Compressed
@@ -76,71 +72,71 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?)
         return Compressed
     elseif Type == "Enum" then
         const EnumType = tostring(Value.EnumType)
-        const Compressed = buffer.create(1 + #EnumType + 2)
-        buffer.writeu8(Compressed, 0, #EnumType)
-        buffer.writestring(Compressed, 1, EnumType)
-        buffer.writeu16(Compressed, 1 + #EnumType, Value.Value)
+        const Compressed = buffer.create(2 + #EnumType + 2)
+        buffer.writeu16(Compressed, 0, #EnumType)
+        buffer.writestring(Compressed, 2, EnumType)
+        buffer.writeu16(Compressed, 2 + #EnumType, Value.Value)
         return Compressed
     elseif Type == "CustomEnum" then
         const Name = Value.Parent
-        const Compressed = buffer.create(1 + #Name + 2)
-        buffer.writeu8(Compressed, 0, #Name)
-        buffer.writestring(Compressed, 1, Name)
-        buffer.writeu16(Compressed, 1 + #Name, Value.Id)
+        const Compressed = buffer.create(2 + #Name + 2)
+        buffer.writeu16(Compressed, 0, #Name)
+        buffer.writestring(Compressed, 2, Name)
+        buffer.writeu16(Compressed, 2 + #Name, Value.Id)
         return Compressed
-    elseif Type == "Table" then
-        local IsArray = false
-        local Count = 0
-        for _, _ in Value :: {} do
-            Count += 1
-        end
+    -- elseif Type == "Table" then
+    --     local IsArray = false
+    --     local Count = 0
+    --     for _, _ in Value :: {} do
+    --         Count += 1
+    --     end
 
-        if Count == 0 then
-            const Compressed = buffer.create(#TABLE_FOOTER)
-            buffer.writestring(Compressed, 0, TABLE_FOOTER)
-            return Compressed
-        elseif Count == #Value :: {} then
-            IsArray = true
-        end
+    --     if Count == 0 then
+    --         const Compressed = buffer.create(#TABLE_FOOTER)
+    --         buffer.writestring(Compressed, 0, TABLE_FOOTER)
+    --         return Compressed
+    --     elseif Count == #Value :: {} then
+    --         IsArray = true
+    --     end
 
-        local Size = 0
-        const Buffers = {}
-        for i, v in Value :: {} do
-            if not IsArray then
-                const IndexType = PropertyTypes:GetTypeFromValue(i)
-                const IndexTypeBuffer = buffer.create(1)
-                buffer.writeu8(IndexTypeBuffer, 0, PropertyTypes:GetTypeId(IndexType))
-                Size += 1
-                table.insert(Buffers, IndexTypeBuffer)
+    --     local Size = 0
+    --     const Buffers = {}
+    --     for i, v in Value :: {} do
+    --         if not IsArray then
+    --             const IndexType = PropertyTypes:GetTypeFromValue(i)
+    --             const IndexTypeBuffer = buffer.create(1)
+    --             buffer.writeu8(IndexTypeBuffer, 0, PropertyTypes:GetTypeId(IndexType))
+    --             Size += 1
+    --             table.insert(Buffers, IndexTypeBuffer)
 
-                const IndexBuffer = Compressor:CompressValue(IndexType, i)
-                Size += buffer.len(IndexBuffer)
-                table.insert(Buffers, IndexBuffer)
-            end
+    --             const IndexBuffer = Compressor:CompressValue(IndexType, i)
+    --             Size += buffer.len(IndexBuffer)
+    --             table.insert(Buffers, IndexBuffer)
+    --         end
 
-            const ValueType = PropertyTypes:GetTypeFromValue(v)
-            const ValueTypeBuffer = buffer.create(1)
-            buffer.writeu8(ValueTypeBuffer, 0, PropertyTypes:GetTypeId(ValueType))
-            Size += 1
-            table.insert(Buffers, ValueTypeBuffer)
+    --         const ValueType = PropertyTypes:GetTypeFromValue(v)
+    --         const ValueTypeBuffer = buffer.create(1)
+    --         buffer.writeu8(ValueTypeBuffer, 0, PropertyTypes:GetTypeId(ValueType))
+    --         Size += 1
+    --         table.insert(Buffers, ValueTypeBuffer)
 
-            const ValueBuffer = Compressor:CompressValue(ValueType, v)
-            Size += buffer.len(ValueBuffer)
-            table.insert(Buffers, ValueBuffer)
-        end
+    --         const ValueBuffer = Compressor:CompressValue(ValueType, v)
+    --         Size += buffer.len(ValueBuffer)
+    --         table.insert(Buffers, ValueBuffer)
+    --     end
 
-        const Header = IsArray and ARRAY_HEADER or DICTIONARY_HEADER
-        const Compressed = buffer.create(Size + #Header + #TABLE_FOOTER)
-        buffer.writestring(Compressed, 0, Header)
+    --     const Header = IsArray and ARRAY_HEADER or DICTIONARY_HEADER
+    --     const Compressed = buffer.create(Size + #Header + #TABLE_FOOTER)
+    --     buffer.writestring(Compressed, 0, Header)
 
-        local Offset = #Header
-        for _, v in Buffers do
-            buffer.copy(Compressed, Offset, v, 0)
-            Offset += buffer.len(v)
-        end
+    --     local Offset = #Header
+    --     for _, v in Buffers do
+    --         buffer.copy(Compressed, Offset, v, 0)
+    --         Offset += buffer.len(v)
+    --     end
 
-        buffer.writestring(Compressed, Offset, TABLE_FOOTER)
-        return Compressed
+    --     buffer.writestring(Compressed, Offset, TABLE_FOOTER)
+    --     return Compressed
     else
         Logger:Error(`Tried compressing unsupported value type: {Type}`)
     end
@@ -148,91 +144,89 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?)
     return
 end
 
-function Compressor:DecompressValue(Type: PropertyTypes.PropertyType, Value: buffer): (any?, number)
+function Compressor:DecompressValue(Type: PropertyTypes.PropertyType, Value: buffer, Offset: number?): (any?, number)
+    Offset = Offset or 0
     if Type == "Text" then
-        const Length = buffer.readu16(Value, 0)
-        return buffer.readstring(Value, 2, Length), 2 + Length
-    elseif Type == "Integer" then
-        return buffer.readi32(Value, 0), 4
-    elseif Type == "Float" then
-        return buffer.readf32(Value, 0), 4
+        const Length = buffer.readu16(Value, Offset)
+        return buffer.readstring(Value, Offset + 2, Length), 2 + Length
+    elseif Type == "Number" then
+        return buffer.readf32(Value, Offset), 4
     elseif Type == "Bool" then
-        return buffer.readu8(Value, 0) == 1, 1
+        return buffer.readu8(Value, Offset) == 1, 1
     elseif Type == "Color" then
-        const R = buffer.readu8(Value, 0)
-        const G = buffer.readu8(Value, 1)
-        const B = buffer.readu8(Value, 2)
+        const R = buffer.readu8(Value, Offset)
+        const G = buffer.readu8(Value, Offset + 1)
+        const B = buffer.readu8(Value, Offset + 2)
         return Color3.fromRGB(R, G, B), 3
     elseif Type == "Vector" then
-        const X = buffer.readf32(Value, 0)
-        const Y = buffer.readf32(Value, 4)
-        const Z = buffer.readf32(Value, 8)
+        const X = buffer.readf32(Value, Offset)
+        const Y = buffer.readf32(Value, Offset + 4)
+        const Z = buffer.readf32(Value, Offset + 8)
         return Vector3.new(X, Y, Z), 12
     elseif Type == "CFrame" then
-        const X = buffer.readf32(Value, 0)
-        const Y = buffer.readf32(Value, 4)
-        const Z = buffer.readf32(Value, 8)
-        const R00 = buffer.readf32(Value, 12)
-        const R01 = buffer.readf32(Value, 16)
-        const R02 = buffer.readf32(Value, 20)
-        const R10 = buffer.readf32(Value, 24)
-        const R11 = buffer.readf32(Value, 28)
-        const R12 = buffer.readf32(Value, 32)
-        const R20 = buffer.readf32(Value, 36)
-        const R21 = buffer.readf32(Value, 40)
-        const R22 = buffer.readf32(Value, 44)
+        const X = buffer.readf32(Value, Offset)
+        const Y = buffer.readf32(Value, Offset + 4)
+        const Z = buffer.readf32(Value, Offset + 8)
+        const R00 = buffer.readf32(Value, Offset + 12)
+        const R01 = buffer.readf32(Value, Offset + 16)
+        const R02 = buffer.readf32(Value, Offset + 20)
+        const R10 = buffer.readf32(Value, Offset + 24)
+        const R11 = buffer.readf32(Value, Offset + 28)
+        const R12 = buffer.readf32(Value, Offset + 32)
+        const R20 = buffer.readf32(Value, Offset + 36)
+        const R21 = buffer.readf32(Value, Offset + 40)
+        const R22 = buffer.readf32(Value, Offset + 44)
         return CFrame.new(X, Y, Z, R00, R01, R02, R10, R11, R12, R20, R21, R22), 48
     elseif Type == "Enum" then
-        const EnumType, Length = Compressor:DecompressValue("Text", Value)
-        const EnumValue = buffer.readu16(Value, Length)
+        const EnumType, Length = Compressor:DecompressValue("Text", Value, Offset)
+        const EnumValue = buffer.readu16(Value, Offset + Length)
         return Enum[EnumType]:FromValue(EnumValue), Length + 2
     elseif Type == "CustomEnum" then
-        const Name, Length = Compressor:DecompressValue("Text", Value)
-        const Id = buffer.readu16(Value, Length)
+        const Name, Length = Compressor:DecompressValue("Text", Value, Offset)
+        const Id = buffer.readu16(Value, Offset + Length)
         if not CustomEnum:GetEnum(Name) then
-            return CustomEnum.UNKNOWN
+            return CustomEnum.UNKNOWN, Length + 2
         end
 
-        return CustomEnum:GetEnum(Name):GetById(Id) or CustomEnum.UNKNOWN
-    elseif Type == "Table" then
-        local Offset = 0
-        const TableType = buffer.readstring(Value, Offset, #TABLE_FOOTER)
-        if TableType == TABLE_FOOTER then
-            return {}, #TABLE_FOOTER
-        end
+        return CustomEnum:GetEnum(Name):GetById(Id) or CustomEnum.UNKNOWN, Length + 2
+    -- elseif Type == "Table" then
+    --     const TableType = buffer.readstring(Value, Offset, #TABLE_FOOTER)
+    --     if TableType == TABLE_FOOTER then
+    --         return {}, #TABLE_FOOTER
+    --     end
 
-        const IsArray = TableType == ARRAY_HEADER
-        local Result = {}
-        Offset += (IsArray and #ARRAY_HEADER or #DICTIONARY_HEADER)
-        while true do
-            const NextType = buffer.readstring(Value, Offset, 2)
-            if NextType == TABLE_FOOTER then
-                Offset += #TABLE_FOOTER
-                break
-            end
+    --     const IsArray = TableType == ARRAY_HEADER
+    --     local Result = {}
+    --     Offset += (IsArray and #ARRAY_HEADER or #DICTIONARY_HEADER)
+    --     while true do
+    --         const NextType = buffer.readstring(Value, Offset, 2)
+    --         if NextType == TABLE_FOOTER then
+    --             Offset += #TABLE_FOOTER
+    --             break
+    --         end
 
-            local Key;
-            if not IsArray then
-                const IndexTypeId = buffer.readu8(Value, Offset)
-                const IndexType = PropertyTypes:GetTypeFromId(IndexTypeId)
-                Offset += 1
+    --         local Key;
+    --         if not IsArray then
+    --             const IndexTypeId = buffer.readu8(Value, Offset)
+    --             const IndexType = PropertyTypes:GetTypeFromId(IndexTypeId)
+    --             Offset += 1
 
-                const _Key, Length = Compressor:DecompressValue(IndexType, Value)
-                Offset += Length
-                Key = _Key
-            end
+    --             const _Key, Length = Compressor:DecompressValue(IndexType, Value, Offset)
+    --             Offset += Length
+    --             Key = _Key
+    --         end
 
-            const ValueTypeId = buffer.readu8(Value, Offset)
-            const ValueType = PropertyTypes:GetTypeFromId(ValueTypeId)
-            Offset += 1
+    --         const ValueTypeId = buffer.readu8(Value, Offset)
+    --         const ValueType = PropertyTypes:GetTypeFromId(ValueTypeId)
+    --         Offset += 1
 
-            const Val, Length = Compressor:DecompressValue(ValueType, Value)
-            Offset += Length
+    --         const Val, Length = Compressor:DecompressValue(ValueType, Value, Offset)
+    --         Offset += Length
 
-            Result[Key or #Result + 1] = Val
-        end
+    --         Result[Key or #Result + 1] = Val
+    --     end
 
-        return Result, Offset
+    --     return Result, Offset
     else
         Logger:Error(`Tried decompressing unsupported value type: {Type}`)
     end
@@ -277,7 +271,7 @@ function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject)
     
     local Offset = #OBJECT_HEADER + 2
     for _, v in Buffers do
-        buffer.copy(v, 0, Compressed, Offset)
+        buffer.copy(Compressed, Offset, v, 0)
         Offset += buffer.len(v)
     end
 
@@ -313,7 +307,7 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
             Logger:Error(`Tried decompressing object with invalid property id: {PropertyId}`)
         end
 
-        const Value, Length = Compressor:DecompressValue(Property.Type, CompressedObj)
+        const Value, Length = Compressor:DecompressValue(Property.Type, CompressedObj, Offset)
         Offset += Length
 
         Obj.Properties[PropertyId] = Value
@@ -331,12 +325,16 @@ function Compressor:CompressMetadata(Metadata: DatabaseTypes.Metadata): buffer
             continue
         end
 
+        const ValueBuffer = Compressor:CompressValue(Prop.Type, Prop.Value)
+        if not ValueBuffer then
+            continue
+        end
+
         const IdBuffer = buffer.create(2)
         buffer.writeu16(IdBuffer, 0, Prop.Parent)
         table.insert(Buffers, IdBuffer)
         Size += 2
-
-        const ValueBuffer = Compressor:CompressValue(Prop.Type, Prop.Value)
+        
         table.insert(Buffers, ValueBuffer)
         Size += buffer.len(ValueBuffer)
     end
@@ -349,7 +347,7 @@ function Compressor:CompressMetadata(Metadata: DatabaseTypes.Metadata): buffer
 
     local Offset = #METADATA_HEADER + 12
     for _, v in Buffers do
-        buffer.copy(v, 0, Compressed, Offset)
+        buffer.copy(Compressed, Offset, v, 0)
         Offset += buffer.len(v)
     end
 
@@ -383,7 +381,7 @@ function Compressor:DecompressMetadata(CompressedMetadata: buffer): DatabaseType
             Logger:Error(`Tried decompressing metadata with invalid property id: {PropertyId}`)
         end
 
-        const Value, ValLength = Compressor:DecompressValue(Property.Type, CompressedMetadata)
+        const Value, ValLength = Compressor:DecompressValue(Property.Type, CompressedMetadata, Offset)
         Offset += ValLength
 
         const Prop = Properties.new(Property) :: PropertyTypes.Property<any>
@@ -398,7 +396,7 @@ end
 function Compressor:PackBuffers(Buffers: {buffer}): buffer
     local Size = 0
     for _, v in Buffers do
-        Size += buffer.len(v)
+        Size += 4 + buffer.len(v)
     end
 
     const Pack = buffer.create(Size + #PACK_HEADER + #PACK_FOOTER)
@@ -410,7 +408,7 @@ function Compressor:PackBuffers(Buffers: {buffer}): buffer
         buffer.writeu32(Pack, Offset, Length)
         Offset += 4
 
-        buffer.copy(v, 0, Pack, Offset)
+        buffer.copy(Pack, Offset, v, 0)
         Offset += Length
     end
 
@@ -418,14 +416,14 @@ function Compressor:PackBuffers(Buffers: {buffer}): buffer
     return Pack
 end
 
-function Compressor:UnpackBuffers(PackedBuffers: buffer, StartOffset: number?): {buffer}
-    StartOffset = StartOffset or 0
-    if not buffer.readstring(PackedBuffers, StartOffset :: number, #PACK_HEADER) then
+function Compressor:UnpackBuffers(PackedBuffers: buffer, Offset: number?): {buffer}
+    Offset = Offset or 0
+    if buffer.readstring(PackedBuffers, Offset, #PACK_HEADER) ~= PACK_HEADER then
         Logger:Error("Tried to unpack invalid buffer pack.")
     end
 
     const Unpacked = {}
-    local Offset = #PACK_HEADER
+    Offset += #PACK_HEADER
     while true do
         if buffer.readstring(PackedBuffers, Offset, #PACK_FOOTER) == PACK_FOOTER then
             Offset += #PACK_FOOTER
@@ -436,7 +434,7 @@ function Compressor:UnpackBuffers(PackedBuffers: buffer, StartOffset: number?): 
         Offset += 4
 
         const Slice = buffer.create(Length)
-        buffer.copy(PackedBuffers, Offset, Slice, 0)
+        buffer.copy(Slice, 0, PackedBuffers, Offset, Length)
         table.insert(Unpacked, Slice)
         Offset += Length
     end
@@ -453,7 +451,7 @@ function Compressor:CompressMetadatas(LastId: number, Metadatas: {DatabaseTypes.
     const Packed = Compressor:PackBuffers(Compressed)
     const Buffer = buffer.create(4 + buffer.len(Packed))
     buffer.writeu32(Buffer, 0, LastId)
-    buffer.copy(Packed, 0, Buffer, 4)
+    buffer.copy(Buffer, 4, Packed, 0)
     return Buffer
 end
 

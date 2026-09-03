@@ -131,8 +131,10 @@ Types.Ids = {
     CustomEnum = 7,
 }
 
+const F32_MAX = 3.4028235e+38
+
 const function FixNumber(Value: ValueFor<"Number">?, Constraints: ConstraintsFor<"Number">?)
-    if Constraints.Precision then
+    if Constraints.Precision and Constraints.Scale then
         const IntMin = math.round((Constraints.MinValue or 0) * Constraints.Scale)
         const IntPrecision = math.round(Constraints.Precision * Constraints.Scale)
         const IntValue = math.round(Value * Constraints.Scale)
@@ -218,23 +220,23 @@ function Types:FixValue<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraint
     elseif Type == "Color" then
         local TypedValue = (Value :: any) :: Color3
         TypedValue = Color3.fromRGB(
-            Types:FixValue("Number", TypedValue.R * 255, {
-                MinValue = math.clamp(Constraints.R and Constraints.R.MinValue or 0, 0, 255),
-                MaxValue = math.clamp(Constraints.R and Constraints.R.MaxValue or 0, 0, 255),
+            Types:FixValue("Number", math.floor(TypedValue.R * 255), {
+                MinValue = Constraints.R and Constraints.R.MinValue and math.clamp(Constraints.R.MinValue, 0, 255) or 0,
+                MaxValue = Constraints.R and Constraints.R.MaxValue and math.clamp(Constraints.R.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.R then Constraints.R.AllowDecimals else true,
                 Precision = if Constraints.R then Constraints.R.Precision else nil,
             }),
 
-            Types:FixValue("Number", TypedValue.G, {
-                MinValue = math.clamp(Constraints.G and Constraints.G.MinValue or 0, 0, 255),
-                MaxValue = math.clamp(Constraints.G and Constraints.G.MaxValue or 0, 0, 255),
+            Types:FixValue("Number", math.floor(TypedValue.G * 255), {
+                MinValue = Constraints.G and Constraints.G.MinValue and math.clamp(Constraints.G.MinValue, 0, 255) or 0,
+                MaxValue = Constraints.G and Constraints.G.MaxValue and math.clamp(Constraints.G.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.G then Constraints.G.AllowDecimals else true,
                 Precision = if Constraints.G then Constraints.G.Precision else nil,
             }),
             
-            Types:FixValue("Number", TypedValue.B, {
-                MinValue = math.clamp(Constraints.B and Constraints.B.MinValue or 0, 0, 255),
-                MaxValue = math.clamp(Constraints.B and Constraints.B.MaxValue or 0, 0, 255),
+            Types:FixValue("Number", math.floor(TypedValue.B * 255), {
+                MinValue = Constraints.B and Constraints.B.MinValue and math.clamp(Constraints.B.MinValue, 0, 255) or 0,
+                MaxValue = Constraints.B and Constraints.B.MaxValue and math.clamp(Constraints.B.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.B then Constraints.B.AllowDecimals else true,
                 Precision = if Constraints.B then Constraints.B.Precision else nil,
             })
@@ -244,23 +246,23 @@ function Types:FixValue<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraint
     elseif Type == "Vector" then
         local TypedValue = (Value :: any) :: Vector3
         TypedValue = Vector3.new(
-            Types:FixValue("Number", TypedValue.X * 255, {
-                MinValue = math.clamp(Constraints.X and Constraints.X.MinValue or 0, 0, 255),
-                MaxValue = math.clamp(Constraints.X and Constraints.X.MaxValue or 0, 0, 255),
+            Types:FixValue("Number", TypedValue.X, {
+                MinValue = Constraints.X and Constraints.X.MinValue and math.clamp(Constraints.X.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
+                MaxValue = Constraints.X and Constraints.X.MaxValue and math.clamp(Constraints.X.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
                 AllowDecimals = if Constraints.X then Constraints.X.AllowDecimals else true,
                 Precision = if Constraints.X then Constraints.X.Precision else nil,
             }),
 
             Types:FixValue("Number", TypedValue.Y, {
-                MinValue = math.clamp(Constraints.Y and Constraints.Y.MinValue or 0, 0, 255),
-                MaxValue = math.clamp(Constraints.Y and Constraints.Y.MaxValue or 0, 0, 255),
+                MinValue = Constraints.Y and Constraints.Y.MinValue and math.clamp(Constraints.Y.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
+                MaxValue = Constraints.Y and Constraints.Y.MaxValue and math.clamp(Constraints.Y.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
                 AllowDecimals = if Constraints.Y then Constraints.Y.AllowDecimals else true,
                 Precision = if Constraints.Y then Constraints.Y.Precision else nil,
             }),
             
             Types:FixValue("Number", TypedValue.Z, {
-                MinValue = math.clamp(Constraints.Z and Constraints.Z.MinValue or 0, 0, 255),
-                MaxValue = math.clamp(Constraints.Z and Constraints.Z.MaxValue or 0, 0, 255),
+                MinValue = Constraints.Z and Constraints.Z.MinValue and math.clamp(Constraints.Z.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
+                MaxValue = Constraints.Z and Constraints.Z.MaxValue and math.clamp(Constraints.Z.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
                 AllowDecimals = if Constraints.Z then Constraints.Z.AllowDecimals else true,
                 Precision = if Constraints.Z then Constraints.Z.Precision else nil,
             })
@@ -272,28 +274,35 @@ function Types:FixValue<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraint
     return Value
 end
 
+local ReverseIds;
 function Types:GetTypeFromId(Id: number): PropertyType?
-    for i, v in Types.Ids do
-        if v == Id then
-            return i
+    if not ReverseIds then
+        const Ids = {}
+        for i, v in Types.Ids do
+            Ids[v] = i
         end
+        ReverseIds = Ids
     end
 
-    return nil
+    return ReverseIds[Id]
 end
 
 function Types:GetTypeId(Type: PropertyType): number?
     return Types.Ids[Type]
 end
 
+local ReverseMap;
 function Types:GetTypeFromValue(Value: any): PropertyType?
-    for i, v in Types.Map do
-        if v == typeof(Value) then
-            return i
+    const TypeOf = typeof(Value)
+    if not ReverseMap then
+        const Map = {}
+        for i, v in Types.Map do
+            Map[v] = i
         end
+        ReverseMap = Map
     end
 
-    return nil
+    return ReverseMap[TypeOf]
 end
 
 return Types

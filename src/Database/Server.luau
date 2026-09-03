@@ -12,7 +12,7 @@ export type MetadataValue = Types.MetadataValue
 export type ValueTransformer<T> = Types.ValueTransformer<T>
 export type Fields<T> = Types.Fields<T>
 export type Metadata = Types.Metadata
-export type DatabaseConfig = Types.DatabaseConfig
+export type DatabaseConfig<T> = Types.DatabaseConfig<T>
 export type Cache = Types.Cache
 export type Database<T> = Types.Database<T>
 
@@ -25,9 +25,9 @@ const function GetCacheBlock(Page: number): number
 	return (Page - 1) // CACHE_PAGE_COUNT
 end
 
-const function GetCacheKey(Cache: string, Page: number): string
+const function GetCacheKey(Cache: string, Generation: number, Page: number): string
 	const Block = GetCacheBlock(Page)
-	return `{Cache}:{Block}`
+	return `{Cache}:{Generation}:{Block}`
 end
 
 const function FetchMetadatas<T>(self: Database<T>)
@@ -39,7 +39,7 @@ const function FetchMetadatas<T>(self: Database<T>)
     return Metadatas
 end
 
-const function GetCacheStorage(Metadatas, Sort, Page, PageSize): buffer
+const function GetCacheStorage(Metadatas, Sort, Page, PageSize): {[number]: buffer}
     const Sorted = table.clone(Metadatas)
 	table.sort(Sorted, Sort)
 
@@ -56,15 +56,15 @@ const function GetCacheStorage(Metadatas, Sort, Page, PageSize): buffer
 		const StartIndex = (Index - 1) * PageSize + 1
 		const EndIndex = math.min(Index * PageSize, #Sorted)
 
-		Pages[Index] = table.move(
+		Pages[Index] = Compressor:CompressMetadatas(0, table.move(
 			Sorted,
 			StartIndex,
 			EndIndex,
 			1, {}
-		)
+		))
 	end
 
-	return Compressor:CompressMetadatas(0, Pages)
+	return Pages
 end
 
 const function __register_cache<T>(self: Database<T>, Name: string, Sort: (A: Metadata, B: Metadata) -> boolean, Expiration: number?, PageSize: number?)
@@ -82,22 +82,26 @@ end
 const function __update_cache<T>(self: Database<T>, Cache: string, Page: number)
     const Info = self.Caches[Cache]
 	if not Info then
-		return {}
+		return
 	end
 
 	const Packed = FetchMetadatas(self)
 	if not Packed then
-		return {}
+		return
 	end
 
 	const _, Metadatas = Compressor:DecompressMetadatas(Packed)
 	const Pages = GetCacheStorage(Metadatas, Info.Sort, Page, Info.PageSize)
-	Try(5, self.MemoryStore.SetAsync, self.MemoryStore, GetCacheKey(Cache, Page), Pages, Info.Expiration)
+	Try(5, self.MemoryStore.SetAsync, self.MemoryStore, GetCacheKey(Cache, self.Generation, Page), Pages, Info.Expiration)
 	return Pages
 end
 
+const function __invalidate_cache<T>(self: Database<T>)
+    self.Generation += 1
+end
+
 const function __get_cache<T>(self: Database<T>, Cache: string, Page: number)
-    const Key = GetCacheKey(Cache, Page)
+    const Key = GetCacheKey(Cache, self.Generation, Page)
 	local Success, Pages = Try(5, self.MemoryStore.GetAsync, self.MemoryStore, Key)
 	if not Success then
 		return {}
@@ -109,9 +113,13 @@ const function __get_cache<T>(self: Database<T>, Cache: string, Page: number)
 			return {}
 		end
 	end
+    
+    if Pages[Page] then
+        const _, Decompressed = Compressor:DecompressMetadatas(Pages[Page])
+        return Decompressed
+    end
 
-    const Decompressed = Compressor:DecompressMetadatas(Pages)
-	return Decompressed[Page] or {}
+	return {}
 end
 
 const function __get<T>(self: Database<T>, Cache: string, Page: number?)
@@ -142,6 +150,10 @@ const function __create<T>(self: Database<T>): boolean
         return Compressor:CompressMetadatas(LastId, Metadatas) or Old
     end)
 
+    if Success then
+        __invalidate_cache(self)
+    end
+
     return Success
 end
 
@@ -171,6 +183,9 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[Properties.P
     local Found = false
     const Success = Try(5, self.DataStore.UpdateAsync, self.DataStore, "Metadatas", function(Old)
         local LastId, Metadatas = 0, {}
+        const CurrentValid = table.clone(Valid)
+        Found = false
+
         if Old then
             LastId, Metadatas = Compressor:DecompressMetadatas(Old)
         end
@@ -185,24 +200,25 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[Properties.P
                     continue
                 end
 
-                if Valid[Prop.Id] ~= nil then
-                    const Worked = Prop:Set(Valid[Prop.Id])
-                    Valid[Prop.Id] = nil
+                if CurrentValid[Prop.Parent] ~= nil then
+                    const Worked = Prop:Set(CurrentValid[Prop.Parent])
+                    CurrentValid[Prop.Parent] = nil
                     
                     if Worked then
                         Found = true
                     end
                 end
+            end
 
-                -- New properties
-                for Id, Value in Valid do
-                    const NewProperty = Properties.new(Id)
-                    const Worked = NewProperty:Set(Value)
-                    Valid[Id] = nil
+            -- New properties
+            for Id, Value in CurrentValid do
+                const NewProperty = Properties.new(Id)
+                const Worked = NewProperty:Set(Value)
+                CurrentValid[Id] = nil
 
-                    if Worked then
-                        Found = true
-                    end
+                if Worked then
+                    Found = true
+                    table.insert(Metadata, NewProperty)
                 end
             end
 
@@ -212,6 +228,10 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[Properties.P
         return Found and Compressor:CompressMetadatas(LastId, Metadatas) or Old
     end)
 
+    if Found and Success then
+        __invalidate_cache(self)
+    end
+
     return Found and Success
 end
 
@@ -220,13 +240,14 @@ const function __delete<T>(self: Database<T>, Id: number): boolean
         return false
     end
 
+    local Found = false
     const Success = Try(5, self.DataStore.UpdateAsync, self.DataStore, "Metadatas", function(Old)
         local LastId, Metadatas = 0, {}
         if Old then
             LastId, Metadatas = Compressor:DecompressMetadatas(Old)
         end
 
-        local Found = false
+        Found = false
         for i, Metadata in Metadatas do
             if Metadata.Id == Id then
                 table.remove(Metadatas, i)
@@ -238,21 +259,29 @@ const function __delete<T>(self: Database<T>, Id: number): boolean
         return Found and Compressor:CompressMetadatas(LastId, Metadatas) or Old
     end)
 
-    return Success
+    if Found and Success then
+        __invalidate_cache(self)
+    end
+
+    return Found and Success
 end
 
-function Database.new<T>(Config: DatabaseConfig): Database<T>
+function Database.new<T>(Config: DatabaseConfig<T>): Database<T>
     const db = {}
     db.Key = Config.Key
     db.InitialMetadata = Config.InitialMetadata
 
     db.DataStore = DataStoreService:GetDataStore(db.Key)
     db.MemoryStore = MemoryStoreService:GetHashMap(db.Key)
+
+    db.Generation = 0
     db.Caches = {}
 
     db.RegisterCache = __register_cache
     db.Create = __create
     db.Get = __get
+    db.Edit = __edit
+    db.Delete = __delete
     
     return db
 end

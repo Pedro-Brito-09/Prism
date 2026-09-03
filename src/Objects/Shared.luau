@@ -4,19 +4,13 @@ const Types = require("./Types")
 
 return {
     GetProperty = function(self: Types.Object, Reference: PropertyTypes.PropertyIdentifier | string): PropertyTypes.Property?
-        for _, v in self.Properties do
-            if v.Name == Reference or v.Parent == Reference then
-                return v
-            end
+        if type(Reference) == "number" then
+            return self.Properties[Reference]
         end
 
-        return
-    end,
-
-    FindObject = function(Workspace: {Types.Object}, RuntimeId: number): Types.Object?
-        for _, Obj in Workspace do
-            if Obj.RuntimeId == RuntimeId then
-                return Obj
+        for _, v in self.Properties do
+            if v.Name == Reference then
+                return v
             end
         end
 

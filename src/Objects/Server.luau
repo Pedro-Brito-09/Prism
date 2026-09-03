@@ -12,13 +12,14 @@ export type InstanceLinkRegistry = Types.InstanceLinkRegistry
 export type InstanceLink = Types.InstanceLink
 export type ObjectRegistry = Types.ObjectRegistry
 export type ObjectConfig = Types.ObjectConfig
+export type RuntimeId = Types.RuntimeId
 export type Object = Types.Object
 
 const Objects = {}
 local RuntimeCounter = 0
 
 const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
-const Workspace: {Object} = {}
+const Workspace: {[RuntimeId]: Object} = {}
 const LinkedPool: {
     [Instance]: {
         Connection: RBXScriptConnection,
@@ -74,10 +75,10 @@ const function GetNextFreeId(): number
         end
     end
 
-    return MinNextFree + 1 or 1
+    return (MinNextFree or 0) + 1 or 1
 end
 
-const function GeneratePropertyMap(Props: {Properties.PropertyIdentifier}): {[Properties.PropertyIdentifier]: Properties.Property}
+const function GeneratePropertyMap(Props: {Properties.PropertyIdentifier}): {[Properties.PropertyIdentifier]: Properties.Property<any>}
     const Map = {}
     for _, Identifier in Props do
         Map[Identifier] = Properties.new(Identifier)
@@ -86,14 +87,15 @@ const function GeneratePropertyMap(Props: {Properties.PropertyIdentifier}): {[Pr
     return Map
 end
 
-const function GenerateLinksMap(Instance: Instance?, Links: {InstanceLinkRegistry}?, Props: {[Properties.PropertyIdentifier]: Properties.Property}): {[Properties.PropertyIdentifier]: InstanceLink}?
+const function GenerateLinksMap(Instance: Instance?, Links: {InstanceLinkRegistry}?, Props: {[Properties.PropertyIdentifier]: Properties.Property<any>}): {[Properties.PropertyIdentifier]: InstanceLink}?
     const Map = {}
     if not Links or not Instance then
         return
     end
 
     local Count = 0
-    for _, Link in Links do
+    for _, _Link in Links do
+        local Link = table.clone(_Link)
         const Prop = Props[Link.Property]
         if not Prop then
             Logger:Warn(`Invalid link reference. Property {Link.Property} is not registered for this object.`)
@@ -105,7 +107,7 @@ const function GenerateLinksMap(Instance: Instance?, Links: {InstanceLinkRegistr
             continue
         end
 
-        const Inst = Link.Descendant or Instance
+        const Inst = Link.Descendant and Instance:FindFirstChild(Link.Descendant, true) or Instance
         if Link.Type == "Property" then
             local InstProps = ReflectionService:GetPropertiesOfClass(Inst.ClassName)
             local Found = false
@@ -113,10 +115,10 @@ const function GenerateLinksMap(Instance: Instance?, Links: {InstanceLinkRegistr
                 if v.Name == Link.Name then
                     if v.Type ~= Prop.Type then
                         Logger:Warn(`Invalid link reference. {Inst.ClassName}'s property {Link.Name} is of type {v.Type} but you registered yours as {Prop.Type}.`)
-                        continue
+                        break
                     end
 
-                    Inst[Link.Name] = Prop:Get()
+                    Inst[Link.Name] = Prop.Value
                     Link.OnChange = Prop.Changed:Connect(function(Value)
                         Inst[Link.Name] = Value
                     end)
@@ -131,7 +133,7 @@ const function GenerateLinksMap(Instance: Instance?, Links: {InstanceLinkRegistr
                 continue
             end
         elseif Link.Type == "Attribute" then
-            Inst:SetAttribute(Link.Name, Prop:Get())
+            Inst:SetAttribute(Link.Name, Prop.Value)
             Link.OnChange = Prop.Changed:Connect(function(Value)
                 Inst:SetAttribute(Link.Name, Value)
             end)
@@ -165,7 +167,7 @@ const function __setter(self: Object, Reference: Properties.PropertyIdentifier |
 
     const Success = Prop:Set(Value)
     if Success then
-        Network.PropertyChanged:FireAll(self.RuntimeId, Prop.Parent, Value)
+        Network.PropertyChanged:FireAll(self.RuntimeId, Prop.Parent, Prop.Value)
     end
 
     return Success
@@ -176,10 +178,9 @@ const function __destroy(self: Object)
         self.Instance:Destroy()
     end
 
-    const Position = table.find(Workspace, self)
-    if Position then
-        table.remove(Workspace, Position)
-        Network.ObjectRemoved:FireAll(self)
+    if Workspace[self.RuntimeId] then
+        Workspace[self.RuntimeId] = nil
+        Network.ObjectRemoved:FireAll(self.RuntimeId)
     end
 
     table.clear(self)
@@ -218,7 +219,7 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
     return Identifier
 end
 
-function Objects:GetWorkspace(): {Object}
+function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end
 
@@ -235,18 +236,18 @@ function Objects.new(Reference: ObjectRegistry | ObjectIdentifier): Object
     local Ref: ObjectRegistry
     if TypeOf == "number" then
         if not Registered[Reference :: ObjectIdentifier] then
-            error(`[CREATE UTILS] Invalid object reference.`)
+            Logger:Error(`Invalid object reference.`)
         end
 
         Ref = Registered[Reference :: ObjectIdentifier]
     elseif TypeOf == "table" then
         Ref = Reference :: ObjectRegistry
     else
-        error(`[CREATE UTILS] Invalid object reference.`)
+        Logger:Error(`Invalid object reference.`)
     end
 
     if not Ref or not Ref.Id or not Registered[Ref.Id] then
-        error(`[CREATE UTILS] Invalid object reference.`)
+        Logger:Error(`Invalid object reference.`)
     end
 
     RuntimeCounter += 1
@@ -257,12 +258,12 @@ function Objects.new(Reference: ObjectRegistry | ObjectIdentifier): Object
     Obj.Name = Ref.Name
     Obj.Properties = GeneratePropertyMap(Ref.Properties)
     Obj.Instance = Ref.Instance
-    Obj.Links = GenerateLinksMap(Ref.Instance, Ref.Links, Obj.Properties)
+    Obj.Links = GenerateLinksMap(Ref.Instance, (Ref.Links), Obj.Properties)
     Obj.Get = __getter
     Obj.Set = __setter
     Obj.Destroy = __destroy
 
-    table.insert(Workspace, Obj)
+    Workspace[Obj.RuntimeId] = Obj
     Network.ObjectAdded:FireAll(Obj)
     return Obj
 end
@@ -288,8 +289,8 @@ function Objects.fromCompression(CompressedObj: buffer): Object?
     return Obj
 end
 
-Network.SetProperty.OnInvoke = function(ObjId: ObjectIdentifier, PropId: Properties.PropertyIdentifier, Value: any?): boolean
-    const Obj = Shared.FindObject(Workspace, ObjId)
+Network.SetProperty.OnInvoke = function(Plr: Player, ObjId: ObjectIdentifier, PropId: Properties.PropertyIdentifier, Value: any?): boolean
+    const Obj = Workspace[ObjId]
     if not Obj then
         return false
     end
@@ -300,6 +301,16 @@ Network.SetProperty.OnInvoke = function(ObjId: ObjectIdentifier, PropId: Propert
     end
 
     return Prop:Set(Value)
+end
+
+Network.Destroy.OnInvoke = function(Plr: Player, ObjId: ObjectIdentifier): boolean
+    const Obj = Workspace[ObjId]
+    if not Obj then
+        return false
+    end
+
+    Obj:Destroy()
+    return true
 end
 
 return Objects

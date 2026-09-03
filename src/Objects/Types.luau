@@ -1,11 +1,12 @@
 const PropertyTypes = require("../Properties/Types")
 
 export type ObjectIdentifier = number
+export type RuntimeId = number
 
 export type InstanceLinkRegistry = {
     Property: PropertyTypes.PropertyIdentifier,
     Type: "Property" | "Attribute",
-    Descendant: Instance?,
+    Descendant: string?,
     Name: string,
 }
 
@@ -32,7 +33,7 @@ export type ObjectConfig = {
 }
 
 export type Object = {
-    RuntimeId: number,
+    RuntimeId: RuntimeId,
     Parent: ObjectIdentifier,
     Name: string,
     Properties: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property},

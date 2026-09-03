@@ -10,7 +10,7 @@ function Logger:Warn(Message: string)
 end
 
 function Logger:Error(Message: string)
-    error(`{PREFIX} {Message}`)
+    error(`{PREFIX} {Message}`, 2)
 end
 
 return Logger

@@ -5,12 +5,13 @@ const Types = require("./Types")
 
 export type ObjectIdentifier = Types.ObjectIdentifier
 export type ObjectRegistry = Types.ObjectRegistry
+export type RuntimeId = Types.RuntimeId
 export type Object = Types.Object
 
 const Objects = {}
 
 const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
-const Workspace: {Object} = {}
+const Workspace: {[RuntimeId]: Object} = {}
 
 const function __getter(self: Object, Reference: PropertyTypes.PropertyIdentifier | string): any?
     local Prop = Shared.GetProperty(self, Reference)
@@ -30,7 +31,11 @@ const function __setter(self: Object, Reference: PropertyTypes.PropertyIdentifie
     return Network.SetProperty:Invoke(self.RuntimeId, Prop.Parent, Value)
 end
 
-function Objects:GetWorkspace(): {Object}
+const function __destroy(self: Object): boolean
+    return Network.Destroy:Invoke(self.RuntimeId)
+end
+
+function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end
 
@@ -46,17 +51,17 @@ Network.ObjectRegistered:Connect(function(Obj)
     Registered[Obj.Id] = Obj
 end)
 
-Network.ObjectAdded:Connect(function(Obj)
-    table.insert(Workspace, Obj)
+Network.ObjectAdded:Connect(function(Obj: Object)
+    Obj.Get = __getter
+    Obj.Set = __setter
+    Obj.Destroy = __destroy
+    Workspace[Obj.RuntimeId] = Obj
 end)
 
 Network.ObjectRemoved:Connect(function(ObjId: number)
-    const Obj = Shared.FindObject(Workspace, ObjId)
+    const Obj = Workspace[ObjId]
     if Obj then
-        const Position = table.find(Workspace, Obj)
-        if Position then
-            table.remove(Workspace, Position)
-        end
+        Workspace[ObjId] = nil
 
         table.clear(Obj)
         Obj.Get = Shared.__destroyed_noop
@@ -66,7 +71,7 @@ Network.ObjectRemoved:Connect(function(ObjId: number)
 end)
 
 Network.PropertyChanged:Connect(function(ObjId: number, Property: PropertyTypes.PropertyIdentifier, Value: any?)
-    const Obj = Shared.FindObject(Workspace, ObjId)
+    const Obj = Workspace[ObjId]
     if not Obj then
         return
     end

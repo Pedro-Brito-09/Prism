@@ -11,11 +11,11 @@ const Registered = {}
 
 local Event, Function; if IS_SERVER then
     Event = Instance.new("RemoteEvent")
-    Event.Name = "__creator_utils_event"
+    Event.Name = "__loom_event"
     Event.Parent = ReplicatedStorage
 
     Function = Instance.new("RemoteFunction")
-    Function.Name = "__creator_utils_function"
+    Function.Name = "__loom_function"
     Function.Parent = ReplicatedStorage
 
     Event.OnServerEvent:Connect(function(Plr: Player, Name: string, ...)
@@ -24,8 +24,8 @@ local Event, Function; if IS_SERVER then
             return
         end
 
-        for _, Connec in Entry.Connections do
-            Connec(Plr, ...)
+        for _, Connec in table.clone(Entry.Connections) do
+            task.spawn(Connec, Plr, ...)
         end
     end)
 
@@ -38,12 +38,12 @@ local Event, Function; if IS_SERVER then
         return Entry.OnInvoke(Plr, ...)
     end
 else
-    Event = ReplicatedStorage:WaitForChild("__creator_utils_event", 10)
+    Event = ReplicatedStorage:WaitForChild("__loom_event", 10)
     if not Event then
         Logger:Error("Failed to retrieve networking remote event.")
     end
 
-    Function = ReplicatedStorage:WaitForChild("__creator_utils_function", 10)
+    Function = ReplicatedStorage:WaitForChild("__loom_function", 10)
     if not Function then
         Logger:Error("Failed to retrieve networking remote function.")
     end
@@ -54,8 +54,8 @@ else
             return
         end
 
-        for _, Connec in Entry.Connections do
-            Connec(...)
+        for _, Connec in table.clone(Entry.Connections) do
+            task.spawn(Connec, ...)
         end
     end)
 
@@ -72,6 +72,7 @@ end
 const function __fire_all(self, ...)
     if not IS_SERVER then
         Event:FireServer(self.Name, ...)
+        return
     end
     
     Event:FireAllClients(self.Name, ...)
@@ -92,7 +93,7 @@ const function __fire(self, First, ...)
 
             if IsOnlyPlayers then
                 for _, Plr in First do
-                    Event:FireClient(First, self.Name, ...)
+                    Event:FireClient(Plr, self.Name, ...)
                 end
             else
                 Event:FireAllClients(self.Name, ...)
@@ -120,6 +121,8 @@ const function __invoke(self, First, ...)
     if Result[1] == ENTRY_NOT_FOUND then
         Logger:Error(`Failed to invoke {self.Name}. OnInvoke is not registered on the {IS_SERVER and "specified client" or "server"}.`)
     end
+
+    return unpack(Result)
 end
 
 const function __connect(self, Callback: (...any) -> ())
@@ -144,6 +147,7 @@ function Networking:Register(Name: string)
     Net.FireAll = __fire_all
     Net.Invoke = __invoke
     Net.Connect = __connect
+    Registered[Name] = Net
     return Net
 end
 

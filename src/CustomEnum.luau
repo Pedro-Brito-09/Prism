@@ -15,14 +15,14 @@ export type CustomEnum<T> = {
     Name: EnumName,
     Options: {RegisteredOption<T>},
 
-    GetById: (self: CustomEnum<T>, Id: number) -> CustomEnum<T>?,
-    GetByValue: (self: CustomEnum<T>, Value: T) -> CustomEnum<T>?,
+    GetById: (self: CustomEnum<T>, Id: number) -> RegisteredOption<T>?,
+    GetByValue: (self: CustomEnum<T>, Value: T) -> RegisteredOption<T>?,
 }
 
 const CustomEnum = {}
 const Registered: {[EnumName]: CustomEnum<any>}  = {}
 
-const function __get_by_id<T>(self: CustomEnum<T>, Id: number): CustomEnum<T>?
+const function __get_by_id<T>(self: CustomEnum<T>, Id: number): RegisteredOption<T>?
     for _, v in self.Options do
         if v.Id == Id then
             return v
@@ -32,7 +32,7 @@ const function __get_by_id<T>(self: CustomEnum<T>, Id: number): CustomEnum<T>?
     return nil
 end
 
-const function __get_by_value<T>(self: CustomEnum<T>, Value: T): CustomEnum<T>?
+const function __get_by_value<T>(self: CustomEnum<T>, Value: T): RegisteredOption<T>?
     for _, v in self.Options do
         if v.Value == Value then
             return v
@@ -88,6 +88,6 @@ end
 
 CustomEnum.UNKNOWN = CustomEnum:Register("Unknown", {
     Unknown = 1,
-})
+}).Options[1]
 
 return CustomEnum

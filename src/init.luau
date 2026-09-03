@@ -15,7 +15,7 @@ end
 
 const Loom = {}
 
-Loom.Properties = GetServerModule("./src/Properties/Server")
-Loom.Objects = GetSharedModule("./src/Objects")
+Loom.Properties = GetServerModule("./Properties/Server")
+Loom.Objects = GetSharedModule("./Objects")
 
 return Loom

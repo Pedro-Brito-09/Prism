@@ -7,4 +7,5 @@ return {
     PropertyChanged = Networking:Register("Objects.PropertyChanged"),
 
     SetProperty = Networking:Register("Objects.SetProperty"),
+    Destroy = Networking:Register("Objects.Destroy")
 }

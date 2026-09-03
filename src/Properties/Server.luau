@@ -19,7 +19,7 @@ const function GetNextFreeId(): number
         end
     end
 
-    return MinNextFree + 1 or 1
+    return (MinNextFree or 0) + 1 or 1
 end
 
 const function __setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): boolean
@@ -46,17 +46,17 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     if Config.CustomId then
         local Number = tonumber(Config.CustomId)
         if not Number then
-            warn(`[CREATE UTILS] Custom property id needs to be an integer, got {Config.CustomId}. Will be using the next free id instead.`)
+            Logger:Warn(`Custom property id needs to be an integer, got {Config.CustomId}. Will be using the next free id instead.`)
             Config.CustomId = nil
         elseif Number ~= math.floor(Number) then
-            warn(`[CREATE UTILS] Custom property id needs to be an integer, got {Config.CustomId}. Will be using {math.floor(Number)} instead.`)
+            Logger:Warn(`Custom property id needs to be an integer, got {Config.CustomId}. Will be using {math.floor(Number)} instead.`)
             Config.CustomId = math.floor(Number)
         end
     end
 
     const Identifier = Config.CustomId or GetNextFreeId()
     if Registered[Identifier] then
-        warn(`[CREATE UTILS] There's already a property registered with id {Identifier}.`)
+        Logger:Warn(`There's already a property registered with id {Identifier}.`)
         return
     end
 
@@ -114,6 +114,7 @@ function Properties.new(Reference: PropertyRegistry<any> | PropertyIdentifier): 
     Prop.Parent = Ref.Id
     Prop.Name = Ref.Name
     Prop.Type = Ref.Type
+    Prop.Constraints = Ref.Constraints
     Prop.DefaultValue = Ref.DefaultValue
     Prop.Value = Ref.DefaultValue
     Prop.Set = __setter

@@ -16,7 +16,7 @@ function Properties:GetRegistry(Identifier: PropertyIdentifier): PropertyRegistr
 end
 
 Network.PropertyRegistered:Connect(function(Prop)
-    Properties[Prop.Id] = Prop
+    Registered[Prop.Id] = Prop
 end)
 
 return Properties
