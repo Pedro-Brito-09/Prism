@@ -1,9 +1,43 @@
+--!strict
+-- Sharded metadata storage with a three tier cache.
+--
+-- Layout
+--
+-- {Key}:Manifest  small table: shard count and the id boundary of each sealed
+--                 shard. Boundaries only change when a shard seals.
+-- {Key}:1..N      compressed records. Shard k covers ids in
+--                 (Boundaries[k - 1], Boundaries[k]]. Only the last shard is
+--                 appended to.
+--
+-- Ids come from a monotonic counter, so a record never changes shard: when the
+-- tail shard approaches the value limit its boundary freezes and a new tail
+-- opens. Nothing is moved, merged or rebalanced, and sealing is a single write
+-- to the manifest, so there is no multi key transaction to get wrong.
+--
+-- This also removes the write contention of the old single key layout, where
+-- every edit in the game did UpdateAsync against the same key: read the whole
+-- corpus, decompress it, change one record, recompress, write it back. Edits to
+-- different shards no longer contend at all.
+--
+-- Cache tiers
+--
+-- 1. In process pages and shards, 90s.
+-- 2. MemoryStore pages, 90s. Absorbs cold servers so they do not all hit the
+--    DataStore at once. Pages rather than shards because a MemoryStore value
+--    caps at 32KB and a shard is measured in megabytes.
+-- 3. DataStore, the source of truth.
+--
+-- There is no cross server invalidation: a write is visible elsewhere within the
+-- expiration window. The writing server skips tier 2 for that window so it still
+-- reads its own writes, and repopulates the shared page as it goes.
+
 const MemoryStoreService = game:GetService("MemoryStoreService")
 const DataStoreService = game:GetService("DataStoreService")
 
 const PropertyTypes = require("../Properties/Types")
 const Properties = require("../Properties/Server")
 const Compressor = require("../Compressor")
+const Encoding = require("../Encoding")
 const Logger = require("../Logger")
 const Types = require("./Types")
 const Try = require("../Try")
@@ -12,154 +46,479 @@ export type MetadataValue = Types.MetadataValue
 export type ValueTransformer<T> = Types.ValueTransformer<T>
 export type Fields<T> = Types.Fields<T>
 export type Metadata = Types.Metadata
-export type DatabaseConfig<T> = Types.DatabaseConfig<T>
+export type Sort = Types.Sort
+export type Predicate = Types.Predicate
+export type Manifest = Types.Manifest
+export type CacheConfig = Types.CacheConfig
 export type Cache = Types.Cache
+export type Page = Types.Page
 export type Database<T> = Types.Database<T>
+
+const MANIFEST_KEY = "Manifest"
+const DEFAULT_EXPIRATION = 90
+const DEFAULT_PAGE_SIZE = 50
+const ATTEMPTS = 5
+
+-- DataStore caps a value at 4MB. Sealing at 3MB leaves room for the record that
+-- crosses the line to still fit.
+const DEFAULT_SHARD_LIMIT = 3 * 1024 * 1024
+
+-- A fresh table each time: returning one shared constant would let a caller
+-- mutating Records corrupt every later empty result.
+const function EmptyPage(): Page
+    return {Records = {}, HasMore = false}
+end
 
 const Database = {}
 
-const CACHE_RADIUS = 3
-const CACHE_PAGE_COUNT = CACHE_RADIUS * 2 + 1
-
-const function GetCacheBlock(Page: number): number
-	return (Page - 1) // CACHE_PAGE_COUNT
+const function ShardKey<T>(self: Database<T>, Index: number): string
+    return `{self.Key}:{Index}`
 end
 
-const function GetCacheKey(Cache: string, Generation: number, Page: number): string
-	const Block = GetCacheBlock(Page)
-	return `{Cache}:{Generation}:{Block}`
+const function PageKey<T>(self: Database<T>, Cache: string, Page: number): string
+    return `{self.Key}:{Cache}:{Page}`
 end
 
-const function FetchMetadatas<T>(self: Database<T>)
-    local Success, Metadatas = Try(5, self.DataStore.GetAsync, self.DataStore, "Metadatas")
-    if not Success then
-        return
+--=============================================================================
+-- Manifest
+--=============================================================================
+
+const function GetManifest<T>(self: Database<T>): Manifest
+    if self.Manifest and os.clock() < self.ManifestExpiry then
+        return self.Manifest
     end
 
-    return Metadatas
+    const Success, Stored = Try(ATTEMPTS, self.DataStore.GetAsync, self.DataStore, MANIFEST_KEY)
+    if not Success then
+        -- A stale manifest still addresses every existing shard correctly; only
+        -- a very recent seal would be missing from it.
+        return self.Manifest or {Count = 1, Boundaries = {}}
+    end
+
+    const Manifest: Manifest = if type(Stored) == "table"
+        then {Count = math.max(1, Stored.Count or 1), Boundaries = Stored.Boundaries or {}}
+        else {Count = 1, Boundaries = {}}
+
+    self.Manifest = Manifest
+    self.ManifestExpiry = os.clock() + self.Expiration
+    return Manifest
 end
 
-const function GetCacheStorage(Metadatas, Sort, Page, PageSize): {[number]: buffer}
-    const Sorted = table.clone(Metadatas)
-	table.sort(Sorted, Sort)
+-- Which shard owns an id. Boundaries are ascending, so this is a walk over a
+-- handful of numbers and costs no request.
+const function ShardForId(Manifest: Manifest, Id: number): number
+    for Index, Boundary in Manifest.Boundaries do
+        if Id <= Boundary then
+            return Index
+        end
+    end
 
-	const Block = GetCacheBlock(Page)
-
-	const FirstPage = Block * CACHE_PAGE_COUNT + 1
-	const LastPage = math.min(
-		FirstPage + CACHE_PAGE_COUNT - 1,
-		math.ceil(#Sorted / PageSize)
-	)
-
-	const Pages = {}
-	for Index = FirstPage, LastPage do
-		const StartIndex = (Index - 1) * PageSize + 1
-		const EndIndex = math.min(Index * PageSize, #Sorted)
-
-		Pages[Index] = Compressor:CompressMetadatas(0, table.move(
-			Sorted,
-			StartIndex,
-			EndIndex,
-			1, {}
-		))
-	end
-
-	return Pages
+    return Manifest.Count
 end
 
-const function __register_cache<T>(self: Database<T>, Name: string, Sort: (A: Metadata, B: Metadata) -> boolean, Expiration: number?, PageSize: number?)
+-- Freezes the tail shard at its current highest id and opens a new one. A single
+-- manifest write, so a reader either sees the old shard set or the new one.
+const function Seal<T>(self: Database<T>, LastId: number)
+    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, MANIFEST_KEY, function(Old)
+        const Count = if type(Old) == "table" then math.max(1, Old.Count or 1) else 1
+        const Boundaries = if type(Old) == "table" then (Old.Boundaries or {}) else {}
+
+        -- Idempotent: if the newest boundary already covers this id, another
+        -- server sealed the same tail first and there is nothing to do.
+        const Newest = Boundaries[#Boundaries]
+        if Newest and Newest >= LastId then
+            return nil
+        end
+
+        const Next = table.clone(Boundaries)
+        table.insert(Next, LastId)
+        return {Count = Count + 1, Boundaries = Next}
+    end)
+
+    if Success then
+        self.Manifest = nil
+        self.ManifestExpiry = 0
+        Logger:Log(`Sealed shard for {self.Key} at id {LastId}.`)
+    end
+end
+
+--=============================================================================
+-- Shards
+--=============================================================================
+
+-- Returns Ok separately from an empty result. A shard that exists but fails to
+-- decode must not be treated as empty: inside an UpdateAsync transform that
+-- would write an empty shard back and destroy every record in it.
+const function DecodeShard(Packed: any): ({Metadata}, number, boolean)
+    if not Packed then
+        return {}, 0, true
+    end
+
+    const Ok, LastId, Records = pcall(function()
+        return Compressor:DecompressMetadatas(Packed)
+    end)
+
+    if not Ok then
+        return {}, 0, false
+    end
+
+    return Records :: {Metadata}, LastId :: number, true
+end
+
+-- Get and Find hand cached record tables straight back to callers. Without this,
+-- record[1]:Set(...) on a returned page silently rewrote the cache for every
+-- other reader on this server, and the change never reached the DataStore.
+-- Frozen, that mistake throws instead. Writes go through Edit, which decodes its
+-- own copy inside the UpdateAsync transform and is unaffected.
+--
+-- Note this also makes OnChange unavailable on a cached record, which is correct:
+-- these are read-only snapshots, not live objects.
+const function FreezeRecords(Records: {Metadata})
+    for _, Record in Records do
+        for Key, Prop in Record do
+            if type(Key) == "number" then
+                table.freeze(Prop)
+            end
+        end
+
+        table.freeze(Record)
+    end
+end
+
+const function GetShard<T>(self: Database<T>, Index: number): ({Metadata}, number)
+    const Cached = self.Shards[Index]
+    if Cached and os.clock() < Cached.Expiry then
+        return Cached.Records, Cached.LastId
+    end
+
+    const Success, Packed = Try(ATTEMPTS, self.DataStore.GetAsync, self.DataStore, ShardKey(self, Index))
+    if not Success then
+        if Cached then
+            return Cached.Records, Cached.LastId
+        end
+
+        return {}, 0
+    end
+
+    const Records, LastId, Ok = DecodeShard(Packed)
+    if not Ok then
+        Logger:Warn(`Shard {Index} of {self.Key} failed to decode.`)
+        if Cached then
+            return Cached.Records, Cached.LastId
+        end
+
+        return {}, 0
+    end
+
+    FreezeRecords(Records)
+
+    self.Shards[Index] = {
+        Records = Records,
+        LastId = LastId,
+        Expiry = os.clock() + self.Expiration,
+    }
+
+    self.ShardEpoch += 1
+    return Records, LastId
+end
+
+const function DropLocal<T>(self: Database<T>)
+    table.clear(self.Shards)
+    table.clear(self.Pages)
+
+    -- The epoch alone would force a rebuild, but clearing releases the copy of
+    -- the corpus a sorted cache is holding instead of retaining it until the
+    -- next read.
+    for _, Cache in self.Caches do
+        Cache.Sorted = nil
+        Cache.SortedEpoch = nil
+    end
+
+    self.ShardEpoch += 1
+end
+
+-- Called after any successful write. Local caches go immediately; the shared
+-- MemoryStore tier is skipped for the expiration window rather than deleted,
+-- because a write can shift every page and there is no cheap way to enumerate
+-- them.
+const function AfterWrite<T>(self: Database<T>)
+    DropLocal(self)
+    self.BypassUntil = os.clock() + self.Expiration
+end
+
+--=============================================================================
+-- Reading
+--=============================================================================
+
+const function __register_cache<T>(self: Database<T>, Name: string, Config: CacheConfig)
     if self.Caches[Name] then
         Logger:Error(`Cache {Name} is already registered.`)
     end
 
+    if not Config.IdOrdered and not Config.Sort then
+        Logger:Error(`Cache {Name} needs either IdOrdered or Sort.`)
+    end
+
     self.Caches[Name] = {
-        Expiration = Expiration or 300,
-        PageSize = PageSize or 100,
-        Sort = Sort,
+        Name = Name,
+        PageSize = math.max(1, Config.PageSize or DEFAULT_PAGE_SIZE),
+        IdOrdered = Config.IdOrdered,
+        Sort = Config.Sort,
     }
 end
 
-const function __update_cache<T>(self: Database<T>, Cache: string, Page: number)
-    const Info = self.Caches[Cache]
-	if not Info then
-		return
-	end
+-- Id ordered paging. Shard order already matches result order, so shards are
+-- read one at a time and the walk stops as soon as the page is full. Page 1 of
+-- a "newest first" browse touches exactly one shard however many exist.
+const function CollectOrdered<T>(self: Database<T>, Cache: Cache, Page: number): Page
+    const Manifest = GetManifest(self)
+    const Descending = Cache.IdOrdered == "Desc"
+    const Skip = (Page - 1) * Cache.PageSize
 
-	const Packed = FetchMetadatas(self)
-	if not Packed then
-		return
-	end
+    -- One past the page so HasMore is known without a second request.
+    const Wanted = Cache.PageSize + 1
+    const Collected = {}
+    local Skipped = 0
 
-	const _, Metadatas = Compressor:DecompressMetadatas(Packed)
-	const Pages = GetCacheStorage(Metadatas, Info.Sort, Page, Info.PageSize)
-	Try(5, self.MemoryStore.SetAsync, self.MemoryStore, GetCacheKey(Cache, self.Generation, Page), Pages, Info.Expiration)
-	return Pages
-end
+    for Step = 1, Manifest.Count do
+        const Index = if Descending then Manifest.Count - Step + 1 else Step
+        const Records = GetShard(self, Index)
+        const Count = #Records
 
-const function __invalidate_cache<T>(self: Database<T>)
-    self.Generation += 1
-end
-
-const function __get_cache<T>(self: Database<T>, Cache: string, Page: number)
-    const Key = GetCacheKey(Cache, self.Generation, Page)
-	local Success, Pages = Try(5, self.MemoryStore.GetAsync, self.MemoryStore, Key)
-	if not Success then
-		return {}
-	end
-
-	if not Pages then
-		Pages = __update_cache(self, Cache, Page)
-		if not Pages then
-			return {}
-		end
-	end
-    
-    if Pages[Page] then
-        const _, Decompressed = Compressor:DecompressMetadatas(Pages[Page])
-        return Decompressed
-    end
-
-	return {}
-end
-
-const function __get<T>(self: Database<T>, Cache: string, Page: number?)
-    if not self.Caches[Cache] then
-        Logger:Warn(`Cache {Cache} is not registered for {self.Key}.`)
-        return {}
-    end
-
-    Page = Page or 1
-    return __get_cache(self, Cache, Page :: number)
-end
-
-const function __create<T>(self: Database<T>): boolean
-    const Success = Try(5, self.DataStore.UpdateAsync, self.DataStore, "Metadatas", function(Old)
-        local LastId, Metadatas = 0, {}
-        if Old then
-            LastId, Metadatas = Compressor:DecompressMetadatas(Old)
+        if Skipped + Count <= Skip then
+            Skipped += Count
+            continue
         end
 
-        LastId += 1
+        for Offset = 1, Count do
+            const Record = if Descending then Records[Count - Offset + 1] else Records[Offset]
+            if not Record then
+                continue
+            end
 
-        const New = table.clone(self.InitialMetadata)
-        New.Id = LastId
-        New.SavedVersion = 0
-        New.PublishedVersion = 0
-        table.insert(Metadatas, New)
+            if Skipped < Skip then
+                Skipped += 1
+                continue
+            end
 
-        return Compressor:CompressMetadatas(LastId, Metadatas) or Old
-    end)
+            table.insert(Collected, Record)
+            if #Collected >= Wanted then
+                break
+            end
+        end
 
-    if Success then
-        __invalidate_cache(self)
+        if #Collected >= Wanted then
+            break
+        end
     end
 
-    return Success
+    const HasMore = #Collected > Cache.PageSize
+    if HasMore then
+        table.remove(Collected)
+    end
+
+    return {Records = Collected, HasMore = HasMore}
 end
 
-const function __edit<T>(self: Database<T>, Id: number, ToChange: {[Properties.PropertyIdentifier]: any}): boolean
+-- Any other order. A record in the last shard can rank first, so stopping early
+-- would silently return the wrong page: every shard is read, then sorted.
+const function CollectSorted<T>(self: Database<T>, Cache: Cache, Page: number): Page
+    local All = Cache.Sorted
+
+    -- Rebuilt only when a shard actually changed underneath it, so paging
+    -- through a sorted browse sorts once rather than once per page.
+    if not All or Cache.SortedEpoch ~= self.ShardEpoch then
+        const Manifest = GetManifest(self)
+        const Collected = {}
+
+        for Index = 1, Manifest.Count do
+            for _, Record in GetShard(self, Index) do
+                table.insert(Collected, Record)
+            end
+        end
+
+        table.sort(Collected, Cache.Sort :: Sort)
+
+        All = Collected
+        Cache.Sorted = Collected
+        Cache.SortedEpoch = self.ShardEpoch
+    end
+
+    const Sorted = All :: {Metadata}
+    const StartIndex = (Page - 1) * Cache.PageSize + 1
+    const EndIndex = math.min(Page * Cache.PageSize, #Sorted)
+    if StartIndex > EndIndex then
+        return EmptyPage()
+    end
+
+    return {
+        Records = table.move(Sorted, StartIndex, EndIndex, 1, {}),
+        HasMore = EndIndex < #Sorted,
+    }
+end
+
+const function __get<T>(self: Database<T>, CacheName: string, Page: number?): Page
+    const Cache = self.Caches[CacheName]
+    if not Cache then
+        Logger:Warn(`Cache {CacheName} is not registered for {self.Key}.`)
+        return EmptyPage()
+    end
+
+    const At = math.max(1, Page or 1)
+    const Key = PageKey(self, CacheName, At)
+    const Now = os.clock()
+
+    const Local = self.Pages[Key]
+    if Local and Now < Local.Expiry then
+        return Local.Page
+    end
+
+    const Bypassing = Now < self.BypassUntil
+    if not Bypassing then
+        const Success, Stored = Try(ATTEMPTS, self.MemoryStore.GetAsync, self.MemoryStore, Key)
+        if Success and type(Stored) == "table" and type(Stored.Data) == "string" then
+            const Ok, Records = pcall(function()
+                const _, Decoded = Compressor:DecompressMetadatas(Encoding.Decode(Stored.Data))
+                return Decoded
+            end)
+
+            if Ok then
+                FreezeRecords(Records :: {Metadata})
+                const Result: Page = {Records = Records :: {Metadata}, HasMore = Stored.HasMore == true}
+                self.Pages[Key] = {Page = Result, Expiry = Now + self.Expiration}
+                return Result
+            end
+        end
+    end
+
+    const Result = if Cache.IdOrdered
+        then CollectOrdered(self, Cache, At)
+        else CollectSorted(self, Cache, At)
+
+    self.Pages[Key] = {Page = Result, Expiry = os.clock() + self.Expiration}
+
+    -- Repopulate the shared tier, including on the bypass path: the data just
+    -- came from the DataStore, so it is the freshest anyone has.
+    const Ok, Encoded = pcall(function()
+        return Encoding.Encode(Compressor:CompressMetadatas(0, Result.Records))
+    end)
+
+    if Ok then
+        Try(3, self.MemoryStore.SetAsync, self.MemoryStore, Key, {
+            Data = Encoded,
+            HasMore = Result.HasMore,
+        }, self.Expiration)
+    end
+
+    return Result
+end
+
+-- One shard read rather than a scan of everything.
+const function __get_by_id<T>(self: Database<T>, Id: number): Metadata?
+    if not Id then
+        return nil
+    end
+
+    const Index = ShardForId(GetManifest(self), Id)
+    for _, Record in GetShard(self, Index) do
+        if Record.Id == Id then
+            return Record
+        end
+    end
+
+    return nil
+end
+
+-- Filtering with no global ordering, so it can stop as soon as it has enough.
+-- Search by name and list by creator both land here.
+const function __find<T>(self: Database<T>, Predicate: Predicate, Limit: number?): {Metadata}
+    const Manifest = GetManifest(self)
+    const Wanted = Limit or math.huge
+    const Found = {}
+
+    for Index = 1, Manifest.Count do
+        for _, Record in GetShard(self, Index) do
+            if Predicate(Record) then
+                table.insert(Found, Record)
+                if #Found >= Wanted then
+                    return Found
+                end
+            end
+        end
+    end
+
+    return Found
+end
+
+--=============================================================================
+-- Writing
+--=============================================================================
+
+-- Every record gets its own Property instances. A shallow clone of
+-- InitialMetadata gave every record in the database one shared set of property
+-- tables, so editing any record rewrote all of them.
+const function BuildMetadata<T>(self: Database<T>, Id: number): Metadata
+    const New = {
+        Id = Id,
+        SavedVersion = 0,
+        PublishedVersion = 0,
+    }
+
+    for _, Template in self.InitialMetadata do
+        const Prop = Properties.new(Template.Parent)
+        Prop:Set(Template.Value)
+        table.insert(New, Prop)
+    end
+
+    return New :: any
+end
+
+const function __create<T>(self: Database<T>): (boolean, number?)
+    const Manifest = GetManifest(self)
+    const Index = Manifest.Count
+
+    -- A fresh tail shard has no records, so its id counter continues from the
+    -- boundary the previous shard was sealed at.
+    const Floor = Manifest.Boundaries[Index - 1] or 0
+
+    local Created: number? = nil
+    local Size = 0
+
+    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old)
+        const Records, StoredLastId, Ok = DecodeShard(Old)
+        if not Ok then
+            return nil
+        end
+
+        const LastId = math.max(StoredLastId, Floor) + 1
+
+        table.insert(Records, BuildMetadata(self, LastId))
+
+        const Packed = Compressor:CompressMetadatas(LastId, Records)
+        Created = LastId
+        Size = buffer.len(Packed)
+        return Packed
+    end)
+
+    if not Success then
+        return false, nil
+    end
+
+    AfterWrite(self)
+
+    -- Sealing is deliberately outside the transform: UpdateAsync may run its
+    -- callback more than once, and a seal must happen exactly once per commit.
+    if Size >= self.ShardLimit and Created then
+        Seal(self, Created)
+    end
+
+    return true, Created
+end
+
+const function __edit<T>(self: Database<T>, Id: number, ToChange: {[PropertyTypes.PropertyIdentifier]: any}): boolean
     const Valid = {}
     local IsAnyValid = false
+
     for PropId, Value in ToChange do
         const Property = Properties:GetRegistry(PropId)
         if not Property then
@@ -180,56 +539,63 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[Properties.P
         return false
     end
 
+    const Index = ShardForId(GetManifest(self), Id)
     local Found = false
-    const Success = Try(5, self.DataStore.UpdateAsync, self.DataStore, "Metadatas", function(Old)
-        local LastId, Metadatas = 0, {}
-        const CurrentValid = table.clone(Valid)
-        Found = false
 
-        if Old then
-            LastId, Metadatas = Compressor:DecompressMetadatas(Old)
+    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old)
+        -- Rebuilt from Old on every attempt: UpdateAsync can retry, and carrying
+        -- state across attempts would apply an edit twice.
+        Found = false
+        if not Old then
+            return nil
         end
 
-        for _, Metadata in Metadatas do
-            if Metadata.Id ~= Id then
+        const Records, LastId, Ok = DecodeShard(Old)
+        if not Ok then
+            return nil
+        end
+
+        const Remaining = table.clone(Valid)
+
+        for _, Record in Records do
+            if Record.Id ~= Id then
                 continue
             end
 
-            for i, Prop in Metadata do
-                if type(i) ~= "number" then
+            for Key, Prop in Record do
+                if type(Key) ~= "number" then
                     continue
                 end
 
-                if CurrentValid[Prop.Parent] ~= nil then
-                    const Worked = Prop:Set(CurrentValid[Prop.Parent])
-                    CurrentValid[Prop.Parent] = nil
-                    
-                    if Worked then
+                if Remaining[Prop.Parent] ~= nil then
+                    if Prop:Set(Remaining[Prop.Parent]) then
                         Found = true
                     end
+
+                    Remaining[Prop.Parent] = nil
                 end
             end
 
-            -- New properties
-            for Id, Value in CurrentValid do
-                const NewProperty = Properties.new(Id)
-                const Worked = NewProperty:Set(Value)
-                CurrentValid[Id] = nil
-
-                if Worked then
+            for PropId, Value in Remaining do
+                const NewProperty = Properties.new(PropId)
+                if NewProperty:Set(Value) then
                     Found = true
-                    table.insert(Metadata, NewProperty)
+                    table.insert(Record, NewProperty)
                 end
             end
 
             break
         end
 
-        return Found and Compressor:CompressMetadatas(LastId, Metadatas) or Old
+        if not Found then
+            return nil
+        end
+
+        return Compressor:CompressMetadatas(LastId, Records)
     end)
 
     if Found and Success then
-        __invalidate_cache(self)
+        AfterWrite(self)
     end
 
     return Found and Success
@@ -240,50 +606,83 @@ const function __delete<T>(self: Database<T>, Id: number): boolean
         return false
     end
 
+    const Index = ShardForId(GetManifest(self), Id)
     local Found = false
-    const Success = Try(5, self.DataStore.UpdateAsync, self.DataStore, "Metadatas", function(Old)
-        local LastId, Metadatas = 0, {}
-        if Old then
-            LastId, Metadatas = Compressor:DecompressMetadatas(Old)
+
+    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old)
+        Found = false
+        if not Old then
+            return nil
         end
 
-        Found = false
-        for i, Metadata in Metadatas do
-            if Metadata.Id == Id then
-                table.remove(Metadatas, i)
+        const Records, LastId, Ok = DecodeShard(Old)
+        if not Ok then
+            return nil
+        end
+
+        for Position, Record in Records do
+            if Record.Id == Id then
+                table.remove(Records, Position)
                 Found = true
                 break
             end
         end
 
-        return Found and Compressor:CompressMetadatas(LastId, Metadatas) or Old
+        if not Found then
+            return nil
+        end
+
+        -- LastId is preserved so a deleted id is never handed out again.
+        return Compressor:CompressMetadatas(LastId, Records)
     end)
 
     if Found and Success then
-        __invalidate_cache(self)
+        AfterWrite(self)
     end
 
     return Found and Success
 end
 
-function Database.new<T>(Config: DatabaseConfig<T>): Database<T>
+const function __refresh<T>(self: Database<T>)
+    DropLocal(self)
+    self.Manifest = nil
+    self.ManifestExpiry = 0
+end
+
+function Database.new<T>(Config: {
+    Key: string,
+    InitialMetadata: {PropertyTypes.Property<T>},
+    Expiration: number?,
+    ShardLimit: number?,
+}): Database<T>
     const db = {}
     db.Key = Config.Key
     db.InitialMetadata = Config.InitialMetadata
+    db.Expiration = Config.Expiration or DEFAULT_EXPIRATION
+    db.ShardLimit = Config.ShardLimit or DEFAULT_SHARD_LIMIT
 
-    db.DataStore = DataStoreService:GetDataStore(db.Key)
-    db.MemoryStore = MemoryStoreService:GetHashMap(db.Key)
+    db.DataStore = DataStoreService:GetDataStore(Config.Key)
+    db.MemoryStore = MemoryStoreService:GetHashMap(Config.Key)
 
-    db.Generation = 0
     db.Caches = {}
+    db.Shards = {}
+    db.Pages = {}
+    db.ShardEpoch = 0
+
+    db.Manifest = nil
+    db.ManifestExpiry = 0
+    db.BypassUntil = 0
 
     db.RegisterCache = __register_cache
     db.Create = __create
     db.Get = __get
+    db.GetById = __get_by_id
+    db.Find = __find
     db.Edit = __edit
     db.Delete = __delete
-    
-    return db
+    db.Refresh = __refresh
+
+    return db :: any
 end
 
 return Database

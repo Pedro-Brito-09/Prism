@@ -1,15 +1,195 @@
+--!strict
+-- Schema driven transport.
+--
+-- Every channel declares the codec for each of its parameters in Channels.luau,
+-- so a packet is a single buffer: one byte of channel id followed by the packed
+-- arguments. Values that cannot be packed (Instances, registry tables) ride in a
+-- side channel array next to the buffer.
+--
+-- Server to client invokes are deliberately absent: InvokeClient yields the
+-- calling thread until the client answers, and a client that never answers holds
+-- that thread forever. Push with Fire and let the client invoke back.
+
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 const RunService = game:GetService("RunService")
 
+const Channels = require("./Channels")
+const Codecs = require("./Codecs")
 const Logger = require("./Logger")
 
-const ENTRY_NOT_FOUND = "NETWORKING_ENTRY_NOT_REGISTERED"
 const IS_SERVER = RunService:IsServer()
+const WAIT_TIMEOUT = 10
+
+export type Codec<T> = Codecs.Codec<T>
+
+export type Entry = {
+    Id: number,
+    Name: string,
+    Args: {Codec<any>},
+    Returns: {Codec<any>}?,
+    Connections: {(...any) -> ()},
+    OnInvoke: ((...any) -> ...any)?,
+
+    Fire: (self: Entry, ...any) -> (),
+    FireAll: (self: Entry, ...any) -> (),
+    Invoke: (self: Entry, ...any) -> ...any,
+    Connect: (self: Entry, Callback: (...any) -> ()) -> () -> (),
+}
 
 const Networking = {}
-const Registered = {}
+const Registered: {Entry} = {}
 
-local Event, Function; if IS_SERVER then
+local Event: RemoteEvent
+local Function: RemoteFunction
+
+const function Pack(Id: number, Schema: {Codec<any>}, Args: {any}, Count: number): (buffer, {any}?)
+    if Count > #Schema then
+        Logger:Error(`Channel {Channels.List[Id].Name} takes {#Schema} argument(s), got {Count}.`)
+    end
+
+    const Extras = {}
+    local Size = 1
+    for Index = 1, #Schema do
+        Size += Schema[Index].Measure(Args[Index])
+    end
+
+    const Buf = buffer.create(Size)
+    buffer.writeu8(Buf, 0, Id)
+
+    local Offset = 1
+    for Index = 1, #Schema do
+        Offset += Schema[Index].Write(Buf, Offset, Args[Index], Extras)
+    end
+
+    return Buf, if #Extras > 0 then Extras else nil
+end
+
+const function Unpack(Schema: {Codec<any>}, Buf: buffer, Extras: {any}?): {any}
+    const Side = Extras or {}
+    const Args = table.create(#Schema)
+
+    local Offset = 1
+    for Index, Codec in Schema do
+        const Value, Length = Codec.Read(Buf, Offset, Side)
+        Args[Index] = Value
+        Offset += Length
+    end
+
+    return Args
+end
+
+-- Everything past this point may be handling a packet a client authored, so a
+-- malformed buffer has to fail as a dropped packet rather than a thrown error.
+const function Decode(Buf: any, Extras: any): (Entry?, {any}?)
+    if typeof(Buf) ~= "buffer" or buffer.len(Buf) < 1 then
+        return nil
+    end
+
+    if Extras ~= nil and typeof(Extras) ~= "table" then
+        return nil
+    end
+
+    const Entry = Registered[buffer.readu8(Buf, 0)]
+    if not Entry then
+        return nil
+    end
+
+    const Ok, Args = pcall(Unpack, Entry.Args, Buf, Extras)
+    if not Ok then
+        return nil
+    end
+
+    return Entry, Args :: {any}
+end
+
+const function __fire(self: Entry, ...)
+    if not IS_SERVER then
+        const Buf, Extras = Pack(self.Id, self.Args, table.pack(...), select("#", ...))
+        Event:FireServer(Buf, Extras)
+        return
+    end
+
+    const Target = ...
+    const Args = table.pack(select(2, ...))
+    const Buf, Extras = Pack(self.Id, self.Args, Args, Args.n)
+
+    if typeof(Target) == "Instance" and Target:IsA("Player") then
+        Event:FireClient(Target, Buf, Extras)
+        return
+    end
+
+    if type(Target) == "table" then
+        for _, Plr in Target do
+            if typeof(Plr) == "Instance" and Plr:IsA("Player") then
+                Event:FireClient(Plr, Buf, Extras)
+            end
+        end
+
+        return
+    end
+
+    Logger:Error(`Fire on {self.Name} needs a Player or a list of Players as its first argument.`)
+end
+
+const function __fire_all(self: Entry, ...)
+    const Buf, Extras = Pack(self.Id, self.Args, table.pack(...), select("#", ...))
+    if IS_SERVER then
+        Event:FireAllClients(Buf, Extras)
+    else
+        Event:FireServer(Buf, Extras)
+    end
+end
+
+const function __invoke(self: Entry, ...): ...any
+    if IS_SERVER then
+        Logger:Error(`Invoke on {self.Name} is client to server only.`)
+    end
+
+    const Buf, Extras = Pack(self.Id, self.Args, table.pack(...), select("#", ...))
+    const Ok, ReturnBuf, ReturnExtras = Function:InvokeServer(Buf, Extras)
+    if not Ok then
+        Logger:Error(`No handler is registered on the server for {self.Name}.`)
+    end
+
+    const Returns = self.Returns
+    if not Returns then
+        return
+    end
+
+    return table.unpack(Unpack(Returns, ReturnBuf, ReturnExtras), 1, #Returns)
+end
+
+const function __connect(self: Entry, Callback: (...any) -> ()): () -> ()
+    if typeof(Callback) ~= "function" then
+        Logger:Error(`Invalid callback. Tried connecting a {typeof(Callback)} to {self.Name}.`)
+    end
+
+    table.insert(self.Connections, Callback)
+    return function()
+        const Position = table.find(self.Connections, Callback)
+        if Position then
+            table.remove(self.Connections, Position)
+        end
+    end
+end
+
+for Id, Channel in Channels.List do
+    Registered[Id] = {
+        Id = Id,
+        Name = Channel.Name,
+        Args = Channel.Args,
+        Returns = Channel.Returns,
+        Connections = {},
+        OnInvoke = nil,
+
+        Fire = __fire,
+        FireAll = __fire_all,
+        Invoke = __invoke,
+        Connect = __connect,
+    } :: Entry
+end
+
+if IS_SERVER then
     Event = Instance.new("RemoteEvent")
     Event.Name = "__loom_event"
     Event.Parent = ReplicatedStorage
@@ -18,137 +198,71 @@ local Event, Function; if IS_SERVER then
     Function.Name = "__loom_function"
     Function.Parent = ReplicatedStorage
 
-    Event.OnServerEvent:Connect(function(Plr: Player, Name: string, ...)
-        const Entry = Registered[Name]
-        if not Entry then
+    Event.OnServerEvent:Connect(function(Plr: Player, Buf: any, Extras: any)
+        const Entry, Args = Decode(Buf, Extras)
+        if not Entry or not Args then
             return
         end
 
-        for _, Connec in table.clone(Entry.Connections) do
-            task.spawn(Connec, Plr, ...)
+        for _, Callback in table.clone(Entry.Connections) do
+            task.spawn(Callback, Plr, table.unpack(Args, 1, #Entry.Args))
         end
     end)
 
-    Function.OnServerInvoke = function(Plr: Player, Name: string, ...)
-        const Entry = Registered[Name]
-        if not Entry or not Entry.OnInvoke then
-            return ENTRY_NOT_FOUND
+    Function.OnServerInvoke = function(Plr: Player, Buf: any, Extras: any)
+        const Entry, Args = Decode(Buf, Extras)
+        if not Entry or not Args then
+            return false
         end
 
-        return Entry.OnInvoke(Plr, ...)
+        const Handler = Entry.OnInvoke
+        if not Handler then
+            return false
+        end
+
+        const Returns = Entry.Returns
+        if not Returns then
+            Handler(Plr, table.unpack(Args, 1, #Entry.Args))
+            return true
+        end
+
+        const Results = table.pack(Handler(Plr, table.unpack(Args, 1, #Entry.Args)))
+        const ReturnBuf, ReturnExtras = Pack(Entry.Id, Returns, Results, Results.n)
+        return true, ReturnBuf, ReturnExtras
     end
 else
-    Event = ReplicatedStorage:WaitForChild("__loom_event", 10)
-    if not Event then
+    const FoundEvent = ReplicatedStorage:WaitForChild("__loom_event", WAIT_TIMEOUT)
+    if not FoundEvent then
         Logger:Error("Failed to retrieve networking remote event.")
     end
 
-    Function = ReplicatedStorage:WaitForChild("__loom_function", 10)
-    if not Function then
+    const FoundFunction = ReplicatedStorage:WaitForChild("__loom_function", WAIT_TIMEOUT)
+    if not FoundFunction then
         Logger:Error("Failed to retrieve networking remote function.")
     end
 
-    Event.OnClientEvent:Connect(function(Name: string, ...)
-        const Entry = Registered[Name]
-        if not Entry then
+    Event = FoundEvent :: RemoteEvent
+    Function = FoundFunction :: RemoteFunction
+
+    Event.OnClientEvent:Connect(function(Buf: any, Extras: any)
+        const Entry, Args = Decode(Buf, Extras)
+        if not Entry or not Args then
             return
         end
 
-        for _, Connec in table.clone(Entry.Connections) do
-            task.spawn(Connec, ...)
+        for _, Callback in table.clone(Entry.Connections) do
+            task.spawn(Callback, table.unpack(Args, 1, #Entry.Args))
         end
     end)
-
-    Function.OnClientInvoke = function(Name: string, ...)
-        const Entry = Registered[Name]
-        if not Entry or not Entry.OnInvoke then
-            return ENTRY_NOT_FOUND
-        end
-
-        return Entry.OnInvoke(...)
-    end
 end
 
-const function __fire_all(self, ...)
-    if not IS_SERVER then
-        Event:FireServer(self.Name, ...)
-        return
-    end
-    
-    Event:FireAllClients(self.Name, ...)
-end
-
-const function __fire(self, First, ...)
-    if IS_SERVER then
-        if typeof(First) == "Instance" and First:IsA("Player") then
-            Event:FireClient(First, self.Name, ...)
-        elseif typeof(First) == "table" then
-            local IsOnlyPlayers = true
-            for _, v in First do
-                if typeof(v) ~= "Instance" or not v:IsA("Player") then
-                    IsOnlyPlayers = false
-                    break
-                end
-            end
-
-            if IsOnlyPlayers then
-                for _, Plr in First do
-                    Event:FireClient(Plr, self.Name, ...)
-                end
-            else
-                Event:FireAllClients(self.Name, ...)
-            end
-        else
-            Event:FireAllClients(self.Name, ...)
-        end
-    else
-        Event:FireServer(self.Name, First, ...)
-    end
-end
-
-const function __invoke(self, First, ...)
-    local Result;
-    if IS_SERVER then
-        if typeof(First) ~= "Instance" or not First:IsA("Player") then
-            Logger:Error(`Failed to invoke {self.Name}. No target client specified.`)
-        end
-
-        Result = {Function:InvokeClient(First, self.Name, ...)}
-    else
-        Result = {Function:InvokeServer(self.Name, First, ...)}
+function Networking:Get(Name: string): Entry
+    const Id = Channels.Ids[Name]
+    if not Id then
+        Logger:Error(`Unknown channel {Name}. Add it to Channels.luau.`)
     end
 
-    if Result[1] == ENTRY_NOT_FOUND then
-        Logger:Error(`Failed to invoke {self.Name}. OnInvoke is not registered on the {IS_SERVER and "specified client" or "server"}.`)
-    end
-
-    return unpack(Result)
-end
-
-const function __connect(self, Callback: (...any) -> ())
-    if typeof(Callback) ~= "function" then
-        Logger:Error(`Invalid callback. Tried connecting a {typeof(Callback)}`)
-    end
-
-    table.insert(self.Connections, Callback)
-    return function()
-        local Position = table.find(self.Connections, Callback)
-        if Position then
-            table.remove(self.Connections, Position)
-        end
-    end
-end
-
-function Networking:Register(Name: string)
-    const Net = {}
-    Net.Name = Name
-    Net.Connections = {}
-    Net.Fire = __fire
-    Net.FireAll = __fire_all
-    Net.Invoke = __invoke
-    Net.Connect = __connect
-    Registered[Name] = Net
-    return Net
+    return Registered[Id]
 end
 
 return Networking

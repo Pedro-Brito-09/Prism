@@ -1,3 +1,4 @@
+--!strict
 const Logger = {}
 const PREFIX = "[ LOOM ]"
 
@@ -9,7 +10,10 @@ function Logger:Warn(Message: string)
     warn(`{PREFIX} {Message}`)
 end
 
-function Logger:Error(Message: string)
+-- Annotated never so the analyser knows control does not come back. Without it
+-- every `if not X then Logger:Error(...) end` guard leaves X still nilable for
+-- the rest of the function.
+function Logger:Error(Message: string): never
     error(`{PREFIX} {Message}`, 2)
 end
 

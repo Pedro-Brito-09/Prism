@@ -1,11 +1,11 @@
 const Networking = require("../Networking")
 return {
-    ObjectRegistered = Networking:Register("Objects.ObjectRegistered"),
+    ObjectRegistered = Networking:Get("Objects.ObjectRegistered"),
 
-    ObjectAdded = Networking:Register("Objects.ObjectAdded"),
-    ObjectRemoved = Networking:Register("Objects.ObjectRemoved"),
-    PropertyChanged = Networking:Register("Objects.PropertyChanged"),
+    ObjectAdded = Networking:Get("Objects.ObjectAdded"),
+    ObjectRemoved = Networking:Get("Objects.ObjectRemoved"),
+    PropertyChanged = Networking:Get("Objects.PropertyChanged"),
 
-    SetProperty = Networking:Register("Objects.SetProperty"),
-    Destroy = Networking:Register("Objects.Destroy")
+    SetProperty = Networking:Get("Objects.SetProperty"),
+    Destroy = Networking:Get("Objects.Destroy"),
 }

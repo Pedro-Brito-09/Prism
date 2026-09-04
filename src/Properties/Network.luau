@@ -1,4 +1,4 @@
 const Networking = require("../Networking")
 return {
-    PropertyRegistered = Networking:Register("Properties.PropertyRegistered")
+    PropertyRegistered = Networking:Get("Properties.PropertyRegistered"),
 }

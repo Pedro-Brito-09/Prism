@@ -1,4 +1,7 @@
+--!strict
 const Network = require("./Network")
+const Shared = require("./Shared")
+const IdPool = require("../IdPool")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
@@ -8,65 +11,42 @@ export type PropertyRegistry<T> = Types.PropertyRegistry<T>
 export type PropertyConfig<T> = Types.PropertyConfig<T>
 export type Property<T> = Types.Property<T>
 
+-- Text lengths are varints now, so there is no format ceiling worth naming.
+-- What actually binds is the DataStore value limit, and a single 1MB string
+-- would swallow a third of a shard, so this caps it well below that.
+const MAX_TEXT_LENGTH = 1048576
+
 const Properties = {}
 const Registered: {[PropertyIdentifier]: PropertyRegistry<any>} = {}
-
-const function GetNextFreeId(): number
-    local MinNextFree;
-    for i, v in Registered do
-        if (not MinNextFree or i < MinNextFree) and not Registered[i + 1] then
-            MinNextFree = i
-        end
-    end
-
-    return (MinNextFree or 0) + 1 or 1
-end
-
-const function __setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): boolean
-    const Val = Types:FixValue(self.Type, Value, self.Constraints)
-    if Val == nil then
-        return false
-    end
-
-    self.Value = Val
-    return true
-end
-
-const function __default_setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): boolean
-    const Val = Types:FixValue(self.Type, Value, self.Constraints)
-    if Val == nil then
-        return false
-    end
-
-    self.DefaultValue = Val
-    return true
-end
+-- Never recycled: property ids are written into saved metadata, and reusing one
+-- for a different property silently reinterprets every record still holding it.
+const Ids = IdPool.new(nil, false)
 
 function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
-    if Config.CustomId then
-        local Number = tonumber(Config.CustomId)
-        if not Number then
-            Logger:Warn(`Custom property id needs to be an integer, got {Config.CustomId}. Will be using the next free id instead.`)
-            Config.CustomId = nil
-        elseif Number ~= math.floor(Number) then
-            Logger:Warn(`Custom property id needs to be an integer, got {Config.CustomId}. Will be using {math.floor(Number)} instead.`)
-            Config.CustomId = math.floor(Number)
-        end
-    end
+    const Requested = if Config.CustomId ~= nil
+        then IdPool.Normalize(Config.CustomId, "property")
+        else nil
 
-    const Identifier = Config.CustomId or GetNextFreeId()
-    if Registered[Identifier] then
-        Logger:Warn(`There's already a property registered with id {Identifier}.`)
+    const Identifier = Ids:Claim(Requested)
+    if not Identifier then
+        Logger:Warn(`There's already a property registered with id {Requested}.`)
         return
     end
 
     const Constraints = Config.Constraints
-    if Config.Type == "Number" and Constraints and Constraints.Precision then
-        local Scale = 1
-        while math.abs(Constraints.Precision * Scale - math.round(Constraints.Precision * Scale)) > 1e-9 do
-            Scale *= 10
+    if Constraints then
+        if Config.Type == "Number" and Constraints.Precision then
+            local Scale = 1
+            while math.abs(Constraints.Precision * Scale - math.round(Constraints.Precision * Scale)) > 1e-9 do
+                Scale *= 10
+            end
+
+            Constraints.Scale = Scale
         end
-        Constraints.Scale = Scale
+
+        if Config.Type == "Text" and Constraints.MaxLength then
+            Constraints.MaxLength = math.min(Constraints.MaxLength, MAX_TEXT_LENGTH)
+        end
     end
 
     const Prop = {}
@@ -77,9 +57,19 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     Prop.Constraints = Constraints
     Prop.DefaultValue = Config.DefaultValue
 
-    Registered[Identifier] = Prop
+    Registered[Identifier] = Prop :: any
     Network.PropertyRegistered:FireAll(Prop)
     return Identifier
+end
+
+function Properties:Unregister(Identifier: PropertyIdentifier): boolean
+    if not Registered[Identifier] then
+        return false
+    end
+
+    Registered[Identifier] = nil
+    Ids:Release(Identifier)
+    return true
 end
 
 function Properties:GetRegistered(): {[PropertyIdentifier]: PropertyRegistry<any>}
@@ -91,35 +81,7 @@ function Properties:GetRegistry(Identifier: PropertyIdentifier): PropertyRegistr
 end
 
 function Properties.new(Reference: PropertyRegistry<any> | PropertyIdentifier): Property<any>
-    const TypeOf = typeof(Reference)
-    local Ref: PropertyRegistry<any>
-    if TypeOf == "number" then
-        if not Registered[Reference :: PropertyIdentifier] then
-            Logger:Error(`Invalid property reference.`)
-        end
-
-        Ref = Registered[Reference :: PropertyIdentifier]
-    elseif TypeOf == "table" then
-        Ref = Reference :: PropertyRegistry<any>
-    else
-        Logger:Error(`Invalid property reference.`)
-    end
-
-    if not Ref or not Ref.Id or not Registered[Ref.Id] then
-        Logger:Error(`Invalid property reference.`)
-    end
-
-    const Prop = {}
-    Prop.__type = "Property"
-    Prop.Parent = Ref.Id
-    Prop.Name = Ref.Name
-    Prop.Type = Ref.Type
-    Prop.Constraints = Ref.Constraints
-    Prop.DefaultValue = Ref.DefaultValue
-    Prop.Value = Ref.DefaultValue
-    Prop.Set = __setter
-    Prop.SetDefault = __default_setter
-    return Prop
+    return Shared.new(Registered, Reference)
 end
 
 return Properties

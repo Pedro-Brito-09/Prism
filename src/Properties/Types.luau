@@ -1,6 +1,6 @@
 const CustomEnum = require("../CustomEnum")
 
-export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum" | "Table"
+export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum"
 export type PropertyIdentifier = number
 
 export type TextConstraints = {
@@ -41,40 +41,38 @@ export type CustomEnumConstraints = {
 }
 
 type PropertyValues = {
-	Text: string,
-	Number: number,
-	Bool: boolean,
-	Color: Color3,
-	Vector: Vector3,
-	CFrame: CFrame,
-	Enum: EnumItem,
-	CustomEnum: CustomEnum.RegisteredOption<any>,
-	Table: {any},
+    Text: string,
+    Number: number,
+    Bool: boolean,
+    Color: Color3,
+    Vector: Vector3,
+    CFrame: CFrame,
+    Enum: EnumItem,
+    CustomEnum: CustomEnum.RegisteredOption<any>,
 }
 
 type PropertyConstraints = {
-	Text: TextConstraints,
-	Number: NumberConstraints,
-	Bool: nil,
-	Color: ColorConstraints,
-	Vector: VectorConstraints,
-	CFrame: nil,
-	Enum: EnumConstraints,
-	CustomEnum: CustomEnumConstraints,
-	Table: nil,
+    Text: TextConstraints,
+    Number: NumberConstraints,
+    Bool: nil,
+    Color: ColorConstraints,
+    Vector: VectorConstraints,
+    CFrame: nil,
+    Enum: EnumConstraints,
+    CustomEnum: CustomEnumConstraints,
 }
 
 type function GetFromMap(Map, Key)
-	if not Map:is("table") or not Key:is("singleton") then
-		return types.never
-	end
+    if not Map:is("table") or not Key:is("singleton") then
+        return types.never
+    end
 
-	local Property = Map:readproperty(Key)
-	if Property then
-		return Property
-	end
+    local Property = Map:readproperty(Key)
+    if Property then
+        return Property
+    end
 
-	return types.never
+    return types.never
 end
 
 export type ValueFor<T> = GetFromMap<PropertyValues, T>
@@ -104,8 +102,17 @@ export type Property<T = PropertyType> = {
     DefaultValue: ValueFor<T>,
     Value: ValueFor<T>,
 
-    Set: (self: Property<T>, Value: ValueFor<T>?) -> boolean,
-    SetDefault: (self: Property<T>, Value: ValueFor<T>?) -> boolean,
+    -- Allocated on the first OnChange call and dropped again when the last
+    -- listener disconnects, so a property nobody watches costs one nil field.
+    Listeners: {(Value: ValueFor<T>) -> ()}?,
+
+    -- Returns (Accepted, Changed). Accepted is false when the value failed
+    -- validation; Changed is false when it was accepted but equal to the
+    -- current one, which lets callers skip a pointless replication broadcast.
+    Set: (self: Property<T>, Value: ValueFor<T>?) -> (boolean, boolean),
+    SetDefault: (self: Property<T>, Value: ValueFor<T>?) -> (boolean, boolean),
+    OnChange: (self: Property<T>, Callback: (Value: ValueFor<T>) -> ()) -> () -> (),
+    Destroy: (self: Property<T>) -> (),
 }
 
 const Types = {}
@@ -133,7 +140,7 @@ Types.Ids = {
 
 const F32_MAX = 3.4028235e+38
 
-const function FixNumber(Value: ValueFor<"Number">?, Constraints: ConstraintsFor<"Number">?)
+const function FixNumber(Value: ValueFor<"Number">, Constraints: ConstraintsFor<"Number">)
     if Constraints.Precision and Constraints.Scale then
         const IntMin = math.round((Constraints.MinValue or 0) * Constraints.Scale)
         const IntPrecision = math.round(Constraints.Precision * Constraints.Scale)
