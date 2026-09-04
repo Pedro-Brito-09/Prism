@@ -18,6 +18,32 @@ const MAX_TEXT_LENGTH = 1048576
 
 const Properties = {}
 const Registered: {[PropertyIdentifier]: PropertyRegistry<any>} = {}
+
+-- A CustomEnum constraint holds the enum table itself, and that table carries
+-- GetById and GetByValue as function fields. A remote cannot serialize a
+-- function, so firing the registry raw threw for every CustomEnum property and
+-- no client ever received it. Only the enum's name crosses the wire; the client
+-- resolves it against its own registry, which is why custom enums have to be
+-- registered from shared code rather than server-only code.
+const function ToRegistryPayload(Registry: PropertyRegistry<any>): any
+    const Constraints = (Registry :: any).Constraints
+    if Registry.Type ~= "CustomEnum" or not Constraints then
+        return Registry
+    end
+
+    const Copy = table.clone(Constraints)
+    Copy.CustomEnum = if Constraints.CustomEnum then Constraints.CustomEnum.Name else nil
+
+    return {
+        __type = "PropertyRegistry",
+        Id = Registry.Id,
+        Name = Registry.Name,
+        Type = Registry.Type,
+        Constraints = Copy,
+        DefaultValue = Registry.DefaultValue,
+    }
+end
+
 -- Never recycled: property ids are written into saved metadata, and reusing one
 -- for a different property silently reinterprets every record still holding it.
 const Ids = IdPool.new(nil, false)
@@ -58,7 +84,7 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     Prop.DefaultValue = Config.DefaultValue
 
     Registered[Identifier] = Prop :: any
-    Network.PropertyRegistered:FireAll(Prop)
+    Network.PropertyRegistered:FireAll(ToRegistryPayload(Prop :: any))
     return Identifier
 end
 
@@ -78,6 +104,12 @@ end
 
 function Properties:GetRegistry(Identifier: PropertyIdentifier): PropertyRegistry<any>?
     return Registered[Identifier]
+end
+
+-- What Replication sends to a joining player. Same shape Register broadcasts.
+function Properties:GetRegistryPayload(Identifier: PropertyIdentifier): any
+    const Registry = Registered[Identifier]
+    return if Registry then ToRegistryPayload(Registry) else nil
 end
 
 function Properties.new(Reference: PropertyRegistry<any> | PropertyIdentifier): Property<any>

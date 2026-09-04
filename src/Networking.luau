@@ -43,7 +43,10 @@ local Event: RemoteEvent
 local Function: RemoteFunction
 
 const function Pack(Id: number, Schema: {Codec<any>}, Args: {any}, Count: number): (buffer, {any}?)
-    if Count > #Schema then
+    -- Checked in both directions. Too few arguments used to fall through to a
+    -- codec writing a nil, which surfaced as an opaque buffer error rather than
+    -- naming the channel that was called wrongly.
+    if Count ~= #Schema then
         Logger:Error(`Channel {Channels.List[Id].Name} takes {#Schema} argument(s), got {Count}.`)
     end
 

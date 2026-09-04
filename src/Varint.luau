@@ -23,7 +23,13 @@ const MAX_SIGNED = 4503599627370495 -- 2^52 - 1
 Varint.MAX_SAFE = MAX_SAFE
 Varint.MAX_SIGNED = MAX_SIGNED
 
+-- Validated on the same terms as Write. Without this a negative measured as one
+-- byte and only blew up later, inside Write, after the buffer had been sized.
 function Varint.Measure(Value: number): number
+    if Value < 0 or Value > MAX_SAFE or Value % 1 ~= 0 then
+        Logger:Error(`Varint expects a whole number between 0 and {MAX_SAFE}, got {Value}.`)
+    end
+
     local Remaining = Value
     local Count = 1
 

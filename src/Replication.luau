@@ -29,39 +29,108 @@ const Ready = Networking:Get("Loom.Ready")
 const Replication = {}
 const Replayed: {[Player]: true} = {}
 
-function Replication.Replay(Plr: Player)
-    for _, Registry in Properties:GetRegistered() do
+-- Entries per packet. The replay used to send one remote fire per registered
+-- property, per registered object type, and per live object, all inside the
+-- Ready handler with no yield anywhere -- so a large workspace both flooded the
+-- remote queue in a single frame and held the server thread while every object
+-- was compressed.
+const CHUNK_SIZE = 50
+
+const function SendChunks<T>(Plr: Player, Send: ({T}) -> (), Items: {T}): boolean
+    const Total = #Items
+    local Start = 1
+
+    while Start <= Total do
         if not Plr.Parent then
-            return
+            return false
         end
 
-        PropertiesNetwork.PropertyRegistered:Fire(Plr, Registry)
+        const Stop = math.min(Start + CHUNK_SIZE - 1, Total)
+        Send(table.move(Items, Start, Stop, 1, {}))
+        Start = Stop + 1
+
+        if Start <= Total then
+            task.wait()
+        end
     end
 
+    return true
+end
+
+function Replication.Replay(Plr: Player)
+    const PropertyRegistries = {}
+    for Identifier in Properties:GetRegistered() do
+        table.insert(PropertyRegistries, Properties:GetRegistryPayload(Identifier))
+    end
+
+    const SentProperties = SendChunks(Plr, function(Chunk)
+        PropertiesNetwork.RegistriesReplayed:Fire(Plr, Chunk)
+    end, PropertyRegistries)
+
+    if not SentProperties then
+        return
+    end
+
+    const ObjectRegistries = {}
     for Identifier in Objects:GetRegistered() do
-        if not Plr.Parent then
-            return
+        table.insert(ObjectRegistries, Objects:GetRegistryPayload(Identifier))
+    end
+
+    const SentObjects = SendChunks(Plr, function(Chunk)
+        ObjectsNetwork.RegistriesReplayed:Fire(Plr, Chunk)
+    end, ObjectRegistries)
+
+    if not SentObjects then
+        return
+    end
+
+    -- Three parallel lists, because that is what the channel takes. A missing
+    -- instance is false rather than nil so the lists stay the same length and
+    -- the indices keep lining up with the ids.
+    --
+    -- Compressed a chunk at a time rather than all at once, so the cost of
+    -- serializing a large workspace is spread across frames.
+    local RuntimeIds = {}
+    local Buffers = {}
+    local Instances = {}
+    local Count = 0
+
+    const function Flush(): boolean
+        if Count == 0 then
+            return true
         end
 
-        ObjectsNetwork.ObjectRegistered:Fire(Plr, Objects:GetRegistryPayload(Identifier))
+        if not Plr.Parent then
+            return false
+        end
+
+        ObjectsNetwork.ObjectsReplayed:Fire(Plr, RuntimeIds, Buffers, Instances)
+
+        RuntimeIds = {}
+        Buffers = {}
+        Instances = {}
+        Count = 0
+
+        task.wait()
+        return true
     end
 
     for _, Obj in Objects:GetWorkspace() do
-        if not Plr.Parent then
-            return
-        end
-
         if Obj.Destroyed then
             continue
         end
 
-        ObjectsNetwork.ObjectAdded:Fire(
-            Plr,
-            Obj.RuntimeId,
-            Compressor:CompressObject(Obj :: any),
-            Obj.Instance
-        )
+        Count += 1
+        RuntimeIds[Count] = Obj.RuntimeId
+        Buffers[Count] = Compressor:CompressObject(Obj :: any)
+        Instances[Count] = Obj.Instance or false
+
+        if Count >= CHUNK_SIZE and not Flush() then
+            return
+        end
     end
+
+    Flush()
 end
 
 -- Answering at all is the signal the client is waiting for, so this must be set

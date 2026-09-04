@@ -74,6 +74,33 @@ const Channels: {Channel} = {
         Args = {},
         Returns = {Codecs.Bool},
     },
+
+    {
+        -- Bulk replay of the property registry to a joining client. The replay
+        -- used to fire once per registry and once per live object, so a join
+        -- cost hundreds of packets in a single frame and blocked the server
+        -- thread that was building them.
+        Name = "Properties.RegistriesReplayed",
+        Args = {Codecs.Array(Codecs.Any)},
+    },
+
+    {
+        Name = "Objects.RegistriesReplayed",
+        Args = {Codecs.Array(Codecs.Any)},
+    },
+
+    {
+        -- Parallel arrays rather than one array of records: Codecs.Array needs
+        -- a codec per element, and the three parts each have their own. The
+        -- instance list carries false where an object has no instance, because
+        -- a nil entry would leave a hole and shift every later index.
+        Name = "Objects.ObjectsReplayed",
+        Args = {
+            Codecs.Array(Codecs.u32),
+            Codecs.Array(Codecs.Buffer),
+            Codecs.Array(Codecs.Any),
+        },
+    },
 }
 
 const ById: {Channel} = Channels

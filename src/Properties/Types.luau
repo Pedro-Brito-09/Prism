@@ -28,16 +28,20 @@ export type VectorConstraints = {
     Z: NumberConstraints?
 }
 
+-- The list is optional, not its entries. Declaring {EnumItem? | string?} made
+-- the list itself mandatory, so constraining an enum to nothing more than its
+-- type did not typecheck -- and supplying an empty list to satisfy that rejects
+-- every value, because IsValid treats a present whitelist as exhaustive.
 export type EnumConstraints = {
     Enum: Enum,
-    Whitelist: {EnumItem? | string?},
-    Blacklist: {EnumItem? | string?},
+    Whitelist: {EnumItem | string}?,
+    Blacklist: {EnumItem | string}?,
 }
 
 export type CustomEnumConstraints = {
     CustomEnum: CustomEnum.CustomEnum<any>,
-    Whitelist: {CustomEnum.RegisteredOption<any>? | CustomEnum.OptionId?},
-    Blacklist: {CustomEnum.RegisteredOption<any>? | CustomEnum.OptionId?},
+    Whitelist: {CustomEnum.RegisteredOption<any> | CustomEnum.OptionId}?,
+    Blacklist: {CustomEnum.RegisteredOption<any> | CustomEnum.OptionId}?,
 }
 
 type PropertyValues = {
@@ -193,6 +197,15 @@ function Types:IsValid<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraints
             end
         elseif Type == "CustomEnum" then
             const TypedValue = (Value :: any) :: CustomEnum.RegisteredOption<any>
+
+            -- The client resolves this constraint from the enum name the server
+            -- sent, and gets nil when that enum was never registered locally.
+            -- Nothing can be validated against an enum this peer does not know,
+            -- so reject rather than indexing nil.
+            if not Constraints.CustomEnum then
+                return false
+            end
+
             if TypedValue.Parent ~= Constraints.CustomEnum.Name then
                 return false
             end

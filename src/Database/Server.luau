@@ -63,10 +63,30 @@ const ATTEMPTS = 5
 -- crosses the line to still fit.
 const DEFAULT_SHARD_LIMIT = 3 * 1024 * 1024
 
+-- MemoryStore caps a value at 32KB and base64 inflates by a third, so a page
+-- past this cannot be shared however many times it is retried.
+const MEMORYSTORE_VALUE_LIMIT = 31 * 1024
+
 -- A fresh table each time: returning one shared constant would let a caller
 -- mutating Records corrupt every later empty result.
 const function EmptyPage(): Page
     return {Records = {}, HasMore = false}
+end
+
+-- FreezeRecords froze each record but not the array holding them, and Get hands
+-- the same page table to every caller out of its cache. One table.insert or
+-- table.remove on a returned page therefore rewrote what every other reader on
+-- this server would see next.
+const function FreezePage(Page: Page): Page
+    if not table.isfrozen(Page.Records) then
+        table.freeze(Page.Records)
+    end
+
+    if not table.isfrozen(Page) then
+        table.freeze(Page)
+    end
+
+    return Page
 end
 
 const Database = {}
@@ -83,8 +103,10 @@ end
 -- Manifest
 --=============================================================================
 
-const function GetManifest<T>(self: Database<T>): Manifest
-    if self.Manifest and os.clock() < self.ManifestExpiry then
+-- Force skips the cache. A caller about to write needs the current shard
+-- layout; readers are fine with one up to Expiration old.
+const function GetManifest<T>(self: Database<T>, Force: boolean?): Manifest
+    if not Force and self.Manifest and os.clock() < self.ManifestExpiry then
         return self.Manifest
     end
 
@@ -246,6 +268,52 @@ const function AfterWrite<T>(self: Database<T>)
     self.BypassUntil = os.clock() + self.Expiration
 end
 
+-- Which shard actually holds an id.
+--
+-- ShardForId answers from the manifest, and the manifest is cached for the
+-- expiration window. If another server sealed the tail inside that window, this
+-- server can have appended a record to the old tail whose id now falls past
+-- that shard's frozen boundary, so the manifest points at the shard after the
+-- one the record is really in. Listings walk every shard and still showed it,
+-- while GetById, Edit and Delete looked only where the manifest said and came
+-- back empty.
+--
+-- The expected shard is checked first, so the common path is still one read.
+const function LocateShard<T>(self: Database<T>, Id: number): number
+    const Manifest = GetManifest(self)
+    const Expected = ShardForId(Manifest, Id)
+
+    -- Assigned first rather than iterated inline: GetShard returns the records
+    -- and the shard's last id, and feeding both into a generic for puts that
+    -- second value in the loop's state slot. CollectOrdered already reads it
+    -- this way; the rest of the file now matches.
+    const Here = GetShard(self, Expected)
+    for _, Record in Here do
+        if Record.Id == Id then
+            return Expected
+        end
+    end
+
+    -- Only the shard immediately before it can hold a stranded record: the case
+    -- is a record appended to a tail that another server sealed underneath this
+    -- one, which leaves it exactly one shard behind where the boundary now
+    -- points. Scanning the rest would pull the whole corpus into memory every
+    -- time a caller passes an id that does not exist.
+    const Previous = Expected - 1
+    if Previous >= 1 then
+        const Behind = GetShard(self, Previous)
+        for _, Record in Behind do
+            if Record.Id == Id then
+                return Previous
+            end
+        end
+    end
+
+    -- Neither: keep the manifest's answer so a caller acting on an id that does
+    -- not exist yet still targets the shard the layout says owns it.
+    return Expected
+end
+
 --=============================================================================
 -- Reading
 --=============================================================================
@@ -332,7 +400,8 @@ const function CollectSorted<T>(self: Database<T>, Cache: Cache, Page: number): 
         const Collected = {}
 
         for Index = 1, Manifest.Count do
-            for _, Record in GetShard(self, Index) do
+            const Records = GetShard(self, Index)
+            for _, Record in Records do
                 table.insert(Collected, Record)
             end
         end
@@ -361,7 +430,7 @@ const function __get<T>(self: Database<T>, CacheName: string, Page: number?): Pa
     const Cache = self.Caches[CacheName]
     if not Cache then
         Logger:Warn(`Cache {CacheName} is not registered for {self.Key}.`)
-        return EmptyPage()
+        return FreezePage(EmptyPage())
     end
 
     const At = math.max(1, Page or 1)
@@ -384,16 +453,18 @@ const function __get<T>(self: Database<T>, CacheName: string, Page: number?): Pa
 
             if Ok then
                 FreezeRecords(Records :: {Metadata})
-                const Result: Page = {Records = Records :: {Metadata}, HasMore = Stored.HasMore == true}
+                const Result = FreezePage({Records = Records :: {Metadata}, HasMore = Stored.HasMore == true})
                 self.Pages[Key] = {Page = Result, Expiry = Now + self.Expiration}
                 return Result
             end
         end
     end
 
-    const Result = if Cache.IdOrdered
+    const Collected = if Cache.IdOrdered
         then CollectOrdered(self, Cache, At)
         else CollectSorted(self, Cache, At)
+
+    const Result = FreezePage(Collected)
 
     self.Pages[Key] = {Page = Result, Expiry = os.clock() + self.Expiration}
 
@@ -403,7 +474,10 @@ const function __get<T>(self: Database<T>, CacheName: string, Page: number?): Pa
         return Encoding.Encode(Compressor:CompressMetadatas(0, Result.Records))
     end)
 
-    if Ok then
+    -- An oversized page is skipped rather than attempted: SetAsync would refuse
+    -- the value, and Try would spend three attempts with backoff on a failure
+    -- that cannot succeed, on every single cache miss.
+    if Ok and #(Encoded :: string) <= MEMORYSTORE_VALUE_LIMIT then
         Try(3, self.MemoryStore.SetAsync, self.MemoryStore, Key, {
             Data = Encoded,
             HasMore = Result.HasMore,
@@ -419,8 +493,8 @@ const function __get_by_id<T>(self: Database<T>, Id: number): Metadata?
         return nil
     end
 
-    const Index = ShardForId(GetManifest(self), Id)
-    for _, Record in GetShard(self, Index) do
+    const Records = GetShard(self, LocateShard(self, Id))
+    for _, Record in Records do
         if Record.Id == Id then
             return Record
         end
@@ -437,7 +511,8 @@ const function __find<T>(self: Database<T>, Predicate: Predicate, Limit: number?
     const Found = {}
 
     for Index = 1, Manifest.Count do
-        for _, Record in GetShard(self, Index) do
+        const Records = GetShard(self, Index)
+        for _, Record in Records do
             if Predicate(Record) then
                 table.insert(Found, Record)
                 if #Found >= Wanted then
@@ -474,7 +549,11 @@ const function BuildMetadata<T>(self: Database<T>, Id: number): Metadata
 end
 
 const function __create<T>(self: Database<T>): (boolean, number?)
-    const Manifest = GetManifest(self)
+    -- Read through rather than trusting the cached copy. A stale manifest here
+    -- means appending to a tail another server already sealed, stranding the new
+    -- record in a shard whose boundary no longer covers its id. Creates are rare
+    -- enough that the extra request does not matter.
+    const Manifest = GetManifest(self, true)
     const Index = Manifest.Count
 
     -- A fresh tail shard has no records, so its id counter continues from the
@@ -539,13 +618,15 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[PropertyType
         return false
     end
 
-    const Index = ShardForId(GetManifest(self), Id)
+    const Index = LocateShard(self, Id)
     local Found = false
+    local Dirty = false
 
     const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old)
         -- Rebuilt from Old on every attempt: UpdateAsync can retry, and carrying
         -- state across attempts would apply an edit twice.
         Found = false
+        Dirty = false
         if not Old then
             return nil
         end
@@ -568,8 +649,14 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[PropertyType
                 end
 
                 if Remaining[Prop.Parent] ~= nil then
-                    if Prop:Set(Remaining[Prop.Parent]) then
+                    -- Accepted and Changed are separate: setting a property to
+                    -- the value it already holds is a successful edit with
+                    -- nothing to persist. Treating that as a write meant every
+                    -- no-op edit cost a full shard rewrite.
+                    const Accepted, Changed = Prop:Set(Remaining[Prop.Parent])
+                    if Accepted then
                         Found = true
+                        Dirty = Dirty or Changed
                     end
 
                     Remaining[Prop.Parent] = nil
@@ -580,6 +667,7 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[PropertyType
                 const NewProperty = Properties.new(PropId)
                 if NewProperty:Set(Value) then
                     Found = true
+                    Dirty = true
                     table.insert(Record, NewProperty)
                 end
             end
@@ -587,14 +675,14 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[PropertyType
             break
         end
 
-        if not Found then
+        if not Found or not Dirty then
             return nil
         end
 
         return Compressor:CompressMetadatas(LastId, Records)
     end)
 
-    if Found and Success then
+    if Dirty and Success then
         AfterWrite(self)
     end
 
@@ -606,7 +694,7 @@ const function __delete<T>(self: Database<T>, Id: number): boolean
         return false
     end
 
-    const Index = ShardForId(GetManifest(self), Id)
+    const Index = LocateShard(self, Id)
     local Found = false
 
     const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old)

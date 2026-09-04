@@ -397,7 +397,18 @@ function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject)
     const Buffers = {}
     const IsDecompressed = (Obj :: any).__type == "DecompressedObject"
 
-    for Key, Entry in (Obj :: any).Properties do
+    -- Walked in id order rather than hash order, so the same object always
+    -- produces the same bytes. Hash order meant two identical objects serialized
+    -- differently, which rules out hashing, diffing or deduplicating saves.
+    const Keys = {}
+    for Key in (Obj :: any).Properties do
+        table.insert(Keys, Key)
+    end
+
+    table.sort(Keys)
+
+    for _, Key in Keys do
+        const Entry = (Obj :: any).Properties[Key]
         local Id, Type, Value
 
         if IsDecompressed then

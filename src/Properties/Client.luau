@@ -1,6 +1,8 @@
 --!strict
+const CustomEnum = require("../CustomEnum")
 const Network = require("./Network")
 const Shared = require("./Shared")
+const Logger = require("../Logger")
 const Types = require("./Types")
 
 export type PropertyType = Types.PropertyType
@@ -26,8 +28,29 @@ function Properties.new(Reference: PropertyRegistry<any> | PropertyIdentifier): 
     return Shared.new(Registered, Reference)
 end
 
-Network.PropertyRegistered:Connect(function(Prop: PropertyRegistry<any>)
-    Registered[Prop.Id] = Prop
+-- The server sends a CustomEnum constraint as the enum's name, because the enum
+-- table carries methods and a remote cannot serialize a function. Resolve it
+-- back into the local registry so IsValid can compare against it.
+const function Register(Payload: any)
+    const Constraints = Payload.Constraints
+    if Payload.Type == "CustomEnum" and Constraints and type(Constraints.CustomEnum) == "string" then
+        const Resolved = CustomEnum:GetEnum(Constraints.CustomEnum)
+        if not Resolved then
+            Logger:Warn(`Property {Payload.Id} constrains to custom enum {Constraints.CustomEnum}, which is not registered on this client.`)
+        end
+
+        Constraints.CustomEnum = Resolved
+    end
+
+    Registered[Payload.Id] = Payload
+end
+
+Network.PropertyRegistered:Connect(Register)
+
+Network.RegistriesReplayed:Connect(function(Payloads: {any})
+    for _, Payload in Payloads do
+        Register(Payload)
+    end
 end)
 
 return Properties

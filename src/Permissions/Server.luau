@@ -141,11 +141,22 @@ end
 function Permissions:Can(Plr: Player, Action: Action, ObjectType: ObjectType?): boolean
     const Perm = Permissions:Get(Plr)
 
-    if Action == "Create" and not Perm.CanCreate then
+    -- Resolved rather than chained, so an action string that matches none of
+    -- the three denies. The chained form fell through to the allow path, and
+    -- the union type only catches that when the verb is a literal.
+    local Allowed: boolean
+    if Action == "Create" then
+        Allowed = Perm.CanCreate
+    elseif Action == "Edit" then
+        Allowed = Perm.CanEdit
+    elseif Action == "Destroy" then
+        Allowed = Perm.CanDestroy
+    else
+        Logger:Warn(`Unknown permission action {Action}. Denying.`)
         return false
-    elseif Action == "Edit" and not Perm.CanEdit then
-        return false
-    elseif Action == "Destroy" and not Perm.CanDestroy then
+    end
+
+    if not Allowed then
         return false
     end
 

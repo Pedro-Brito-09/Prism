@@ -27,11 +27,20 @@ function Permissions:Get(): Permission
 end
 
 function Permissions:Can(Action: Action, ObjectType: ObjectType?): boolean
-    if Action == "Create" and not Current.CanCreate then
+    -- Mirrors the server: an unrecognised verb denies rather than falling
+    -- through to the allow path.
+    local Allowed: boolean
+    if Action == "Create" then
+        Allowed = Current.CanCreate
+    elseif Action == "Edit" then
+        Allowed = Current.CanEdit
+    elseif Action == "Destroy" then
+        Allowed = Current.CanDestroy
+    else
         return false
-    elseif Action == "Edit" and not Current.CanEdit then
-        return false
-    elseif Action == "Destroy" and not Current.CanDestroy then
+    end
+
+    if not Allowed then
         return false
     end
 

@@ -5,6 +5,7 @@
 -- referenced by index, so a packet is always one buffer plus an optional table.
 
 const Varint = require("./Varint")
+const Logger = require("./Logger")
 
 export type Codec<T> = {
     Measure: (Value: T) -> number,
@@ -92,6 +93,12 @@ Codecs.String = {
     end,
 
     Write = function(Buf: buffer, Offset: number, Value: string): number
+        -- The length field is a u16, so anything longer wraps and decodes as a
+        -- different string rather than failing.
+        if #Value > 65535 then
+            Logger:Error(`String codec takes at most 65535 bytes, got {#Value}. Use LongString.`)
+        end
+
         buffer.writeu16(Buf, Offset, #Value)
         buffer.writestring(Buf, Offset + 2, Value)
         return 2 + #Value
@@ -134,6 +141,14 @@ Codecs.Buffer = {
 
     Read = function(Buf: buffer, Offset: number): (buffer, number)
         const Length = buffer.readu32(Buf, Offset)
+
+        -- The length comes straight off the wire, so a client can declare four
+        -- gigabytes and have the server try to allocate it before anything else
+        -- runs. Bound it by what the packet actually carries first.
+        if Length > buffer.len(Buf) - Offset - 4 then
+            Logger:Error(`Buffer codec length {Length} overruns the packet.`)
+        end
+
         const Slice = buffer.create(Length)
         buffer.copy(Slice, 0, Buf, Offset + 4, Length)
         return Slice, 4 + Length
@@ -278,6 +293,10 @@ function Codecs.Array<T>(Inner: Codec<T>): Codec<{T}>
         end,
 
         Write = function(Buf: buffer, Offset: number, Value: {T}, Extras: {any}): number
+            if #Value > 65535 then
+                Logger:Error(`Array codec takes at most 65535 entries, got {#Value}.`)
+            end
+
             buffer.writeu16(Buf, Offset, #Value)
 
             local Cursor = Offset + 2

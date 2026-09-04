@@ -23,7 +23,9 @@ export type ObjectRegistry = {
     Name: string,
     Properties: {PropertyTypes.PropertyIdentifier},
 
-    -- Template only. Objects.new clones it; it must not live under game.
+    -- Template only. Objects.new clones it and parents the clone to Container,
+    -- so put it somewhere that does not replicate or render on its own --
+    -- ServerStorage or ReplicatedStorage rather than Workspace.
     Instance: Instance?,
     Container: Instance?,
     Links: {InstanceLinkRegistry}?,

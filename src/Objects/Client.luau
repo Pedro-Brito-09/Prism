@@ -18,6 +18,22 @@ const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
 const Workspace: {[RuntimeId]: Object} = {}
 const ByInstance: {[Instance]: RuntimeId} = setmetatable({}, {__mode = "k"}) :: any
 
+-- Every optimistic set takes a ticket, and only the newest outstanding one for
+-- a property is allowed to roll back. Dragging issues a set per frame: without
+-- this, a refusal for frame 1 arriving after frame 2 applied would roll the
+-- value back to what it held before frame 1 and discard frame 2 entirely.
+-- Weak keyed so a destroyed object's properties do not pin entries here.
+local Ticket = 0
+const Pending: {[any]: number} = setmetatable({}, {__mode = "k"}) :: any
+
+-- The value the server has actually asserted for a property. A refusal rolls
+-- back to this rather than to whatever was on screen just before the refused
+-- set: two refused sets in a row used to leave the second one's starting value
+-- in place, which is the first refused value, and no broadcast follows a
+-- refusal to correct it. Seeded when the object arrives, updated on every
+-- PropertyChanged.
+const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
+
 const function __getter(self: Object, Reference: PropertyTypes.PropertyIdentifier | string): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -39,7 +55,6 @@ const function __setter(self: Object, Reference: PropertyTypes.PropertyIdentifie
         return false
     end
 
-    const Previous = Prop.Value
     const Accepted, Changed = Prop:Set(Value)
     if not Accepted then
         return false
@@ -59,13 +74,25 @@ const function __setter(self: Object, Reference: PropertyTypes.PropertyIdentifie
     const RuntimeId = self.RuntimeId
     const PropId = Prop.Parent
 
+    Ticket += 1
+    const Mine = Ticket
+    Pending[Prop] = Mine
+
     task.spawn(function()
         const Ok, Allowed = pcall(function()
             return Network.SetProperty:Invoke(RuntimeId, PropId, Compressed)
         end)
 
+        -- Superseded while in flight: the newer set owns the value now, and its
+        -- own answer will decide whether to roll back.
+        if Pending[Prop] ~= Mine then
+            return
+        end
+
+        Pending[Prop] = nil
+
         if (not Ok or not Allowed) and not self.Destroyed then
-            Prop:Set(Previous)
+            Prop:Set(Confirmed[Prop])
         end
     end)
 
@@ -139,11 +166,9 @@ function Objects:FromInstance(Inst: Instance): Object?
     return nil
 end
 
-Network.ObjectRegistered:Connect(function(Registry: ObjectRegistry)
-    Registered[Registry.Id] = Registry
-end)
-
-Network.ObjectAdded:Connect(function(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instance?)
+-- Shared by the live ObjectAdded broadcast and the batched join replay, which
+-- carry the same three values and differ only in how many arrive at once.
+const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instance?)
     const Ok, Data = pcall(function()
         return Compressor:DecompressObject(Compressed)
     end)
@@ -174,6 +199,8 @@ Network.ObjectAdded:Connect(function(RuntimeId: RuntimeId, Compressed: buffer, I
             Prop:Set(Data.Properties[PropId])
         end
 
+        -- Whatever the object arrived holding is what the server holds.
+        Confirmed[Prop] = Prop.Value
         Obj.Properties[PropId] = Prop
     end
 
@@ -184,6 +211,33 @@ Network.ObjectAdded:Connect(function(RuntimeId: RuntimeId, Compressed: buffer, I
     Workspace[RuntimeId] = Obj
     if Inst then
         ByInstance[Inst] = RuntimeId
+    end
+end
+
+Network.ObjectRegistered:Connect(function(Registry: ObjectRegistry)
+    Registered[Registry.Id] = Registry
+end)
+
+Network.RegistriesReplayed:Connect(function(Registries: {ObjectRegistry})
+    for _, Registry in Registries do
+        Registered[Registry.Id] = Registry
+    end
+end)
+
+Network.ObjectAdded:Connect(AddObject)
+
+-- The instance list carries false where an object has no instance: a nil entry
+-- would leave a hole in the array and shift every later index against the ids.
+Network.ObjectsReplayed:Connect(function(RuntimeIds: {number}, Buffers: {buffer}, Instances: {any})
+    for Index, RuntimeId in RuntimeIds do
+        const Inst = Instances[Index]
+        const Resolved = if Inst == false then nil else Inst
+
+        -- One bad entry must not cost the rest of the batch.
+        const Ok, Err = pcall(AddObject, RuntimeId, Buffers[Index], Resolved)
+        if not Ok then
+            Logger:Warn(`Failed to add replayed object {RuntimeId}: {Err}`)
+        end
     end
 end)
 
@@ -214,7 +268,11 @@ Network.PropertyChanged:Connect(function(RuntimeId: RuntimeId, PropId: PropertyT
     end)
 
     if Ok and Type == Prop.Type then
+        -- The server has spoken, so no in-flight set may roll back over this,
+        -- and this is now the value a later refusal should return to.
+        Pending[Prop] = nil
         Prop:Set(Value)
+        Confirmed[Prop] = Prop.Value
     end
 end)
 
