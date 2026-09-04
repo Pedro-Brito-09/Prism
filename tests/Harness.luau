@@ -50,7 +50,9 @@ function Harness:Test(Name: string, Fn: () -> ())
         table.insert(self.Errors, `threw: {Err}`)
     end
 
-    if self.SkipReason then
+    -- A test that recorded a failure and then skipped is still a failure. The
+    -- skip used to be checked first and hid the error.
+    if self.SkipReason and #self.Errors == 0 then
         self.Skipped += 1
         const Message = `[{self.Group}] {Name}: {self.SkipReason}`
         table.insert(self.Skips, Message)

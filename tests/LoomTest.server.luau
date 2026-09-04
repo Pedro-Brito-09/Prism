@@ -508,11 +508,52 @@ const TintId = Properties:Register({
     DefaultValue = Color3.new(1, 1, 1),
 }) :: number
 
+const ShapeId = Properties:Register({
+    Name = "TestShape",
+    Type = "CustomEnum",
+    DefaultValue = Shapes.Options[1],
+    Constraints = {CustomEnum = Shapes},
+}) :: number
+
 T:Test("registration returns usable ids", function()
     T:Ok(TitleId, "title")
     T:Ok(HealthId, "health")
     T:Eq(Properties:GetRegistry(TitleId).Name, "TestTitle", "registry name")
     T:Eq(Properties:GetRegistry(TitleId).Type, "Text", "registry type")
+end)
+
+T:Test("REGRESSION: a CustomEnum registry crosses the wire without its methods", function()
+    -- The enum table carries GetById and GetByValue, and a remote refuses to
+    -- serialize a function, so broadcasting the registry raw threw for every
+    -- CustomEnum property and no client ever received one.
+    const Payload = Properties:GetRegistryPayload(ShapeId)
+    T:Ok(Payload, "payload built")
+    T:Eq(type(Payload.Constraints.CustomEnum), "string", "enum reduced to its name")
+    T:Eq(Payload.Constraints.CustomEnum, "TestShapes", "the right name")
+
+    for Key, Value in Payload.Constraints do
+        T:Ok(type(Value) ~= "function", `constraint {Key} is not a function`)
+    end
+
+    -- The server's own registry keeps the real table.
+    T:Eq(type(Properties:GetRegistry(ShapeId).Constraints.CustomEnum), "table", "server copy untouched")
+end)
+
+T:Test("a CustomEnum property validates and round trips", function()
+    const Prop = Properties.new(ShapeId)
+    T:Eq(Prop.Value.Id, 1, "starts at the default option")
+
+    T:Ok((Prop:Set(Shapes:GetById(2))), "accepted a real option")
+    T:Eq(Prop.Value.Value, "Square", "value applied")
+    T:Ok(not (Prop:Set("Square")), "refused a bare string")
+
+    const Buf = Compressor:CompressValue("CustomEnum", Prop.Value)
+    T:Ok(Buf, "compressed")
+
+    const Back, _, Type = Compressor:DecompressValue(Buf :: buffer, 0)
+    T:Eq(Type, "CustomEnum", "tag preserved")
+    T:Eq(Back.Id, 2, "option id preserved")
+    T:Eq(Back.Parent, "TestShapes", "parent preserved")
 end)
 
 T:Test("refuses a duplicate custom id", function()
@@ -795,6 +836,68 @@ T:Test("links are disconnected on destroy", function()
     T:Ok(Prop.Listeners, "listener attached while alive")
     Obj:Destroy()
     T:Eq(Prop.Listeners, nil, "listener released")
+end)
+
+T:Test("links that cannot work are refused at registration", function()
+    -- Validated once against the template. These used to be checked inside
+    -- Objects.new, so one malformed link warned again for every object made.
+    const Bad = Objects:Register({
+        Name = "TestBadLinks",
+        Properties = {TitleId, HealthId, ShapeId},
+        Instance = Template,
+        Container = Container,
+        Links = {
+            -- SetAttribute throws on a table, which is what an option is.
+            {Property = ShapeId, Type = "Attribute", Name = "Shape"},
+            -- Readable, but assigning to it throws.
+            {Property = TitleId, Type = "Property", Name = "ClassName"},
+            -- Not a member at all.
+            {Property = TitleId, Type = "Property", Name = "NotARealProperty"},
+            -- Neither Property nor Attribute.
+            {Property = HealthId, Type = "Nonsense" :: any, Name = "Health"},
+        },
+    }) :: number
+
+    T:Eq(Objects:GetRegistry(Bad).Links, nil, "every bad link dropped")
+
+    const Obj = Objects.new(Bad)
+    T:Eq(Obj.Links, nil, "so nothing is wired onto the instance")
+    Obj:Destroy()
+end)
+
+T:Test("a property linked twice keeps only the first link", function()
+    const Dupe = Objects:Register({
+        Name = "TestDuplicateLink",
+        Properties = {TintId},
+        Instance = Template,
+        Container = Container,
+        Links = {
+            {Property = TintId, Type = "Property", Name = "Color"},
+            {Property = TintId, Type = "Attribute", Name = "Tint"},
+        },
+    }) :: number
+
+    const Links = Objects:GetRegistry(Dupe).Links
+    T:Ok(Links, "a link survived")
+    T:Eq(#(Links :: any), 1, "exactly one")
+    T:Eq((Links :: any)[1].Type, "Property", "the first one wins")
+end)
+
+T:Test("initial values are applied before links and before the broadcast", function()
+    const Tint = Color3.fromRGB(10, 20, 30)
+    const Obj = Objects.new(CrateId, {[TitleId] = "Preloaded", [TintId] = Tint})
+
+    T:Eq(Obj:Get(TitleId), "Preloaded", "text applied")
+    T:Eq(Obj:Get(TintId), Tint, "colour applied")
+
+    -- Wired after the values land, so the part carries the real colour rather
+    -- than the registry default followed by a correction.
+    T:Ok(Obj.Instance, "has an instance")
+    if Obj.Instance then
+        T:Eq((Obj.Instance :: any).Color, Tint, "link seeded from the initial value")
+    end
+
+    Obj:Destroy()
 end)
 
 T:Test("round trips through compression", function()
