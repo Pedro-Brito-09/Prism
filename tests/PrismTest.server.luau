@@ -1,10 +1,10 @@
 --!strict
 --[[
-    Loom test suite -- server half.
+    Prism test suite -- server half.
 
     Put this in ServerScriptService, put Harness.luau at
-    ReplicatedStorage/LoomTests/Harness, and point LOOM below at wherever you
-    synced src/. Run it alongside LoomTest.client.luau with one test player.
+    ReplicatedStorage/PrismTests/Harness, and point PRISM below at wherever you
+    synced src/. Run it alongside PrismTest.client.luau with one test player.
 
     The Database section is off by default: it writes to real DataStore and
     MemoryStore keys and needs Studio API access enabled. Turn RUN_DATABASE on
@@ -15,25 +15,25 @@ const Players = game:GetService("Players")
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 const ServerStorage = game:GetService("ServerStorage")
 
-const LOOM = ReplicatedStorage:WaitForChild("Loom")
+const PRISM = ReplicatedStorage:WaitForChild("Prism")
 const RUN_DATABASE = false
-const DATABASE_KEY = "LoomSelfTest"
+const DATABASE_KEY = "PrismSelfTest"
 
-const Loom = require(LOOM)
-const Harness = require(ReplicatedStorage:WaitForChild("LoomTests"):WaitForChild("Harness"))
+const Prism = require(PRISM)
+const Harness = require(ReplicatedStorage:WaitForChild("PrismTests"):WaitForChild("Harness"))
 
-const Networking = Loom.Networking
-const Properties = Loom.Properties
-const PropertyTypes = require(LOOM.Properties.Types)
-const Compressor = Loom.Compressor
-const Permissions = Loom.Permissions
-const CustomEnum = Loom.CustomEnum
-const Encoding = Loom.Encoding
-const Objects = Loom.Objects
-const IdPool = Loom.IdPool
-const Codecs = Loom.Codecs
-const Varint = Loom.Varint
-const Try = Loom.Try
+const Networking = Prism.Networking
+const Properties = Prism.Properties
+const PropertyTypes = require(PRISM.Properties.Types)
+const Compressor = Prism.Compressor
+const Permissions = Prism.Permissions
+const CustomEnum = Prism.CustomEnum
+const Encoding = Prism.Encoding
+const Objects = Prism.Objects
+const IdPool = Prism.IdPool
+const Codecs = Prism.Codecs
+const Varint = Prism.Varint
+const Try = Prism.Try
 
 const T = Harness.new()
 
@@ -191,10 +191,10 @@ end)
 T:Describe("Networking")
 
 T:Test("channel lookups are stable", function()
-    const First = Networking:Get("Loom.Ready")
-    const Second = Networking:Get("Loom.Ready")
+    const First = Networking:Get("Prism.Ready")
+    const Second = Networking:Get("Prism.Ready")
     T:Eq(First, Second, "same manifest entry")
-    T:Eq(First.Name, "Loom.Ready", "channel name")
+    T:Eq(First.Name, "Prism.Ready", "channel name")
     T:Ok(First.Id > 0 and First.Id <= 255, "channel id fits the packet header")
 end)
 
@@ -213,12 +213,12 @@ end)
 
 T:Test("server-to-client invokes are rejected", function()
     T:Throws(function()
-        Networking:Get("Loom.Ready"):Invoke()
+        Networking:Get("Prism.Ready"):Invoke()
     end, "server invoke")
 end)
 
 T:Test("connections disconnect idempotently", function()
-    const Ready = Networking:Get("Loom.Ready")
+    const Ready = Networking:Get("Prism.Ready")
     const Before = #Ready.Connections
     const Disconnect = Ready:Connect(function() end)
 
@@ -722,12 +722,12 @@ end)
 T:Describe("Objects")
 
 const Template = Instance.new("Part")
-Template.Name = "LoomTestTemplate"
+Template.Name = "PrismTestTemplate"
 Template.Anchored = true
 Template.Parent = ServerStorage
 
 const Container = Instance.new("Folder")
-Container.Name = "LoomTestContainer"
+Container.Name = "PrismTestContainer"
 Container.Parent = workspace
 
 const CrateId = Objects:Register({
@@ -1188,7 +1188,7 @@ if RUN_DATABASE then
 
     -- ShardLimit is deliberately tiny so the seal path runs after a handful of
     -- records instead of needing three megabytes of them.
-    const db = Loom.Database.new({
+    const db = Prism.Database.new({
         Key = DATABASE_KEY,
         InitialMetadata = {Title, Plays},
         ShardLimit = 400,
@@ -1400,11 +1400,11 @@ end
 
 const Passed = T:Report()
 if not Passed then
-    error("[ LOOM TEST ] Server suite failed; see the failures above.", 0)
+    error("[ PRISM TEST ] Server suite failed; see the failures above.", 0)
 end
 
 if not RUN_DATABASE then
-    print("[ LOOM TEST ] Database suite skipped. Set RUN_DATABASE = true to run it.")
+    print("[ PRISM TEST ] Database suite skipped. Set RUN_DATABASE = true to run it.")
 end
 
-print("[ LOOM TEST ] Client fixtures are ready; LoomTest.client.luau runs separately.")
+print("[ PRISM TEST ] Client fixtures are ready; PrismTest.client.luau runs separately.")
