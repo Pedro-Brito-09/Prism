@@ -1,9 +1,9 @@
 --!strict
 --[[
-    Loom test suite -- client half.
+    Prism test suite -- client half.
 
     Put this in StarterPlayerScripts, put Harness.luau at
-    ReplicatedStorage/LoomTests/Harness, and run the server half alongside it.
+    ReplicatedStorage/PrismTests/Harness, and run the server half alongside it.
     It verifies the things a server-only test cannot: that the ready handshake
     actually delivers, registries and live objects replicate, permissions
     update, and accepted/refused edits converge on the server's decision.
@@ -13,7 +13,7 @@
 
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-const LOOM = ReplicatedStorage:WaitForChild("Loom")
+const PRISM = ReplicatedStorage:WaitForChild("Prism")
 const CRATE_OBJECT = "TestCrate"
 const BARE_OBJECT = "TestBare"
 const FIXTURE_PROPERTY = "TestTitle"
@@ -22,12 +22,12 @@ const EDITABLE_MARKER = "FixtureEditable"
 const DESTROY_MARKER = "FixtureDestroy"
 const TIMEOUT = 15
 
-const Loom = require(LOOM)
-const Harness = require(ReplicatedStorage:WaitForChild("LoomTests"):WaitForChild("Harness"))
+const Prism = require(PRISM)
+const Harness = require(ReplicatedStorage:WaitForChild("PrismTests"):WaitForChild("Harness"))
 
-const Permissions = Loom.Permissions
-const Objects = Loom.Objects
-const Properties = Loom.Properties
+const Permissions = Prism.Permissions
+const Objects = Prism.Objects
+const Properties = Prism.Properties
 
 const T = Harness.new()
 
@@ -77,11 +77,11 @@ const function WaitFor(What: string, Check: () -> any): any
         task.wait(0.1)
     end
 
-    warn(`[ LOOM TEST ] Timed out waiting for {What}.`)
+    warn(`[ PRISM TEST ] Timed out waiting for {What}.`)
     return nil
 end
 
-print("[ LOOM TEST ] Waiting for replication...")
+print("[ PRISM TEST ] Waiting for replication...")
 
 const TitleId = WaitFor("property registry", function()
     return FindProperty(FIXTURE_PROPERTY)
@@ -317,5 +317,5 @@ end)
 --=============================================================================
 
 if not T:Report() then
-    error("[ LOOM TEST ] Client suite failed; see the failures above.", 0)
+    error("[ PRISM TEST ] Client suite failed; see the failures above.", 0)
 end

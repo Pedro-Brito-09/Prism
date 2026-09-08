@@ -1,12 +1,12 @@
-# Loom
+# Prism
 
-Loom is a framework made to facilitate the creation of level editors for roblox games.
+Prism is a framework made to facilitate the creation of level editors for roblox games.
 
 `src/` is a ModuleScript folder (`init.luau` is the module itself). Require it from
 both sides; it resolves the server or client half of each subsystem for you.
 
 ```lua
-local Loom = require(path.to.Loom)
+local Prism = require(path.to.Prism)
 ```
 
 ## Properties
@@ -15,7 +15,7 @@ A property is a typed, constrained field. Register it once on the server; the
 registry replicates to every client, including late joiners.
 
 ```lua
-local Health = Loom.Properties:Register({
+local Health = Prism.Properties:Register({
     Name = "Health",
     Type = "Number",
     DefaultValue = 100,
@@ -34,7 +34,7 @@ An object type is a named set of properties, optionally backed by a template
 instance. `Objects.new` clones that template per instance.
 
 ```lua
-local Enemy = Loom.Objects:Register({
+local Enemy = Prism.Objects:Register({
     Name = "Enemy",
     Properties = {Health},
     Instance = ServerStorage.EnemyTemplate,
@@ -44,7 +44,7 @@ local Enemy = Loom.Objects:Register({
     },
 })
 
-local enemy = Loom.Objects.new(Enemy)
+local enemy = Prism.Objects.new(Enemy)
 enemy:Set(Health, 50)
 enemy:Get("Health")
 enemy:Destroy()
@@ -68,7 +68,7 @@ Client edits are denied unless a role allows them. Roles are named, not per
 object, and can blacklist object types outright.
 
 ```lua
-Loom.Permissions:Register("Builder", {
+Prism.Permissions:Register("Builder", {
     Level = 10,
     CanCreate = true,
     CanEdit = true,
@@ -77,15 +77,15 @@ Loom.Permissions:Register("Builder", {
     Blacklist = {Enemy},  -- may not touch this object type
 })
 
-Loom.Permissions:SetDefault("Viewer")
-Loom.Permissions:Assign(player, "Builder")
+Prism.Permissions:SetDefault("Viewer")
+Prism.Permissions:Assign(player, "Builder")
 ```
 
 The client can read its own role to grey out tools; the server re-checks every
 request regardless.
 
 ```lua
-if Loom.Permissions:Can("Edit", objectType) then ... end
+if Prism.Permissions:Can("Edit", objectType) then ... end
 ```
 
 ## Database
@@ -96,9 +96,9 @@ boundary freezes and a new tail opens. Records never move between shards, and
 edits to different shards do not contend with each other.
 
 ```lua
-local db = Loom.Database.new({
+local db = Prism.Database.new({
     Key = "Levels",
-    InitialMetadata = {Loom.Properties.new(Title), Loom.Properties.new(Plays)},
+    InitialMetadata = {Prism.Properties.new(Title), Prism.Properties.new(Plays)},
 })
 
 local ok, id = db:Create()
@@ -168,7 +168,7 @@ from the manifest order, so they match on both sides.
 ```
 
 ```lua
-local Move = Loom.Networking:Get("MyFeature.Move")
+local Move = Prism.Networking:Get("MyFeature.Move")
 Move:Fire(player, runtimeId, Vector3.new(1, 2, 3))  -- server, targeted
 Move:FireAll(runtimeId, Vector3.new(1, 2, 3))
 Move.OnInvoke = function(player, runtimeId, position) return true end
@@ -215,10 +215,13 @@ Ids, lengths and counts are LEB128 varints: one byte below 128, two below 16384.
 
 Property ids are **never recycled**, because they are written into saved data —
 reusing one for a different property would silently reinterpret every record
-still carrying it. Object runtime ids still recycle.
+still carrying it. Object registry ids are not recycled either, for the same
+reason: a registry id is written into every saved object as its type. Runtime
+ids come from a monotonic per-session counter and are never reused.
 
-Packs and records carry a format version and readers refuse anything newer than
-they understand rather than misreading it.
+Objects and packs carry a format version, and readers refuse anything newer
+than they understand rather than misreading it. Individual metadata records do
+not — the version lives on the pack that contains them.
 
 ## Tests
 
@@ -228,14 +231,14 @@ with Roblox Script Sync using this layout:
 
 ```text
 ReplicatedStorage
-├── Loom                         <- src/
-└── LoomTests
-    └── Harness                  <- tests/Harness.luau (ModuleScript)
+├── Prism                          <- src/
+└── PrismTests
+    └── Harness                    <- tests/Harness.luau (ModuleScript)
 ServerScriptService
-└── LoomTest                     <- tests/LoomTest.server.luau
+└── PrismTest                      <- tests/PrismTest.server.luau
 StarterPlayer
 └── StarterPlayerScripts
-    └── LoomTest                 <- tests/LoomTest.client.luau
+    └── PrismTest                  <- tests/PrismTest.client.luau
 ```
 
 Then use **Test > Play** with one player. The server creates three integration
@@ -245,5 +248,5 @@ assertion, then fails the corresponding script.
 
 The database tests are disabled by default because they write to DataStore and
 MemoryStore. To include them, enable Studio API access and set `RUN_DATABASE` to
-`true` near the top of `tests/LoomTest.server.luau`; the suite uses the
-`LoomSelfTest` key and removes its DataStore records afterward.
+`true` near the top of `tests/PrismTest.server.luau`; the suite uses the
+`PrismSelfTest` key and removes its DataStore records afterward.

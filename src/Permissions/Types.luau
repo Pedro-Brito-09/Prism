@@ -10,7 +10,7 @@ export type Action = "Create" | "Edit" | "Destroy"
 export type ObjectType = number
 
 export type PermissionConfig = {
-    -- Ordering only. Loom never compares levels itself; it is there so your
+    -- Ordering only. Prism never compares levels itself; it is there so your
     -- editor can ask "is this player at least a Builder" without a lookup table.
     Level: number,
 

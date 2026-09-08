@@ -194,11 +194,11 @@ end
 
 if IS_SERVER then
     Event = Instance.new("RemoteEvent")
-    Event.Name = "__loom_event"
+    Event.Name = "__prism_event"
     Event.Parent = ReplicatedStorage
 
     Function = Instance.new("RemoteFunction")
-    Function.Name = "__loom_function"
+    Function.Name = "__prism_function"
     Function.Parent = ReplicatedStorage
 
     Event.OnServerEvent:Connect(function(Plr: Player, Buf: any, Extras: any)
@@ -234,12 +234,12 @@ if IS_SERVER then
         return true, ReturnBuf, ReturnExtras
     end
 else
-    const FoundEvent = ReplicatedStorage:WaitForChild("__loom_event", WAIT_TIMEOUT)
+    const FoundEvent = ReplicatedStorage:WaitForChild("__prism_event", WAIT_TIMEOUT)
     if not FoundEvent then
         Logger:Error("Failed to retrieve networking remote event.")
     end
 
-    const FoundFunction = ReplicatedStorage:WaitForChild("__loom_function", WAIT_TIMEOUT)
+    const FoundFunction = ReplicatedStorage:WaitForChild("__prism_function", WAIT_TIMEOUT)
     if not FoundFunction then
         Logger:Error("Failed to retrieve networking remote function.")
     end

@@ -1,6 +1,6 @@
 --!strict
 const Logger = {}
-const PREFIX = "[ LOOM ]"
+const PREFIX = "[ PRISM ]"
 
 function Logger:Log(Message: string)
     print(`{PREFIX} {Message}`)

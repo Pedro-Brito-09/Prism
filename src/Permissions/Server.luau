@@ -195,7 +195,7 @@ end
 
 -- Called by Replication once the client has announced it is listening, rather
 -- than on PlayerAdded. Firing at join meant the payload went out before the
--- client had finished requiring Loom and connecting its handlers, leaving it
+-- client had finished requiring Prism and connecting its handlers, leaving it
 -- stuck on the deny-everything fallback.
 function Permissions:SendTo(Plr: Player)
     Network.Assigned:Fire(Plr, Permissions:GetPayload(Plr))

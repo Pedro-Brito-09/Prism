@@ -62,7 +62,7 @@ const Channels: {Channel} = {
     },
 
     {
-        -- Client to server, once, after it has required Loom and connected its
+        -- Client to server, once, after it has required Prism and connected its
         -- handlers. The server replays current state only then: firing at
         -- PlayerAdded raced the client's own module load, and a large registry
         -- could overflow the unhandled-event queue and lose entries outright.
@@ -70,7 +70,7 @@ const Channels: {Channel} = {
         -- was listening. A fired event with no handler registered yet is
         -- dropped silently, and the server's Replication module can easily
         -- finish loading after a client has already announced itself.
-        Name = "Loom.Ready",
+        Name = "Prism.Ready",
         Args = {},
         Returns = {Codecs.Bool},
     },
@@ -108,14 +108,14 @@ const ByName: {[string]: number} = {}
 
 for Id, Channel in Channels do
     if ByName[Channel.Name] then
-        error(`[ LOOM ] Duplicate channel name in manifest: {Channel.Name}`)
+        error(`[ PRISM ] Duplicate channel name in manifest: {Channel.Name}`)
     end
 
     ByName[Channel.Name] = Id
 end
 
 if #Channels > 255 then
-    error("[ LOOM ] Channel manifest exceeds 255 entries; widen the channel id from u8.")
+    error("[ PRISM ] Channel manifest exceeds 255 entries; widen the channel id from u8.")
 end
 
 return {

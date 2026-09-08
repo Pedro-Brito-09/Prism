@@ -6,7 +6,7 @@
 -- stayed that way. Requiring this module on the server closes that hole.
 --
 -- The replay is driven by the client announcing it is ready, not by PlayerAdded.
--- At PlayerAdded the client has not finished requiring Loom, so nothing is
+-- At PlayerAdded the client has not finished requiring Prism, so nothing is
 -- listening yet; Roblox queues unhandled remote events but the queue is bounded,
 -- and a registry of any size can overflow it and silently drop entries.
 --
@@ -24,7 +24,7 @@ const Networking = require("./Networking")
 const Compressor = require("./Compressor")
 const Objects = require("./Objects/Server")
 
-const Ready = Networking:Get("Loom.Ready")
+const Ready = Networking:Get("Prism.Ready")
 
 const Replication = {}
 const Replayed: {[Player]: true} = {}
