@@ -23,6 +23,11 @@ else
     Prism.Properties = require("@self/Properties/Client")
     Prism.Objects = require("@self/Objects/Client")
     Prism.Permissions = require("@self/Permissions/Client")
+
+    -- Client only, and not as a policy: it reads Objects/Client directly, so
+    -- requiring it on the server would pull the client half of the object
+    -- pipeline into a server process.
+    Prism.Selection = require("@self/Selection")
 end
 
 Prism.CustomEnum = require("@self/CustomEnum")
