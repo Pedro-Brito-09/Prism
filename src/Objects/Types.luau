@@ -4,6 +4,9 @@ const PropertyTypes = require("../Properties/Types")
 export type ObjectIdentifier = number
 export type RuntimeId = number
 
+-- Every lookup on an object takes either the property's id or its name.
+export type PropertyReference = PropertyTypes.PropertyIdentifier | string
+
 export type InstanceLinkRegistry = {
     Property: PropertyTypes.PropertyIdentifier,
     Type: "Property" | "Attribute",
@@ -46,6 +49,10 @@ export type Object = {
     Parent: ObjectIdentifier,
     Name: string,
     Properties: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
+
+    -- Property name -> id, so a lookup by name costs what a lookup by id does.
+    -- Built once from the registry's ordered property list.
+    Names: {[string]: PropertyTypes.PropertyIdentifier},
     Destroyed: boolean,
 
     Instance: Instance?,
@@ -53,8 +60,17 @@ export type Object = {
     -- it mirrors.
     Links: {[PropertyTypes.PropertyIdentifier]: InstanceLink}?,
 
-    Set: (self: Object, Property: PropertyTypes.PropertyIdentifier | string, Value: any?) -> boolean,
-    Get: (self: Object, Property: PropertyTypes.PropertyIdentifier | string) -> any?,
+    Set: (self: Object, Property: PropertyReference, Value: any?) -> boolean,
+    Get: (self: Object, Property: PropertyReference) -> any?,
+
+    -- The property instance itself, for the parts of it Get and Set do not
+    -- cover: SetDefault, Constraints, DefaultValue. Indexing Properties by hand
+    -- works too, but only by id.
+    GetProperty: (self: Object, Property: PropertyReference) -> PropertyTypes.Property<any>?,
+
+    -- Returns the disconnect function from Property:OnChange. An unknown
+    -- reference warns and returns a disconnect that does nothing.
+    OnChange: (self: Object, Property: PropertyReference, Callback: (Value: any) -> ()) -> () -> (),
     Destroy: (self: Object) -> (),
 }
 

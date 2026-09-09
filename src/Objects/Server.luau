@@ -237,7 +237,7 @@ const function GenerateLinksMap(
     return if Count > 0 then Map else nil
 end
 
-const function __getter(self: Object, Reference: PropertyTypes.PropertyIdentifier | string): any?
+const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
         return nil
@@ -246,7 +246,7 @@ const function __getter(self: Object, Reference: PropertyTypes.PropertyIdentifie
     return if Prop.Value == nil then Prop.DefaultValue else Prop.Value
 end
 
-const function __setter(self: Object, Reference: PropertyTypes.PropertyIdentifier | string, Value: any?): boolean
+const function __setter(self: Object, Reference: Types.PropertyReference, Value: any?): boolean
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
         return false
@@ -303,6 +303,8 @@ const function __destroy(self: Object)
 
     self.Get = Shared.Destroyed.Get
     self.Set = Shared.Destroyed.Set
+    self.GetProperty = Shared.Destroyed.GetProperty
+    self.OnChange = Shared.Destroyed.OnChange
     self.Destroy = Shared.Destroyed.Destroy
 end
 
@@ -434,12 +436,15 @@ function Objects.new(
     Obj.Name = Ref.Name
     Obj.Destroyed = false
     Obj.Properties = Props
+    Obj.Names = Shared.BuildNameMap(Ref.Properties, Props)
     Obj.Instance = Inst
     -- Wired after the initial values land, so a link starts at the object's real
     -- value rather than the registry default and then being corrected.
     Obj.Links = GenerateLinksMap(Inst, Ref.Links, Props)
     Obj.Get = __getter
     Obj.Set = __setter
+    Obj.GetProperty = Shared.GetProperty
+    Obj.OnChange = Shared.OnChange
     Obj.Destroy = __destroy
 
     Workspace[Obj.RuntimeId] = Obj

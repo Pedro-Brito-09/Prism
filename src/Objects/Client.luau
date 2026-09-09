@@ -34,7 +34,7 @@ const Pending: {[any]: number} = setmetatable({}, {__mode = "k"}) :: any
 -- PropertyChanged.
 const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
 
-const function __getter(self: Object, Reference: PropertyTypes.PropertyIdentifier | string): any?
+const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
         return nil
@@ -49,7 +49,7 @@ end
 --
 -- If the server refuses (permissions, validation) the local value rolls back.
 -- If it accepts, its PropertyChanged broadcast reasserts the authoritative value.
-const function __setter(self: Object, Reference: PropertyTypes.PropertyIdentifier | string, Value: any?): boolean
+const function __setter(self: Object, Reference: Types.PropertyReference, Value: any?): boolean
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
         return false
@@ -132,6 +132,8 @@ const function Teardown(Obj: Object)
     -- whose every method throws.
     Obj.Get = Shared.Destroyed.Get
     Obj.Set = Shared.Destroyed.Set
+    Obj.GetProperty = Shared.Destroyed.GetProperty
+    Obj.OnChange = Shared.Destroyed.OnChange
     Obj.Destroy = Shared.Destroyed.Destroy
 end
 
@@ -204,8 +206,11 @@ const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instanc
         Obj.Properties[PropId] = Prop
     end
 
+    Obj.Names = Shared.BuildNameMap(Registry.Properties, Obj.Properties)
     Obj.Get = __getter
     Obj.Set = __setter
+    Obj.GetProperty = Shared.GetProperty
+    Obj.OnChange = Shared.OnChange
     Obj.Destroy = __destroy
 
     Workspace[RuntimeId] = Obj

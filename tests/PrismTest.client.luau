@@ -164,6 +164,7 @@ T:Test("the live fixtures arrived with distinct values", function()
         T:Eq(Denied:Get(FIXTURE_PROPERTY), DENIED_MARKER, "readable by name")
         T:Ok(not Denied.Destroyed, "alive")
         T:Ok(Denied.Properties[TitleId], "property instance rebuilt")
+        T:Eq(Denied:GetProperty(FIXTURE_PROPERTY), Denied.Properties[TitleId], "name map built on the client too")
     end
 end)
 
@@ -311,6 +312,8 @@ T:Test("an allowed destroy tears down the client object", function()
     end, 3, "removal replicated")
     T:Eq(Destroyable:Get(FIXTURE_PROPERTY), nil, "stale getter is safe")
     T:Eq(Destroyable:Set(FIXTURE_PROPERTY, "x"), false, "stale setter is safe")
+    T:Eq(Destroyable:GetProperty(FIXTURE_PROPERTY), nil, "stale lookup is safe")
+    T:Eq(typeof(Destroyable:OnChange(FIXTURE_PROPERTY, function() end)), "function", "stale watch answers a disconnect")
     T:Eq(Destroyable.Instance, nil, "instance reference released")
 end)
 
