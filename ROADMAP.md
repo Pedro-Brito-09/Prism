@@ -34,23 +34,33 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
       Hidden, ReadOnly}` on the registry, which already replicates — enough for
       a property panel to be generated rather than written per property.
 - [ ] **`Duplicate(object)`.** `Objects.new` already accepts initial values.
+- [ ] **Scene history: diff, merge, revert.** Two properties the format already
+      has make this reachable rather than speculative. A copy serialises
+      deterministically — objects in local id order, properties in property id
+      order — so two versions of a scene produce comparable bytes instead of
+      whatever hash order gave. And persistent ids survive a save, so a diff can
+      say "this object changed" rather than "an object went and another came".
+      That is the whole basis of a three way merge. `Commit` is the point a
+      version would be recorded at.
+
 - [ ] **Undo / redo.** After transactions, which give it the unit to record.
       Identity stops being the open problem once handles land: a resurrected
       object can come back under the id it had.
 
 ## Done
 
-- [x] **Scenes and object identity.** Objects are created into a named scene
-      rather than one global workspace. Identity split in two: `RuntimeId` names
-      one live object and is the only thing on the wire or in the workspace key,
-      `PersistentId` (`SceneId * 2^32 + LocalId`) names an object in a pack and
-      is the only thing saved. One crossing between them, `Instance:Find`,
-      scoped to a live copy because a persistent id names an object in every
-      copy at once. Only the low half is packed, so a pack is portable between
-      scenes. `Scene:Load` makes the canonical copy and `Scene:Instance` makes
-      extras, so one saved room can stand in the world five times. Unload
-      serialises and drops every copy in a single packet. `Objects.new` still
-      works, in an implicit `Default` scene.
+- [x] **Scenes and object identity.** A scene is a document: registering one
+      creates data, `Load` reads it into a live copy, and loading twice gives
+      two equal copies, so one saved room can stand in the world five times.
+      Objects live on the copy, because a scene loaded twice cannot answer which
+      object you mean. Identity split in two: `RuntimeId` names one live object
+      and is the only thing on the wire or in the workspace key, `PersistentId`
+      (`SceneId * 2^32 + LocalId`) names an object in a pack and is the only
+      thing saved. One crossing, `instance:Find`, scoped to a copy. Only the low
+      half is packed, so a pack is portable between scenes. `Commit` writes a
+      copy back; unloading never saves on its own, because with several copies
+      live it would have to pick one. `Objects.new` still works, in an implicit
+      `Default` scene loaded on first use.
 
 - [x] **Property access from the object.** `OnChange` and `GetProperty` beside
       `Get` and `Set`, all four taking an id or a name, with the name resolved

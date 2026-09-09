@@ -1,19 +1,18 @@
 --!strict
--- Named containers of objects, and the unit a level is saved and loaded as.
+-- Named sets of objects, and the unit a level is saved and loaded as.
 --
 -- Before this there was one global workspace: every object the server had ever
 -- made, alive for the session, with no way to put a level away without
 -- destroying it object by object and no way to hand one to a DataStore.
 --
--- A scene is either loaded -- objects live, replicated, instances parented
--- under its container -- or unloaded, in which case it is a single buffer and
--- costs nothing else.
+-- A scene is a document. Registering one creates data and nothing else; Load
+-- reads it into a live copy. Load twice and you get two copies, equals in every
+-- way, which is what lets one saved room stand in the world five times. There
+-- is no canonical copy and no loaded flag, because a scene is not a thing that
+-- is either in the world or not -- it is a thing the world can hold copies of.
 --
--- Load makes one live copy, the canonical one, and that is what Serialize
--- describes. Instance makes extras from the same pack: every copy carries the
--- persistent ids the pack was written with and differs only in its objects'
--- runtime ids, which is what lets five identical rooms stand in the world at
--- once without any of them wondering which one it is.
+-- Objects therefore live on the copy, not on the scene. Asking a scene loaded
+-- twice for "the object with local id 4" has no answer; asking a copy does.
 
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
@@ -49,8 +48,12 @@ const function ToPayload(Scene: Scene): SceneRegistry
 end
 
 --=============================================================================
--- Instances
+-- Live copies
 --=============================================================================
+
+const function __create(self: SceneInstance, Reference: any, InitialValues: {[number]: any}?): any
+    return Objects.new(Reference, InitialValues, self)
+end
 
 const function __find(self: SceneInstance, Local: number): any
     return self.ByLocal[Local]
@@ -67,13 +70,27 @@ const function __instance_objects(self: SceneInstance): {any}
     return List
 end
 
-const function __instance_destroy(self: SceneInstance)
+const function __instance_serialize(self: SceneInstance): buffer
+    const List = __instance_objects(self)
+
+    -- Sorted by local id so the same copy always produces the same bytes. Hash
+    -- order would make two identical copies serialize differently, which rules
+    -- out diffing, merging or deduplicating saves -- the same reason a single
+    -- object's properties are written in id order.
+    table.sort(List, function(A, B)
+        return A.LocalId < B.LocalId
+    end)
+
+    return Compressor:CompressScene(self.Owner.LastId, List :: any)
+end
+
+const function __commit(self: SceneInstance)
+    self.Owner.Data = __instance_serialize(self)
+end
+
+const function __instance_unload(self: SceneInstance)
     const Owner = self.Owner
     if Owner then
-        if Owner.Main == self then
-            Owner.Main = nil
-        end
-
         Owner.Instances[self.Id] = nil
     end
 
@@ -81,7 +98,7 @@ const function __instance_destroy(self: SceneInstance)
     Network.InstanceRemoved:FireAll(self.Id)
 end
 
-const function NewInstance(Owner: Scene, Container: Instance?, Canonical: boolean): SceneInstance
+const function NewInstance(Owner: Scene, Container: Instance?): SceneInstance
     InstanceCounter += 1
 
     const Instance_ = {}
@@ -89,27 +106,36 @@ const function NewInstance(Owner: Scene, Container: Instance?, Canonical: boolea
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
     Instance_.Container = Container or Owner.Container
-    Instance_.Canonical = Canonical
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
+    Instance_.Create = __create
     Instance_.Find = __find
     Instance_.GetObjects = __instance_objects
-    Instance_.Destroy = __instance_destroy
+    Instance_.Serialize = __instance_serialize
+    Instance_.Commit = __commit
+    Instance_.Unload = __instance_unload
 
     Owner.Instances[Instance_.Id] = Instance_ :: any
 
     -- Announced before its objects, so a client is never handed an object
-    -- belonging to an instance it has not been told about.
+    -- belonging to a copy it has not been told about.
     Network.InstanceAdded:FireAll(Instance_.Id, Owner.Id)
     return Instance_ :: any
 end
 
--- Rebuilds the objects a pack describes into an instance, under the ids they
--- were saved with, and announces them together.
-const function Populate(Instance_: SceneInstance, Data: buffer?): boolean
+--=============================================================================
+-- Scenes
+--=============================================================================
+
+const function __load(self: Scene, Container: Instance?): any
+    const Instance_ = NewInstance(self, Container)
+
+    const Data = self.Data
     if not Data then
-        return true
+        -- A scene that has never been committed. An empty copy is the right
+        -- answer: it is the one you can now put objects in.
+        return Instance_
     end
 
     const Ok, LastId, Decompressed = pcall(function()
@@ -117,13 +143,14 @@ const function Populate(Instance_: SceneInstance, Data: buffer?): boolean
     end)
 
     if not Ok then
-        Logger:Warn(`Failed to read the pack for scene {Instance_.Owner.Name}: {LastId}`)
-        return false
+        Logger:Warn(`Failed to read the pack for scene {self.Name}: {LastId}`)
+        Instance_:Unload()
+        return nil
     end
 
     -- Moved before anything is built, so a freshly created object cannot be
     -- handed an id one of the restored ones already answers to.
-    Instance_.Owner.LastId = math.max(Instance_.Owner.LastId, LastId :: number)
+    self.LastId = math.max(self.LastId, LastId :: number)
 
     const Restored = {}
     for _, Object in Decompressed :: {any} do
@@ -134,112 +161,31 @@ const function Populate(Instance_: SceneInstance, Data: buffer?): boolean
     end
 
     Objects.AnnounceAll(Restored)
-    return true
-end
-
---=============================================================================
--- Scenes
---=============================================================================
-
-const function __create(self: Scene, Reference: any, InitialValues: {[number]: any}?): any
-    const Main = self.Main
-    if not Main then
-        -- Deliberately not an implicit load: creating into an unloaded scene
-        -- would have to decompress the whole thing first, which is not what a
-        -- caller expecting to add one object is asking for.
-        Logger:Warn(`Cannot create an object in scene {self.Name} while it is unloaded. Load it first.`)
-        return nil
-    end
-
-    return Objects.new(Reference, InitialValues, Main)
-end
-
-const function __serialize(self: Scene): buffer
-    const Main = self.Main
-    if not Main then
-        -- An unloaded scene is already its own pack. Nil only where one was
-        -- registered unloaded and handed nothing, so answer an empty pack
-        -- rather than a nil the caller has to check for.
-        return self.Data or Compressor:CompressScene(self.LastId, {})
-    end
-
-    -- The canonical instance and only it. An extra instance is a disposable
-    -- copy of this same pack, so serializing one would either say the same
-    -- thing or quietly promote a throwaway to the saved truth.
-    const List = Main:GetObjects()
-
-    -- Sorted by local id so the same scene always produces the same bytes. Hash
-    -- order would make two identical scenes serialize differently, which rules
-    -- out diffing or deduplicating saves -- the same reason a single object's
-    -- properties are written in id order.
-    table.sort(List, function(A, B)
-        return A.LocalId < B.LocalId
-    end)
-
-    return Compressor:CompressScene(self.LastId, List :: any)
-end
-
-const function __unload(self: Scene): boolean
-    if not self.Loaded then
-        return false
-    end
-
-    -- Written before anything is destroyed, or there would be nothing left to
-    -- write.
-    self.Data = __serialize(self)
-    self.Loaded = false
-
-    -- Every copy, not just the canonical one. Unloaded means the scene is not
-    -- in the world, and leaving extras standing would leave objects alive whose
-    -- scene claims to hold nothing.
-    for _, Instance_ in table.clone(self.Instances) do
-        Instance_:Destroy()
-    end
-
-    self.Main = nil
-    return true
-end
-
-const function __load(self: Scene): boolean
-    if self.Loaded then
-        return false
-    end
-
-    const Main = NewInstance(self, nil, true)
-    self.Main = Main
-    self.Loaded = true
-
-    if not Populate(Main, self.Data) then
-        Main:Destroy()
-        self.Loaded = false
-        return false
-    end
-
-    self.Data = nil
-    return true
-end
-
-const function __instance(self: Scene, Container: Instance?): SceneInstance?
-    if not self.Loaded then
-        Logger:Warn(`Cannot instance scene {self.Name} while it is unloaded. Load it first.`)
-        return nil
-    end
-
-    -- Built from what the canonical instance holds right now rather than from
-    -- the pack the scene was registered with: a caller asking for another copy
-    -- of a room it has been editing means the room as it stands.
-    const Instance_ = NewInstance(self, Container, false)
-    if not Populate(Instance_, __serialize(self)) then
-        Instance_:Destroy()
-        return nil
-    end
-
     return Instance_
 end
 
-const function __get_objects(self: Scene): {any}
-    const Main = self.Main
-    return if Main then Main:GetObjects() else {}
+-- Every copy at once. Nothing is written back: with more than one copy live,
+-- saving on unload would have to pick one and cannot, so committing is the
+-- copy's own call and always explicit.
+const function __unload(self: Scene)
+    for _, Instance_ in table.clone(self.Instances) do
+        Instance_:Unload()
+    end
+end
+
+const function __serialize(self: Scene): buffer
+    -- What the scene says it is, not what any copy currently holds. A copy that
+    -- has drifted answers for itself through its own Serialize.
+    return self.Data or Compressor:CompressScene(self.LastId, {})
+end
+
+const function __get_instances(self: Scene): {any}
+    const List = {}
+    for _, Instance_ in self.Instances do
+        table.insert(List, Instance_)
+    end
+
+    return List
 end
 
 const function __destroy(self: Scene)
@@ -275,42 +221,32 @@ function Scenes.new(Config: SceneConfig): Scene?
     Scene.Id = Identifier
     Scene.Name = Config.Name
     Scene.Container = Config.Container
-    Scene.Loaded = false
     Scene.LastId = 0
-    Scene.Main = nil
-    Scene.Instances = {}
     Scene.Data = nil
+    Scene.Instances = {}
 
-    Scene.Create = __create
     Scene.Load = __load
     Scene.Unload = __unload
-    Scene.Instance = __instance
     Scene.Serialize = __serialize
-    Scene.GetObjects = __get_objects
+    Scene.GetInstances = __get_instances
     Scene.Destroy = __destroy
 
     Registry.ById[Identifier] = Scene
     Registry.ByName[Config.Name] = Scene
 
     Network.SceneRegistered:FireAll(ToPayload(Scene :: any))
-
-    -- A scene with nothing in it starts loaded: it is the one you can put
-    -- objects in, and making a caller load an empty scene before using it would
-    -- be ceremony with nothing behind it.
-    __load(Scene :: any)
     return Scene :: any
 end
 
--- Restores a scene from a pack, unloaded. Loading it is the caller's call,
--- which is what makes a menu of saved levels cheap: register them all, load the
--- one that gets picked.
+-- Registers a scene around a pack someone stored earlier. Nothing goes live
+-- until Load, which is what makes a menu of saved levels cheap: register them
+-- all, load the one that gets picked.
 function Scenes.fromBuffer(Config: SceneConfig, Data: buffer): Scene?
     const Scene = Scenes.new(Config)
     if not Scene then
         return nil
     end
 
-    Scene:Unload()
     Scene.Data = Data
     return Scene
 end
@@ -332,8 +268,8 @@ function Scenes:GetRegistryPayload(Identifier: SceneIdentifier): SceneRegistry?
     return if Scene then ToPayload(Scene) else nil
 end
 
--- Every live instance across every scene, which is what a joining player has to
--- be told about before any object reaches them.
+-- Every live copy across every scene, which is what a joining player has to be
+-- told about before any object reaches them.
 function Scenes:GetInstances(): {SceneInstance}
     const List = {}
     for _, Scene in Registry.ById do
@@ -346,8 +282,9 @@ function Scenes:GetInstances(): {SceneInstance}
 end
 
 -- The scene an object lands in when the caller names none, so Objects.new keeps
--- working exactly as it did before scenes existed. Registered here rather than
--- lazily, because Objects.new has to find it on the very first call.
+-- working exactly as it did before scenes existed. Registered here, but not
+-- loaded: Objects loads it the first time something actually needs it, so a
+-- game that puts everything in its own scenes never pays for this one.
 Registry.Default = Scenes.new({Name = "Default"})
 
 function Scenes:GetDefault(): Scene

@@ -82,50 +82,60 @@ enemy:GetProperty("Health").Constraints.MaxValue
 
 ## Scenes
 
-A scene is a named set of objects, and the unit a level is saved and loaded as.
-It is either loaded — objects live, replicated, instances under its container —
-or unloaded, in which case it is one buffer and costs nothing else.
+A scene is a document: a named set of objects, and the unit a level is saved and
+loaded as. Registering one creates data and nothing else. `Load` reads it into a
+live copy.
 
 ```lua
-local Lobby = Prism.Scenes.new({Name = "Lobby", Container = workspace.Levels})
+local Rooms = Prism.Scenes.new({Name = "Rooms", Container = workspace.Levels})
 
-local crate = Lobby:Create(Enemy, {[Health] = 50})
-Lobby:Unload()   -- serialises, then destroys the objects
-Lobby:Load()     -- rebuilds them, under the ids they were saved with
+local room = Rooms:Load()              -- one live copy
+room:Create(Crate, {[Health] = 50})
+room:Commit()                          -- write this copy back into the scene
+room:Unload()                          -- take it out of the world
 ```
 
-Scenes are registered in code, with stable ids, the way property and object
-types are. A game where players author their own levels builds that on top:
-register a scene per level, hand the pack to a DataStore.
+Objects live on the copy, not on the scene, and that is the only place they
+could live: ask a scene loaded twice for "the object with local id 4" and there
+is no answer — ask a copy and there is.
+
+### Loading more than once
+
+`Load` called twice gives two copies, equals in every way. There is no canonical
+one.
 
 ```lua
-local pack = Lobby:Serialize()
-Prism.Scenes.fromBuffer({Name = "Lobby2"}, pack)  -- registered, unloaded
-```
+local a = Rooms:Load(workspace.SlotA)
+local b = Rooms:Load(workspace.SlotB)
 
-`Objects.new` with no scene lands in an implicit `Default` scene, so object
-creation works with no scene of your own.
-
-### Instances
-
-`Load` makes one live copy. `Instance` makes more, from the same pack:
-
-```lua
-local roomA = Rooms:Instance(workspace.SlotA)
-local roomB = Rooms:Instance(workspace.SlotB)
-
-roomA:Find(localId)   -- this copy's object
-roomB:Find(localId)   -- the other copy's
-roomA:Destroy()       -- takes its objects, leaves roomB alone
+a:Find(localId)   -- this copy's object
+b:Find(localId)   -- the other copy's
+a:Unload()        -- takes its own objects, leaves b alone
+Rooms:Unload()    -- takes every copy
 ```
 
 Every copy carries the persistent ids the pack was written with, so five
 identical rooms agree on *what* each object is and disagree on *which* one it
-is. `Serialize` describes the canonical copy — the one `Load` made — because an
-extra copy is a throwaway and saving one would quietly promote it.
+is.
 
-Unloading takes every copy with it: unloaded means the scene is not in the
-world.
+### Saving
+
+`instance:Commit()` writes a copy back into its scene; `Scene:Serialize()` hands
+you the committed pack to store wherever you like.
+
+```lua
+room:Commit()
+DataStore:SetAsync(key, buffer.tostring(Rooms:Serialize()))
+
+Prism.Scenes.fromBuffer({Name = "Rooms2"}, pack)   -- registered, nothing live
+```
+
+Committing is always explicit. Unloading never writes back on its own — with
+more than one copy live it would have to pick one, and it cannot.
+
+`Objects.new` with no scene lands in an implicit `Default` scene, loaded the
+first time something needs it, so object creation works with no scene of your
+own. Naming a scene that is loaded twice is refused rather than guessed.
 
 ### Two identities
 
@@ -143,9 +153,9 @@ workspace uses — a client naming an object with a persistent id would be
 ambiguous the moment a scene is instanced twice, and client input is the last
 place that should be. `PersistentId` is the only thing a pack contains.
 
-There is exactly one crossing, `SceneInstance:Find(localId)`, and it is scoped
-to a copy on purpose: a persistent id names an object in *every* live copy of
-its scene, so the question only has an answer once you say which copy.
+There is exactly one crossing, `instance:Find(localId)`, and it is scoped to a
+copy on purpose: a persistent id names an object in *every* live copy of its
+scene, so the question only has an answer once you say which copy.
 
 ```
 PersistentId = SceneId * 2^32 + LocalId

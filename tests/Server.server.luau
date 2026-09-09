@@ -1033,16 +1033,31 @@ T:Test("a persistent id carries its scene and survives the round trip", function
     T:Eq(Handles.Local(Biggest), Handles.MAX_LOCAL, "reads back at the top")
 end)
 
+T:Test("registering a scene puts nothing in the world", function()
+    const Scene = Scenes.new({Name = "TestRegistered"})
+
+    T:Eq(#Scene:GetInstances(), 0, "no copies")
+    T:Eq(Scene.Data, nil, "and nothing committed")
+
+    const Live = Scene:Load()
+    T:Ok(Live, "loading makes one")
+    T:Eq(#Scene:GetInstances(), 1, "listed by the scene")
+
+    Scene:Destroy()
+end)
+
 T:Test("objects land in the default scene when none is named", function()
     const Obj = Objects.new(BareId)
     const Default = Scenes:GetDefault()
+    const Live = Default:GetInstances()[1]
 
+    T:Ok(Live, "the default scene loaded itself on first use")
     T:Eq(Obj.Scene, Default.Id, "scene recorded on the object")
     T:Eq(Handles.Scene(Obj.PersistentId), Default.Id, "and inside the persistent id")
-    T:Eq(Default.Main:Find(Obj.LocalId), Obj, "the live copy holds it")
+    T:Eq(Live:Find(Obj.LocalId), Obj, "the copy holds it")
 
     Obj:Destroy()
-    T:Eq(Default.Main:Find(Obj.LocalId), nil, "and lets go on destroy")
+    T:Eq(Live:Find(Obj.LocalId), nil, "and lets go on destroy")
 end)
 
 T:Test("refuses a duplicate name and a duplicate id", function()
@@ -1060,8 +1075,8 @@ T:Test("refuses a duplicate name and a duplicate id", function()
 end)
 
 T:Test("local ids are per scene, so two scenes reuse the same numbers", function()
-    const A = Scenes.new({Name = "TestSceneA"})
-    const B = Scenes.new({Name = "TestSceneB"})
+    const A = Scenes.new({Name = "TestSceneA"}):Load()
+    const B = Scenes.new({Name = "TestSceneB"}):Load()
 
     const InA = A:Create(BareId)
     const InB = B:Create(BareId)
@@ -1070,47 +1085,66 @@ T:Test("local ids are per scene, so two scenes reuse the same numbers", function
     T:Eq(InB.LocalId, 1, "first in B")
     T:Ok(InA.PersistentId ~= InB.PersistentId, "but the persistent ids differ")
 
-    A:Destroy()
-    B:Destroy()
+    A.Owner:Destroy()
+    B.Owner:Destroy()
 end)
 
-T:Test("unload keeps the data and load brings the same ids back", function()
+T:Test("commit then reload brings the same ids back", function()
     const Scene = Scenes.new({Name = "TestRoundTrip"})
+    const Live = Scene:Load()
 
-    const One = Scene:Create(CrateId, {[TitleId] = "First"})
-    const Two = Scene:Create(CrateId, {[TitleId] = "Second"})
+    const One = Live:Create(CrateId, {[TitleId] = "First"})
+    const Two = Live:Create(CrateId, {[TitleId] = "Second"})
     const Saved = {One.LocalId, Two.LocalId}
 
-    T:Ok(Scene:Unload(), "unloaded")
-    T:Ok(not Scene.Loaded, "flagged unloaded")
-    T:Ok(Scene.Data, "kept a pack")
+    Live:Commit()
+    T:Ok(Scene.Data, "the scene kept a pack")
+
+    Scene:Unload()
     T:Ok(One.Destroyed and Two.Destroyed, "objects torn down")
     T:Eq(Objects:GetWorkspace()[One.RuntimeId], nil, "and out of the workspace")
+    T:Eq(#Scene:GetInstances(), 0, "no copies left")
 
-    T:Ok(Scene:Load(), "loaded")
+    const Again = Scene:Load()
 
     -- The whole point: an id written down before the unload still names the
     -- same object afterwards, even though its runtime id is new.
-    const Back = Scene.Main:Find(Saved[1])
+    const Back = Again:Find(Saved[1])
     T:Ok(Back, "the first saved id resolves again")
     T:Eq(Back:Get(TitleId), "First", "with its value")
     T:Ok(Back.RuntimeId ~= One.RuntimeId, "under a new runtime id")
-    T:Eq(Scene.Main:Find(Saved[2]):Get(TitleId), "Second", "and so does the second")
+    T:Eq(Again:Find(Saved[2]):Get(TitleId), "Second", "and so does the second")
+
+    Scene:Destroy()
+end)
+
+T:Test("unloading does not save on its own", function()
+    const Scene = Scenes.new({Name = "TestNoImplicitSave"})
+    const Live = Scene:Load()
+
+    Live:Create(CrateId, {[TitleId] = "Unsaved"})
+    Scene:Unload()
+
+    -- With more than one copy live, saving on unload would have to pick one and
+    -- cannot, so it never saves and committing is always the caller's call.
+    T:Eq(Scene.Data, nil, "nothing was written back")
+    T:Eq(#Scene:Load():GetObjects(), 0, "so the scene reloads empty")
 
     Scene:Destroy()
 end)
 
 T:Test("a local id is never handed out twice, even across a reload", function()
     const Scene = Scenes.new({Name = "TestNoReuse"})
+    const Live = Scene:Load()
 
-    const First = Scene:Create(BareId)
+    const First = Live:Create(BareId)
     const Taken = First.LocalId
     First:Destroy()
 
+    Live:Commit()
     Scene:Unload()
-    Scene:Load()
 
-    const Next = Scene:Create(BareId)
+    const Next = Scene:Load():Create(BareId)
     T:Ok(Next.LocalId > Taken, `{Next.LocalId} is past the id already spent`)
 
     Scene:Destroy()
@@ -1118,18 +1152,18 @@ end)
 
 T:Test("a pack loads into a different scene without colliding", function()
     const Source = Scenes.new({Name = "TestSource"})
-    Source:Create(CrateId, {[TitleId] = "Shared"})
+    const Live = Source:Load()
+    Live:Create(CrateId, {[TitleId] = "Shared"})
 
-    const Pack = Source:Serialize()
+    const Pack = Live:Serialize()
 
     -- Same bytes, two scenes. This is what per scene ids buy: a prefab is not
     -- tied to the scene that produced it.
     const Copy = Scenes.fromBuffer({Name = "TestCopy"}, Pack)
-    T:Ok(not Copy.Loaded, "restored unloaded")
-    T:Ok(Copy:Load(), "loads")
+    T:Eq(#Copy:GetInstances(), 0, "registered with nothing live")
 
-    const Original = Source:GetObjects()[1]
-    const Restored = Copy:GetObjects()[1]
+    const Original = Live:GetObjects()[1]
+    const Restored = Copy:Load():GetObjects()[1]
 
     T:Eq(Restored:Get(TitleId), "Shared", "value carried")
     T:Eq(Restored.LocalId, Original.LocalId, "same id inside its scene")
@@ -1139,94 +1173,93 @@ T:Test("a pack loads into a different scene without colliding", function()
     Copy:Destroy()
 end)
 
-T:Test("a scene can be live more than once", function()
+T:Test("loading twice gives two equal copies", function()
     const Scene = Scenes.new({Name = "TestRoom"})
-    const Original = Scene:Create(CrateId, {[TitleId] = "Room"})
+    const A = Scene:Load()
+    A:Create(CrateId, {[TitleId] = "Room"})
+    A:Commit()
 
-    const Copy = Scene:Instance()
-    T:Ok(Copy, "instanced")
+    const B = Scene:Load()
+    T:Eq(#Scene:GetInstances(), 2, "both live")
 
-    const Twin = Copy:GetObjects()[1]
-    T:Ok(Twin, "the copy has the object")
+    const InA = A:GetObjects()[1]
+    const InB = B:GetObjects()[1]
+    T:Ok(InB, "the second copy has the object")
 
     -- Same thing, different one of it: that is the whole split between the two
     -- identities.
-    T:Eq(Twin.PersistentId, Original.PersistentId, "agrees on what it is")
-    T:Ok(Twin.RuntimeId ~= Original.RuntimeId, "disagrees on which it is")
-    T:Eq(Twin:Get(TitleId), "Room", "and carries the value")
+    T:Eq(InB.PersistentId, InA.PersistentId, "they agree on what it is")
+    T:Ok(InB.RuntimeId ~= InA.RuntimeId, "and disagree on which it is")
+    T:Eq(InB:Get(TitleId), "Room", "and it carries the value")
 
     -- Each copy answers for its own, so Find is never ambiguous.
-    T:Eq(Copy:Find(Original.LocalId), Twin, "the copy resolves to its own")
-    T:Eq(Scene.Main:Find(Original.LocalId), Original, "the canonical one to its own")
+    T:Eq(A:Find(InA.LocalId), InA, "A resolves to its own")
+    T:Eq(B:Find(InA.LocalId), InB, "B resolves to its own")
 
     -- Editing one leaves the other alone.
-    Original:Set(TitleId, "Edited")
-    T:Eq(Twin:Get(TitleId), "Room", "copies do not share state")
-
-    Copy:Destroy()
-    T:Ok(Twin.Destroyed, "destroying a copy takes its objects")
-    T:Ok(not Original.Destroyed, "and leaves the canonical one standing")
+    InA:Set(TitleId, "Edited")
+    T:Eq(InB:Get(TitleId), "Room", "copies do not share state")
 
     Scene:Destroy()
 end)
 
-T:Test("serialize describes the canonical copy, not the extras", function()
-    const Scene = Scenes.new({Name = "TestCanonical"})
-    Scene:Create(CrateId, {[TitleId] = "Canonical"})
+T:Test("a copy unloads itself, the scene unloads all of them", function()
+    const Scene = Scenes.new({Name = "TestUnloadScope"})
+    const A = Scene:Load()
+    A:Create(BareId)
+    A:Commit()
 
-    const Copy = Scene:Instance()
-    Copy:GetObjects()[1]:Set(TitleId, "Throwaway")
+    const B = Scene:Load()
+    const InA = A:GetObjects()[1]
+    const InB = B:GetObjects()[1]
 
-    const _, Objs = Compressor:DecompressScene(Scene:Serialize())
-    T:Eq(#Objs, 1, "one object, not one per copy")
-    T:Eq(Objs[1].Properties[TitleId], "Canonical", "and it is the canonical one")
-
-    Scene:Destroy()
-end)
-
-T:Test("unloading takes every copy with it", function()
-    const Scene = Scenes.new({Name = "TestUnloadAll"})
-    Scene:Create(BareId)
-
-    const Copy = Scene:Instance()
-    const Twin = Copy:GetObjects()[1]
+    B:Unload()
+    T:Ok(InB.Destroyed, "the copy took its own objects")
+    T:Ok(not InA.Destroyed, "and left the other alone")
+    T:Eq(#Scene:GetInstances(), 1, "one copy left")
 
     Scene:Unload()
-    T:Ok(Twin.Destroyed, "the extra copy went too")
-    T:Eq(next(Scene.Instances), nil, "and the scene lists none")
+    T:Ok(InA.Destroyed, "the scene took the rest")
+    T:Eq(#Scene:GetInstances(), 0, "none left")
 
     Scene:Destroy()
 end)
 
-T:Test("instancing an unloaded scene is refused", function()
-    const Scene = Scenes.new({Name = "TestInstanceClosed"})
-    Scene:Unload()
+T:Test("naming a scene loaded twice is refused rather than guessed", function()
+    const Scene = Scenes.new({Name = "TestAmbiguous"})
 
-    T:Eq(Scene:Instance(), nil, "refused")
+    -- No copy at all: there is nowhere to put it.
+    T:Throws(function()
+        Objects.new(BareId, nil, Scene)
+    end, "refused with no copy live")
+
+    Scene:Load()
+    T:Ok(Objects.new(BareId, nil, Scene), "accepted while there is one obvious answer")
+
+    -- Two equally good copies, so picking one would put the object somewhere
+    -- the caller did not choose.
+    Scene:Load()
+    T:Throws(function()
+        Objects.new(BareId, nil, Scene)
+    end, "refused once there are two")
 
     Scene:Destroy()
 end)
 
-T:Test("creating in an unloaded scene is refused rather than silently loading", function()
-    const Scene = Scenes.new({Name = "TestClosed"})
-    Scene:Unload()
+T:Test("the scene serializes what was committed, a copy what it holds", function()
+    const Scene = Scenes.new({Name = "TestCommitted"})
+    const Live = Scene:Load()
 
-    T:Eq(Scene:Create(BareId), nil, "refused")
+    Live:Create(CrateId, {[TitleId] = "Committed"})
+    Live:Commit()
 
-    Scene:Destroy()
-end)
+    Live:GetObjects()[1]:Set(TitleId, "Drifted")
 
-T:Test("serialize answers for a loaded scene too", function()
-    const Scene = Scenes.new({Name = "TestSerializeLive"})
-    Scene:Create(CrateId, {[TitleId] = "Live"})
+    const _, Stored = Compressor:DecompressScene(Scene:Serialize())
+    T:Eq(Stored[1].Properties[TitleId], "Committed", "the scene still says what it was told")
 
-    const Pack = Scene:Serialize()
-    T:Ok(Pack, "produced a pack while loaded")
-    T:Ok(Scene.Loaded, "and left the scene alone")
-
-    const LastId, Objs = Compressor:DecompressScene(Pack)
-    T:Eq(LastId, Scene.LastId, "carries the counter")
-    T:Eq(#Objs, 1, "and the object")
+    const _, Current = Compressor:DecompressScene(Live:Serialize())
+    T:Eq(Current[1].Properties[TitleId], "Drifted", "the copy says what it holds")
 
     Scene:Destroy()
 end)

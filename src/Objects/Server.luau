@@ -624,16 +624,43 @@ const function Construct(
     return Obj :: any
 end
 
--- Callers reach for a scene, not the instance inside it, so both are taken and
--- a scene resolves to the canonical copy Load made. A Scene is the one carrying
--- Instances; a SceneInstance carries Owner.
-const function ResolveInstance(Target: any): any
-    const Scene = Target or SceneRegistry.Default
+-- Loaded the first time anything needs it rather than when it registers, so a
+-- game that puts everything in scenes of its own never pays for this one.
+const function DefaultInstance(): any
+    const Scene = SceneRegistry.Default
     if not Scene then
         return nil
     end
 
-    return if Scene.Instances then Scene.Main else Scene
+    const _, Existing = next(Scene.Instances)
+    return Existing or Scene:Load()
+end
+
+-- A live copy is what an object goes into, but callers reach for the scene, so
+-- both are taken. A Scene is the one carrying Instances; a SceneInstance
+-- carries Owner.
+const function ResolveInstance(Target: any): any
+    if not Target then
+        return DefaultInstance()
+    end
+
+    if not Target.Instances then
+        return Target
+    end
+
+    const First, Instance_ = next(Target.Instances)
+    if not First then
+        Logger:Error(`Scene {Target.Name} has no live copy to put an object in. Load it first.`)
+    end
+
+    -- Resolved only while there is one obvious answer. A scene loaded twice
+    -- names two equally good copies, and quietly picking one would put the
+    -- object somewhere the caller did not choose.
+    if next(Target.Instances, First) then
+        Logger:Error(`Scene {Target.Name} is loaded more than once, so which copy this object belongs in is ambiguous. Name the copy.`)
+    end
+
+    return Instance_
 end
 
 function Objects.new(
