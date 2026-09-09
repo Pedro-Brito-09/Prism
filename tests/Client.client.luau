@@ -2,8 +2,8 @@
 --[[
     Prism test suite -- client half.
 
-    Put this in StarterPlayerScripts, put Harness.luau at
-    ReplicatedStorage/PrismTests/Harness, and run the server half alongside it.
+    Put this in StarterPlayerScripts with Harness.luau beside it, and run the
+    server half alongside it.
     It verifies the things a server-only test cannot: that the ready handshake
     actually delivers, registries and live objects replicate, permissions
     update, and accepted/refused edits converge on the server's decision.
@@ -13,7 +13,7 @@
 
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-const PRISM = ReplicatedStorage:WaitForChild("Prism")
+const PRISM = ReplicatedStorage:WaitForChild("Prism").src
 const CRATE_OBJECT = "TestCrate"
 const BARE_OBJECT = "TestBare"
 const FIXTURE_PROPERTY = "TestTitle"
@@ -23,7 +23,7 @@ const DESTROY_MARKER = "FixtureDestroy"
 const TIMEOUT = 15
 
 const Prism = require(PRISM)
-const Harness = require(ReplicatedStorage:WaitForChild("PrismTests"):WaitForChild("Harness"))
+const Harness = require("./Harness")
 
 const Permissions = Prism.Permissions
 const Objects = Prism.Objects
@@ -173,7 +173,13 @@ T:Test("the object's instance is reachable", function()
         return
     end
 
-    T:Ok(Denied.Instance, "instance came across")
+    -- Waited on rather than sampled. The object arrives over the remote and the
+    -- part over ordinary replication, and when the reference sent beside the
+    -- object does not survive the trip the link is rebuilt from the part's own
+    -- tag, which lands whenever replication gets to it.
+    T:Eventually(function()
+        return Denied.Instance ~= nil
+    end, 5, "instance came across")
 
     if Denied.Instance then
         T:Eq(Objects:FromInstance(Denied.Instance), Denied, "mapped back from the part")

@@ -12,28 +12,28 @@ const IS_SERVER = RunService:IsServer()
 const Prism = {}
 
 if IS_SERVER then
-    Prism.Properties = require("./Properties/Server")
-    Prism.Objects = require("./Objects/Server")
-    Prism.Permissions = require("./Permissions/Server")
-    Prism.Database = require("./Database/Server")
+    Prism.Properties = require("@self/Properties/Server")
+    Prism.Objects = require("@self/Objects/Server")
+    Prism.Permissions = require("@self/Permissions/Server")
+    Prism.Database = require("@self/Database/Server")
 
     -- Required for the side effect: it wires up the join replay.
-    require("./Replication")
+    require("@self/Replication")
 else
-    Prism.Properties = require("./Properties/Client")
-    Prism.Objects = require("./Objects/Client")
-    Prism.Permissions = require("./Permissions/Client")
+    Prism.Properties = require("@self/Properties/Client")
+    Prism.Objects = require("@self/Objects/Client")
+    Prism.Permissions = require("@self/Permissions/Client")
 end
 
-Prism.CustomEnum = require("./CustomEnum")
-Prism.Compressor = require("./Compressor")
-Prism.Networking = require("./Networking")
-Prism.Encoding = require("./Encoding")
-Prism.Varint = require("./Varint")
-Prism.Codecs = require("./Codecs")
-Prism.IdPool = require("./IdPool")
-Prism.Logger = require("./Logger")
-Prism.Try = require("./Try")
+Prism.CustomEnum = require("@self/CustomEnum")
+Prism.Compressor = require("@self/Compressor")
+Prism.Networking = require("@self/Networking")
+Prism.Encoding = require("@self/Encoding")
+Prism.Varint = require("@self/Varint")
+Prism.Codecs = require("@self/Codecs")
+Prism.IdPool = require("@self/IdPool")
+Prism.Logger = require("@self/Logger")
+Prism.Try = require("@self/Try")
 
 -- Announce only once every client module above has connected its handlers, then
 -- keep asking until the server answers. The server's Replication module can

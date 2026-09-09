@@ -1,4 +1,6 @@
 --!strict
+const CollectionService = game:GetService("CollectionService")
+
 const Properties = require("../Properties/Client")
 const PropertyTypes = require("../Properties/Types")
 const Compressor = require("../Compressor")
@@ -17,6 +19,13 @@ const Objects = {}
 const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
 const Workspace: {[RuntimeId]: Object} = {}
 const ByInstance: {[Instance]: RuntimeId} = setmetatable({}, {__mode = "k"}) :: any
+
+-- The other direction, and the reason an object can find its instance at all
+-- when the reference sent beside it did not survive: a tagged part carries its
+-- runtime id, so it can be filed here before its object arrives and claimed
+-- afterwards. Weak valued, so a part that is destroyed or streamed out is not
+-- held here by this table alone.
+const ByRuntimeId: {[RuntimeId]: Instance} = setmetatable({}, {__mode = "v"}) :: any
 
 -- Every optimistic set takes a ticket, and only the newest outstanding one for
 -- a property is allowed to roll back. Dragging issues a set per frame: without
@@ -127,12 +136,55 @@ const function Teardown(Obj: Object)
         Obj.Instance = nil
     end
 
+    ByRuntimeId[Obj.RuntimeId] = nil
+
     -- Not table.clear: a stale reference should still be able to report its own
     -- runtime id and read Destroyed rather than turning into an empty table
     -- whose every method throws.
     Obj.Get = Shared.Destroyed.Get
     Obj.Set = Shared.Destroyed.Set
     Obj.Destroy = Shared.Destroyed.Destroy
+end
+
+-- A tagged part has arrived: file it, and hand it to its object if that object
+-- is already here. The two halves reach a client in either order -- the object
+-- travels over the remote, the part over ordinary replication -- so whichever
+-- lands second completes the pair. Track runs again on a part that streams back
+-- in, which is why it must be safe to repeat.
+const function Track(Inst: Instance)
+    const RuntimeId = Inst:GetAttribute(Shared.RuntimeAttribute)
+    if type(RuntimeId) ~= "number" then
+        return
+    end
+
+    ByInstance[Inst] = RuntimeId
+    ByRuntimeId[RuntimeId] = Inst
+
+    const Obj = Workspace[RuntimeId]
+    if Obj and not Obj.Destroyed then
+        Obj.Instance = Inst
+    end
+end
+
+-- Destroyed, or streamed out. Either way the reference is no longer a part of
+-- the world, and an object holding it would hand callers something detached
+-- from everything. The pairing is rebuilt by Track if it streams back in.
+const function Untrack(Inst: Instance)
+    const RuntimeId = ByInstance[Inst]
+    ByInstance[Inst] = nil
+
+    if RuntimeId == nil then
+        return
+    end
+
+    if ByRuntimeId[RuntimeId] == Inst then
+        ByRuntimeId[RuntimeId] = nil
+    end
+
+    const Obj = Workspace[RuntimeId]
+    if Obj and Obj.Instance == Inst then
+        Obj.Instance = nil
+    end
 end
 
 function Objects:GetWorkspace(): {[RuntimeId]: Object}
@@ -184,12 +236,16 @@ const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instanc
         return
     end
 
+    -- The reference that came with the object is the fast path. When it did not
+    -- survive, the part may already be here and tracked under its runtime id.
+    const Resolved = Inst or ByRuntimeId[RuntimeId]
+
     const Obj = {}
     Obj.RuntimeId = RuntimeId
     Obj.Parent = Data.Parent
     Obj.Name = Registry.Name
     Obj.Destroyed = false
-    Obj.Instance = Inst
+    Obj.Instance = Resolved
     Obj.Links = nil
     Obj.Properties = {}
 
@@ -209,10 +265,20 @@ const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instanc
     Obj.Destroy = __destroy
 
     Workspace[RuntimeId] = Obj
-    if Inst then
-        ByInstance[Inst] = RuntimeId
+    if Resolved then
+        ByInstance[Resolved] = RuntimeId
+        ByRuntimeId[RuntimeId] = Resolved
     end
 end
+
+-- GetTagged first: parts that replicated before this module loaded never fire
+-- the added signal, and on a join that is most of them.
+for _, Inst in CollectionService:GetTagged(Shared.ObjectTag) do
+    Track(Inst)
+end
+
+CollectionService:GetInstanceAddedSignal(Shared.ObjectTag):Connect(Track)
+CollectionService:GetInstanceRemovedSignal(Shared.ObjectTag):Connect(Untrack)
 
 Network.ObjectRegistered:Connect(function(Registry: ObjectRegistry)
     Registered[Registry.Id] = Registry
