@@ -1,8 +1,14 @@
 --!strict
 const PropertyTypes = require("../Properties/Types")
+const Handles = require("../Handles")
 
 export type ObjectIdentifier = number
-export type RuntimeId = number
+
+-- The object's own identity, scene included. See Handles: it replaced a per
+-- session counter, so a reference kept across an unload still names the same
+-- object when the scene comes back.
+export type Handle = Handles.Handle
+export type SceneIdentifier = Handles.SceneIdentifier
 
 -- Every lookup on an object takes either the property's id or its name.
 export type PropertyReference = PropertyTypes.PropertyIdentifier | string
@@ -45,7 +51,14 @@ export type ObjectConfig = {
 }
 
 export type Object = {
-    RuntimeId: RuntimeId,
+    -- Id is the whole handle and the only thing anything else should pass
+    -- around. Scene and LocalId are the two halves it is made of, kept here so
+    -- reading one does not mean unpacking it, and so a printed handle -- which
+    -- is a large opaque number -- can be made sense of.
+    Id: Handle,
+    Scene: SceneIdentifier,
+    LocalId: number,
+
     Parent: ObjectIdentifier,
     Name: string,
     Properties: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
@@ -56,6 +69,12 @@ export type Object = {
     Destroyed: boolean,
 
     Instance: Instance?,
+
+    -- Called by Destroy to drop the object from the scene holding it. A plain
+    -- callback rather than a reference to the scene, because naming the scene
+    -- type here would put Objects and Scenes in a require cycle.
+    Release: (() -> ())?,
+
     -- Keyed by property id, not an array: a link is looked up by the property
     -- it mirrors.
     Links: {[PropertyTypes.PropertyIdentifier]: InstanceLink}?,

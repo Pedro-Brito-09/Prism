@@ -14,6 +14,10 @@ const Prism = {}
 if IS_SERVER then
     Prism.Properties = require("@self/Properties/Server")
     Prism.Objects = require("@self/Objects/Server")
+
+    -- Before anything that creates an object: registering it is what puts the
+    -- default scene in place, and an object cannot be built without one.
+    Prism.Scenes = require("@self/Scenes/Server")
     Prism.Permissions = require("@self/Permissions/Server")
     Prism.Database = require("@self/Database/Server")
 
@@ -22,6 +26,7 @@ if IS_SERVER then
 else
     Prism.Properties = require("@self/Properties/Client")
     Prism.Objects = require("@self/Objects/Client")
+    Prism.Scenes = require("@self/Scenes/Client")
     Prism.Permissions = require("@self/Permissions/Client")
 
     -- Client only, and not as a policy: it reads Objects/Client directly, so
@@ -33,6 +38,7 @@ end
 Prism.CustomEnum = require("@self/CustomEnum")
 Prism.Compressor = require("@self/Compressor")
 Prism.Networking = require("@self/Networking")
+Prism.Handles = require("@self/Handles")
 Prism.Encoding = require("@self/Encoding")
 Prism.Varint = require("@self/Varint")
 Prism.Codecs = require("@self/Codecs")

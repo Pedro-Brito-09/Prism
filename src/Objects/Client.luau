@@ -6,26 +6,54 @@ const PropertyTypes = require("../Properties/Types")
 const Compressor = require("../Compressor")
 const Network = require("./Network")
 const Shared = require("./Shared")
+const Handles = require("../Handles")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
 export type ObjectIdentifier = Types.ObjectIdentifier
 export type ObjectRegistry = Types.ObjectRegistry
-export type RuntimeId = Types.RuntimeId
+export type Handle = Types.Handle
 export type Object = Types.Object
 
 const Objects = {}
 
 const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
-const Workspace: {[RuntimeId]: Object} = {}
-const ByInstance: {[Instance]: RuntimeId} = setmetatable({}, {__mode = "k"}) :: any
+const Workspace: {[Handle]: Object} = {}
+const ByInstance: {[Instance]: Handle} = setmetatable({}, {__mode = "k"}) :: any
 
 -- The other direction, and the reason an object can find its instance at all
 -- when the reference sent beside it did not survive: a tagged part carries its
--- runtime id, so it can be filed here before its object arrives and claimed
+-- handle, so it can be filed here before its object arrives and claimed
 -- afterwards. Weak valued, so a part that is destroyed or streamed out is not
 -- held here by this table alone.
-const ByRuntimeId: {[RuntimeId]: Instance} = setmetatable({}, {__mode = "v"}) :: any
+const ByHandle: {[Handle]: Instance} = setmetatable({}, {__mode = "v"}) :: any
+
+-- Objects grouped by the scene they belong to. A scene unloading is one packet
+-- naming the scene, not an ObjectRemoved per object, so the client has to be
+-- able to answer "everything in scene 3" without walking the whole workspace.
+const ByScene: {[Types.SceneIdentifier]: {[Handle]: Object}} = {}
+
+const function Index(Obj: Object)
+    local Scene = ByScene[Obj.Scene]
+    if not Scene then
+        Scene = {}
+        ByScene[Obj.Scene] = Scene
+    end
+
+    Scene[Obj.Id] = Obj
+end
+
+const function Unindex(Obj: Object)
+    const Scene = ByScene[Obj.Scene]
+    if not Scene then
+        return
+    end
+
+    Scene[Obj.Id] = nil
+    if next(Scene) == nil then
+        ByScene[Obj.Scene] = nil
+    end
+end
 
 -- Every optimistic set takes a ticket, and only the newest outstanding one for
 -- a property is allowed to roll back. Dragging issues a set per frame: without
@@ -80,7 +108,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         return false
     end
 
-    const RuntimeId = self.RuntimeId
+    const Handle = self.Id
     const PropId = Prop.Parent
 
     Ticket += 1
@@ -89,7 +117,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
 
     task.spawn(function()
         const Ok, Allowed = pcall(function()
-            return Network.SetProperty:Invoke(RuntimeId, PropId, Compressed)
+            return Network.SetProperty:Invoke(Handle, PropId, Compressed)
         end)
 
         -- Superseded while in flight: the newer set owns the value now, and its
@@ -114,7 +142,7 @@ const function __destroy(self: Object): boolean
     end
 
     const Ok, Allowed = pcall(function()
-        return Network.Destroy:Invoke(self.RuntimeId)
+        return Network.Destroy:Invoke(self.Id)
     end)
 
     return Ok and Allowed == true
@@ -136,10 +164,11 @@ const function Teardown(Obj: Object)
         Obj.Instance = nil
     end
 
-    ByRuntimeId[Obj.RuntimeId] = nil
+    ByHandle[Obj.Id] = nil
+    Unindex(Obj)
 
     -- Not table.clear: a stale reference should still be able to report its own
-    -- runtime id and read Destroyed rather than turning into an empty table
+    -- handle and read Destroyed rather than turning into an empty table
     -- whose every method throws.
     Obj.Get = Shared.Destroyed.Get
     Obj.Set = Shared.Destroyed.Set
@@ -154,15 +183,15 @@ end
 -- lands second completes the pair. Track runs again on a part that streams back
 -- in, which is why it must be safe to repeat.
 const function Track(Inst: Instance)
-    const RuntimeId = Inst:GetAttribute(Shared.RuntimeAttribute)
-    if type(RuntimeId) ~= "number" then
+    const Handle = Inst:GetAttribute(Shared.HandleAttribute)
+    if type(Handle) ~= "number" then
         return
     end
 
-    ByInstance[Inst] = RuntimeId
-    ByRuntimeId[RuntimeId] = Inst
+    ByInstance[Inst] = Handle
+    ByHandle[Handle] = Inst
 
-    const Obj = Workspace[RuntimeId]
+    const Obj = Workspace[Handle]
     if Obj and not Obj.Destroyed then
         Obj.Instance = Inst
     end
@@ -172,29 +201,59 @@ end
 -- the world, and an object holding it would hand callers something detached
 -- from everything. The pairing is rebuilt by Track if it streams back in.
 const function Untrack(Inst: Instance)
-    const RuntimeId = ByInstance[Inst]
+    const Handle = ByInstance[Inst]
     ByInstance[Inst] = nil
 
-    if RuntimeId == nil then
+    if Handle == nil then
         return
     end
 
-    if ByRuntimeId[RuntimeId] == Inst then
-        ByRuntimeId[RuntimeId] = nil
+    if ByHandle[Handle] == Inst then
+        ByHandle[Handle] = nil
     end
 
-    const Obj = Workspace[RuntimeId]
+    const Obj = Workspace[Handle]
     if Obj and Obj.Instance == Inst then
         Obj.Instance = nil
     end
 end
 
-function Objects:GetWorkspace(): {[RuntimeId]: Object}
+function Objects:GetWorkspace(): {[Handle]: Object}
     return Workspace
 end
 
-function Objects:Get(RuntimeId: RuntimeId): Object?
-    return Workspace[RuntimeId]
+function Objects:Get(Handle: Handle): Object?
+    return Workspace[Handle]
+end
+
+function Objects:Split(Handle: Handle): (Types.SceneIdentifier, number)
+    return Handles.Split(Handle)
+end
+
+function Objects:GetScene(Scene: Types.SceneIdentifier): {Object}
+    const Out = {}
+    for _, Obj in ByScene[Scene] or {} do
+        table.insert(Out, Obj)
+    end
+
+    return Out
+end
+
+-- Tears down every object of one scene. Called by Scenes/Client when the server
+-- says a scene unloaded, which arrives as a single packet: the objects are gone
+-- on the server and no ObjectRemoved is coming for any of them.
+function Objects.DropScene(Scene: Types.SceneIdentifier)
+    const Held = ByScene[Scene]
+    if not Held then
+        return
+    end
+
+    for Handle, Obj in table.clone(Held) do
+        Workspace[Handle] = nil
+        Teardown(Obj)
+    end
+
+    ByScene[Scene] = nil
 end
 
 function Objects:GetRegistered(): {[ObjectIdentifier]: ObjectRegistry}
@@ -209,9 +268,9 @@ end
 function Objects:FromInstance(Inst: Instance): Object?
     local Current: Instance? = Inst
     while Current do
-        const RuntimeId = ByInstance[Current]
-        if RuntimeId then
-            return Workspace[RuntimeId]
+        const Handle = ByInstance[Current]
+        if Handle then
+            return Workspace[Handle]
         end
 
         Current = Current.Parent
@@ -222,28 +281,32 @@ end
 
 -- Shared by the live ObjectAdded broadcast and the batched join replay, which
 -- carry the same three values and differ only in how many arrive at once.
-const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instance?)
+const function AddObject(Handle: Handle, Compressed: buffer, Inst: Instance?)
     const Ok, Data = pcall(function()
         return Compressor:DecompressObject(Compressed)
     end)
 
     if not Ok or not Data then
-        Logger:Warn(`Failed to decompress object {RuntimeId}.`)
+        Logger:Warn(`Failed to decompress object {Handle}.`)
         return
     end
 
     const Registry = Registered[Data.Parent]
     if not Registry then
-        Logger:Warn(`Received object {RuntimeId} for unregistered type {Data.Parent}.`)
+        Logger:Warn(`Received object {Handle} for unregistered type {Data.Parent}.`)
         return
     end
 
     -- The reference that came with the object is the fast path. When it did not
-    -- survive, the part may already be here and tracked under its runtime id.
-    const Resolved = Inst or ByRuntimeId[RuntimeId]
+    -- survive, the part may already be here and tracked under its handle.
+    const Resolved = Inst or ByHandle[Handle]
+
+    const Scene, LocalId = Handles.Split(Handle)
 
     const Obj = {}
-    Obj.RuntimeId = RuntimeId
+    Obj.Id = Handle
+    Obj.Scene = Scene
+    Obj.LocalId = LocalId
     Obj.Parent = Data.Parent
     Obj.Name = Registry.Name
     Obj.Destroyed = false
@@ -269,10 +332,12 @@ const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instanc
     Obj.OnChange = Shared.OnChange
     Obj.Destroy = __destroy
 
-    Workspace[RuntimeId] = Obj
+    Workspace[Handle] = Obj
+    Index(Obj :: any)
+
     if Resolved then
-        ByInstance[Resolved] = RuntimeId
-        ByRuntimeId[RuntimeId] = Resolved
+        ByInstance[Resolved] = Handle
+        ByHandle[Handle] = Resolved
     end
 end
 
@@ -299,31 +364,31 @@ Network.ObjectAdded:Connect(AddObject)
 
 -- The instance list carries false where an object has no instance: a nil entry
 -- would leave a hole in the array and shift every later index against the ids.
-Network.ObjectsReplayed:Connect(function(RuntimeIds: {number}, Buffers: {buffer}, Instances: {any})
-    for Index, RuntimeId in RuntimeIds do
+Network.ObjectsReplayed:Connect(function(HandleList: {number}, Buffers: {buffer}, Instances: {any})
+    for Index, Handle in HandleList do
         const Inst = Instances[Index]
         const Resolved = if Inst == false then nil else Inst
 
         -- One bad entry must not cost the rest of the batch.
-        const Ok, Err = pcall(AddObject, RuntimeId, Buffers[Index], Resolved)
+        const Ok, Err = pcall(AddObject, Handle, Buffers[Index], Resolved)
         if not Ok then
-            Logger:Warn(`Failed to add replayed object {RuntimeId}: {Err}`)
+            Logger:Warn(`Failed to add replayed object {Handle}: {Err}`)
         end
     end
 end)
 
-Network.ObjectRemoved:Connect(function(RuntimeId: RuntimeId)
-    const Obj = Workspace[RuntimeId]
+Network.ObjectRemoved:Connect(function(Handle: Handle)
+    const Obj = Workspace[Handle]
     if not Obj then
         return
     end
 
-    Workspace[RuntimeId] = nil
+    Workspace[Handle] = nil
     Teardown(Obj)
 end)
 
-Network.PropertyChanged:Connect(function(RuntimeId: RuntimeId, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer)
-    const Obj = Workspace[RuntimeId]
+Network.PropertyChanged:Connect(function(Handle: Handle, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer)
+    const Obj = Workspace[Handle]
     if not Obj then
         return
     end

@@ -50,6 +50,10 @@ enemy:Get("Health")
 enemy:Destroy()
 ```
 
+Every object carries `Id`, a handle that names it and the scene holding it. It
+is saved with the object, so a reference written down before a scene is unloaded
+still names the same object when it comes back — see Scenes.
+
 A link mirrors a property onto the instance. `Type = "Property"` writes a real
 instance property (the types must match), `Type = "Attribute"` writes an
 attribute. `Descendant` targets a child instead of the root.
@@ -76,6 +80,62 @@ not cover:
 ```lua
 enemy:GetProperty("Health").Constraints.MaxValue
 ```
+
+## Scenes
+
+A scene is a named set of objects, and the unit a level is saved and loaded as.
+It is either loaded — objects live, replicated, instances under its container —
+or unloaded, in which case it is one buffer and costs nothing else.
+
+```lua
+local Lobby = Prism.Scenes.new({Name = "Lobby", Container = workspace.Levels})
+
+local crate = Lobby:Create(Enemy, {[Health] = 50})
+Lobby:Unload()   -- serialises, then destroys the objects
+Lobby:Load()     -- rebuilds them, under the ids they were saved with
+```
+
+Scenes are registered in code, with stable ids, the way property and object
+types are. A game where players author their own levels builds that on top:
+register a scene per level, hand the pack to a DataStore.
+
+```lua
+local pack = Lobby:Serialize()
+Prism.Scenes.fromBuffer({Name = "Lobby2"}, pack)  -- registered, unloaded
+```
+
+`Objects.new` with no scene lands in an implicit `Default` scene, always loaded,
+so object creation works with no scene of your own.
+
+### Handles
+
+An object's id carries its scene in the high bits:
+
+```
+Id = SceneId * 2^32 + LocalId
+```
+
+48 bits, well inside the 53 a Luau number holds exactly, so it stays one plain
+number to pass, compare and use as a table key — `Objects:Get(id)` takes one
+argument, not a pair. `Objects:Split(id)` gives back the two halves, and an
+object exposes them as `Scene` and `LocalId`.
+
+Only the low half is written to a pack. The scene stamps its own id back on at
+load, which is what keeps a pack portable: load the same prefab into two scenes
+and you get two non-colliding sets of handles, with the references inside the
+pack remapped together.
+
+A local id is never handed out twice within a scene, for the same reason a
+property id is never recycled — a reference still holding it would silently name
+a different object. The scene's counter is saved in the pack.
+
+### Loading and unloading are one packet
+
+Unloading fires a single message naming the scene, and the client drops
+everything it holds for it. Loading sends the objects down the same chunked path
+a joining player receives. One packet per object would put a five thousand
+object scene into the remote queue in a single frame, which is the flood the
+join replay exists to avoid.
 
 ## Selection
 
@@ -250,8 +310,9 @@ Ids, lengths and counts are LEB128 varints: one byte below 128, two below 16384.
 Property ids are **never recycled**, because they are written into saved data —
 reusing one for a different property would silently reinterpret every record
 still carrying it. Object registry ids are not recycled either, for the same
-reason: a registry id is written into every saved object as its type. Runtime
-ids come from a monotonic per-session counter and are never reused.
+reason: a registry id is written into every saved object as its type. Nor are
+scene ids, which live in the high bits of every handle, or an object's local id
+within its scene.
 
 Objects and packs carry a format version, and readers refuse anything newer
 than they understand rather than misreading it. Individual metadata records do

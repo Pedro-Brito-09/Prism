@@ -311,10 +311,10 @@ T:Test("an allowed destroy tears down the client object", function()
         return
     end
 
-    const RuntimeId = Destroyable.RuntimeId
+    const Handle = Destroyable.Id
     T:Ok(Destroyable:Destroy(), "server accepted destroy")
     T:Eventually(function()
-        return Objects:Get(RuntimeId) == nil and Destroyable.Destroyed
+        return Objects:Get(Handle) == nil and Destroyable.Destroyed
     end, 3, "removal replicated")
     T:Eq(Destroyable:Get(FIXTURE_PROPERTY), nil, "stale getter is safe")
     T:Eq(Destroyable:Set(FIXTURE_PROPERTY, "x"), false, "stale setter is safe")

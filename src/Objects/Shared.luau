@@ -61,7 +61,10 @@ end
 
 return {
     -- Stamped on every clone an object owns, before it is parented, so the tag
-    -- and the id replicate as part of the instance itself.
+    -- and the handle replicate as part of the instance itself. The handle
+    -- rather than the old runtime id: an attribute survives the part streaming
+    -- out and back, and under the old scheme what came back named an object
+    -- that no longer existed.
     --
     -- The instance reference that rides alongside ObjectAdded and the join
     -- replay is a fast path, not a guarantee: a client that has not replicated
@@ -69,7 +72,7 @@ return {
     -- has not brought that region in -- decodes the reference as nil, and
     -- nothing ever sends it again. Carrying the runtime id on the instance lets
     -- the client rebuild the link whenever the part does arrive.
-    RuntimeAttribute = "PrismRuntimeId",
+    HandleAttribute = "PrismHandle",
     ObjectTag = "PrismObject",
 
     BuildNameMap = BuildNameMap,

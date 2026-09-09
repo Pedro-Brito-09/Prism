@@ -30,6 +30,8 @@ const Permissions = Prism.Permissions
 const CustomEnum = Prism.CustomEnum
 const Encoding = Prism.Encoding
 const Objects = Prism.Objects
+const Handles = Prism.Handles
+const Scenes = Prism.Scenes
 const IdPool = Prism.IdPool
 const Codecs = Prism.Codecs
 const Varint = Prism.Varint
@@ -883,13 +885,13 @@ end)
 T:Test("destroy is idempotent and answers instead of throwing", function()
     const Obj = Objects.new(CrateId)
     const Inst = Obj.Instance
-    const RuntimeId = Obj.RuntimeId
+    const Handle = Obj.Id
 
     Obj:Destroy()
     T:Ok(Obj.Destroyed, "flagged")
-    T:Eq(Obj.RuntimeId, RuntimeId, "identity readable after destroy")
+    T:Eq(Obj.Id, Handle, "identity readable after destroy")
     T:Eq(Inst.Parent, nil, "instance destroyed")
-    T:Eq(Objects:GetWorkspace()[RuntimeId], nil, "removed from workspace")
+    T:Eq(Objects:GetWorkspace()[Handle], nil, "removed from workspace")
 
     -- None of these may throw.
     Obj:Destroy()
@@ -980,27 +982,182 @@ T:Test("round trips through compression", function()
         T:Eq(Copy.Parent, CrateId, "same registry")
         T:Eq(Copy:Get(TitleId), "Compressed", "title carried")
         T:Eq(Copy:Get(HealthId), 33, "health carried")
-        T:Ok(Copy.RuntimeId ~= Obj.RuntimeId, "distinct runtime id")
+        -- A copy, not a restore: it gets its own id rather than aliasing the
+        -- original, which is still alive and still holds the saved one.
+        T:Ok(Copy.Id ~= Obj.Id, "distinct handle")
+        T:Eq(Copy.Scene, Obj.Scene, "same scene")
         Copy:Destroy()
     end
 
     Obj:Destroy()
 end)
 
-T:Test("runtime ids are unique", function()
+T:Test("handles are unique", function()
     const Seen = {}
     const Made = {}
 
     for _ = 1, 20 do
         const Obj = Objects.new(BareId)
-        T:Ok(not Seen[Obj.RuntimeId], `runtime id {Obj.RuntimeId} is fresh`)
-        Seen[Obj.RuntimeId] = true
+        T:Ok(not Seen[Obj.Id], `handle {Obj.Id} is fresh`)
+        Seen[Obj.Id] = true
         table.insert(Made, Obj)
     end
 
     for _, Obj in Made do
         Obj:Destroy()
     end
+end)
+
+--=============================================================================
+-- Scenes
+--=============================================================================
+
+T:Describe("Scenes")
+
+T:Test("a handle carries its scene and survives the round trip", function()
+    const Handle = Handles.Join(7, 1234)
+    const Scene, Local = Handles.Split(Handle)
+
+    T:Eq(Scene, 7, "scene half")
+    T:Eq(Local, 1234, "local half")
+    T:Eq(Handles.Scene(Handle), 7, "scene alone")
+    T:Eq(Handles.Local(Handle), 1234, "local alone")
+
+    -- The largest handle the scheme can produce still has to be an exact
+    -- integer, or two different objects start comparing equal.
+    const Biggest = Handles.Join(Handles.MAX_SCENE, Handles.MAX_LOCAL)
+    T:Eq(Biggest % 1, 0, "still an integer")
+    T:Ok(Biggest ~= Biggest - 1, "still distinguishable from its neighbour")
+    T:Eq(Handles.Local(Biggest), Handles.MAX_LOCAL, "reads back at the top")
+end)
+
+T:Test("objects land in the default scene when none is named", function()
+    const Obj = Objects.new(BareId)
+    const Default = Scenes:GetDefault()
+
+    T:Eq(Obj.Scene, Default.Id, "scene recorded on the object")
+    T:Eq(Handles.Scene(Obj.Id), Default.Id, "and inside the handle")
+    T:Eq(Default.Objects[Obj.Id], Obj, "the scene holds it")
+
+    Obj:Destroy()
+    T:Eq(Default.Objects[Obj.Id], nil, "and lets go on destroy")
+end)
+
+T:Test("refuses a duplicate name and a duplicate id", function()
+    const First = Scenes.new({Name = "TestDuplicate"})
+    T:Ok(First, "registered")
+
+    T:Eq(Scenes.new({Name = "TestDuplicate"}), nil, "same name refused")
+
+    const Fixed = Scenes.new({Name = "TestFixedId", CustomId = 4242})
+    T:Eq(Fixed.Id, 4242, "custom id honoured")
+    T:Eq(Scenes.new({Name = "TestFixedIdAgain", CustomId = 4242}), nil, "same id refused")
+
+    First:Destroy()
+    Fixed:Destroy()
+end)
+
+T:Test("local ids are per scene, so two scenes reuse the same numbers", function()
+    const A = Scenes.new({Name = "TestSceneA"})
+    const B = Scenes.new({Name = "TestSceneB"})
+
+    const InA = A:Create(BareId)
+    const InB = B:Create(BareId)
+
+    T:Eq(InA.LocalId, 1, "first in A")
+    T:Eq(InB.LocalId, 1, "first in B")
+    T:Ok(InA.Id ~= InB.Id, "but the handles differ")
+
+    A:Destroy()
+    B:Destroy()
+end)
+
+T:Test("unload keeps the data and load brings the same ids back", function()
+    const Scene = Scenes.new({Name = "TestRoundTrip"})
+
+    const One = Scene:Create(CrateId, {[TitleId] = "First"})
+    const Two = Scene:Create(CrateId, {[TitleId] = "Second"})
+    const Handles_ = {One.Id, Two.Id}
+
+    T:Ok(Scene:Unload(), "unloaded")
+    T:Ok(not Scene.Loaded, "flagged unloaded")
+    T:Ok(Scene.Data, "kept a pack")
+    T:Ok(One.Destroyed and Two.Destroyed, "objects torn down")
+    T:Eq(Objects:GetWorkspace()[Handles_[1]], nil, "and out of the workspace")
+
+    T:Ok(Scene:Load(), "loaded")
+
+    -- The whole point: a reference written down before the unload still names
+    -- the same object afterwards.
+    const Back = Objects:GetWorkspace()[Handles_[1]]
+    T:Ok(Back, "the first handle resolves again")
+    T:Eq(Back:Get(TitleId), "First", "with its value")
+    T:Eq(Objects:GetWorkspace()[Handles_[2]]:Get(TitleId), "Second", "and so does the second")
+
+    Scene:Destroy()
+end)
+
+T:Test("a local id is never handed out twice, even across a reload", function()
+    const Scene = Scenes.new({Name = "TestNoReuse"})
+
+    const First = Scene:Create(BareId)
+    const Taken = First.LocalId
+    First:Destroy()
+
+    Scene:Unload()
+    Scene:Load()
+
+    const Next = Scene:Create(BareId)
+    T:Ok(Next.LocalId > Taken, `{Next.LocalId} is past the id already spent`)
+
+    Scene:Destroy()
+end)
+
+T:Test("a pack loads into a different scene without colliding", function()
+    const Source = Scenes.new({Name = "TestSource"})
+    Source:Create(CrateId, {[TitleId] = "Shared"})
+
+    const Pack = Source:Serialize()
+
+    -- Same bytes, two scenes. This is what per scene ids buy: a prefab is not
+    -- tied to the scene that produced it.
+    const Copy = Scenes.fromBuffer({Name = "TestCopy"}, Pack)
+    T:Ok(not Copy.Loaded, "restored unloaded")
+    T:Ok(Copy:Load(), "loads")
+
+    const Original = Source:GetObjects()[1]
+    const Restored = Copy:GetObjects()[1]
+
+    T:Eq(Restored:Get(TitleId), "Shared", "value carried")
+    T:Eq(Restored.LocalId, Original.LocalId, "same id inside its scene")
+    T:Ok(Restored.Id ~= Original.Id, "different handle, because a different scene")
+
+    Source:Destroy()
+    Copy:Destroy()
+end)
+
+T:Test("creating in an unloaded scene is refused rather than silently loading", function()
+    const Scene = Scenes.new({Name = "TestClosed"})
+    Scene:Unload()
+
+    T:Eq(Scene:Create(BareId), nil, "refused")
+
+    Scene:Destroy()
+end)
+
+T:Test("serialize answers for a loaded scene too", function()
+    const Scene = Scenes.new({Name = "TestSerializeLive"})
+    Scene:Create(CrateId, {[TitleId] = "Live"})
+
+    const Pack = Scene:Serialize()
+    T:Ok(Pack, "produced a pack while loaded")
+    T:Ok(Scene.Loaded, "and left the scene alone")
+
+    const LastId, Objs = Compressor:DecompressScene(Pack)
+    T:Eq(LastId, Scene.LastId, "carries the counter")
+    T:Eq(#Objs, 1, "and the object")
+
+    Scene:Destroy()
 end)
 
 --=============================================================================

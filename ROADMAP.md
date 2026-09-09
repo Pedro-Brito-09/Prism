@@ -5,40 +5,13 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
 
 ## In design
 
-- [ ] **Scenes + object identity.** One refactor, not two: objects cannot be
-      keyed by a scene-scoped id until scenes exist, and keeping runtime ids
-      through a scenes release would be work thrown away.
-
-      *Scenes.* Objects are created into a named scene instead of one global
-      workspace. Scenes are registered in code, with stable ids, the way
-      property and object types already are. `Scene:Load()` rebuilds the scene
-      from its pack, `Scene:Unload()` serialises it and destroys the objects,
-      so an unloaded scene costs a buffer. A loaded server scene is visible to
-      every player. An implicit always-loaded `Default` scene keeps plain
-      `Objects.new` working. Replaces the case for an object hierarchy.
-
-      *Identity.* `RuntimeId` -- session-local, minted fresh every load -- is
-      replaced by a durable handle, `SceneId * 2^32 + ObjectId`, which stays a
-      single exact number in Luau and so stays a single argument everywhere.
-      The pack stores only the low half, the id within the scene, so a pack
-      stays portable: loading the same prefab into two scenes yields two
-      non-colliding sets of handles, and cross references inside a pack are
-      remapped together. Ids are never recycled within a scene; the scene's
-      `LastId` is saved in the pack exactly as `CompressMetadatas` already
-      saves the metadata one. `FORMAT_VERSION` stays at 1 and the layout
-      changes in place -- nothing has ever been written by a released build.
-
-      *Load and unload are single packets.* Tearing down a 5000 object scene
-      with one `ObjectRemoved` each is the flood `Replication` was written to
-      avoid.
-
-      *Then, separately:* client owned scenes, whose objects the server never
-      sees -- a prefab preview, a local sandbox. Needs `Objects.new` on the
-      client and a local authority path (apply on the spot, no invoke, no
-      rollback). The client never receives a registry's template instance, so
-      a local scene has to be handed one explicitly. Its natural finish --
-      committing a local scene to the server -- is a transaction full of
-      create operations, so transactions are worth doing in between.
+- [ ] **Client owned scenes.** A scene whose objects the server never sees — a
+      prefab preview, a local sandbox. Needs `Objects.new` on the client and a
+      local authority path: apply on the spot, no invoke, no rollback. The
+      client never receives a registry's template instance, so a local scene has
+      to be handed one explicitly. Its natural finish — committing a local scene
+      to the server — is a transaction full of create operations, so
+      transactions are worth doing first.
 
 - [ ] **Transactions.** One channel carrying a list of operations — create, set,
       destroy — validated and applied as a unit, so a multi-object edit is one
@@ -66,6 +39,15 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
       object can come back under the id it had.
 
 ## Done
+
+- [x] **Scenes and object identity.** Objects are created into a named scene
+      rather than one global workspace, and `RuntimeId` — a per session counter
+      that renamed every object on each load — is gone. An object's `Id` is a
+      handle, `SceneId * 2^32 + LocalId`, one exact number and so one argument
+      everywhere. Only the low half is packed, so a pack is portable between
+      scenes. `Scene:Unload` serialises and destroys in a single packet;
+      `Scene:Load` rebuilds under the saved ids and announces down the chunked
+      replay path. `Objects.new` still works, in an implicit `Default` scene.
 
 - [x] **Property access from the object.** `OnChange` and `GetProperty` beside
       `Get` and `Set`, all four taking an id or a name, with the name resolved

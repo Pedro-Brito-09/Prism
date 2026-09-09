@@ -14,24 +14,24 @@ const ObjectTypes = require("./Objects/Types")
 const Objects = require("./Objects/Client")
 const Logger = require("./Logger")
 
-export type RuntimeId = ObjectTypes.RuntimeId
+export type Handle = ObjectTypes.Handle
 export type Object = ObjectTypes.Object
 
 -- Everything here takes an object or its runtime id, the way Objects takes a
 -- property by id or by name.
-export type Reference = Object | RuntimeId
+export type Reference = Object | Handle
 
 const Selection = {}
-const Selected: {RuntimeId} = {}
+const Selected: {Handle} = {}
 local Listeners: {(Selected: {Object}) -> ()}? = nil
 
 -- Only a reference the workspace still holds is accepted. Selecting an id that
 -- never arrived, or one already gone, used to sit in the list until something
 -- happened to walk past it.
-const function Resolve(Reference: Reference): RuntimeId?
+const function Resolve(Reference: Reference): Handle?
     const Identifier = if type(Reference) == "number"
         then Reference
-        else Reference.RuntimeId
+        else Reference.Id
 
     const Obj = Objects:Get(Identifier)
     return if Obj and not Obj.Destroyed then Identifier else nil
@@ -89,7 +89,7 @@ function Selection:Remove(Reference: Reference): boolean
     -- from the list, and Resolve refuses exactly those.
     const Identifier = if type(Reference) == "number"
         then Reference
-        else Reference.RuntimeId
+        else Reference.Id
 
     const Position = table.find(Selected, Identifier)
     if not Position then
@@ -105,7 +105,7 @@ end
 function Selection:Contains(Reference: Reference): boolean
     const Identifier = if type(Reference) == "number"
         then Reference
-        else Reference.RuntimeId
+        else Reference.Id
 
     return table.find(Selected, Identifier) ~= nil
 end
