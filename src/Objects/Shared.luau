@@ -60,6 +60,18 @@ const function OnChange(
 end
 
 return {
+    -- Stamped on every clone an object owns, before it is parented, so the tag
+    -- and the id replicate as part of the instance itself.
+    --
+    -- The instance reference that rides alongside ObjectAdded and the join
+    -- replay is a fast path, not a guarantee: a client that has not replicated
+    -- the part yet -- because it announced itself mid-join, or because streaming
+    -- has not brought that region in -- decodes the reference as nil, and
+    -- nothing ever sends it again. Carrying the runtime id on the instance lets
+    -- the client rebuild the link whenever the part does arrive.
+    RuntimeAttribute = "PrismRuntimeId",
+    ObjectTag = "PrismObject",
+
     BuildNameMap = BuildNameMap,
     GetProperty = GetProperty,
     OnChange = OnChange,

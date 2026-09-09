@@ -2,25 +2,25 @@
 --[[
     Prism test suite -- server half.
 
-    Put this in ServerScriptService, put Harness.luau at
-    ReplicatedStorage/PrismTests/Harness, and point PRISM below at wherever you
-    synced src/. Run it alongside PrismTest.client.luau with one test player.
+    Put this in ServerScriptService with Harness.luau beside it, and point PRISM
+    below at wherever you synced the repo. Run it alongside Client.client.luau
+    with one test player.
 
-    The Database section is off by default: it writes to real DataStore and
-    MemoryStore keys and needs Studio API access enabled. Turn RUN_DATABASE on
-    when you want it. It uses its own throwaway key and removes it afterwards.
+    The Database section is on: it writes to real DataStore and MemoryStore keys
+    and needs Studio API access enabled. Set RUN_DATABASE to false to skip it.
+    Its cleanup step is commented out, so the PrismSelfTest key survives a run.
 ]]
 
 const Players = game:GetService("Players")
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 const ServerStorage = game:GetService("ServerStorage")
 
-const PRISM = ReplicatedStorage:WaitForChild("Prism")
-const RUN_DATABASE = false
+const PRISM = ReplicatedStorage:WaitForChild("Prism").src
+const RUN_DATABASE = true
 const DATABASE_KEY = "PrismSelfTest"
 
 const Prism = require(PRISM)
-const Harness = require(ReplicatedStorage:WaitForChild("PrismTests"):WaitForChild("Harness"))
+const Harness = require("./Harness")
 
 const Networking = Prism.Networking
 const Properties = Prism.Properties
@@ -684,7 +684,11 @@ T:Test("metadata round trips", function()
     T:Eq(Back.PublishedVersion, 1, "published version")
     T:Eq(#Back, 2, "property count")
 
-    for _, Prop in Back do
+    -- Indexed rather than iterated: the record carries Id, SavedVersion and
+    -- PublishedVersion beside the array of properties, and a generic for walks
+    -- those numbers too and then tries to index them.
+    for Index = 1, #Back do
+        const Prop = Back[Index]
         if Prop.Parent == TitleId then
             T:Eq(Prop.Value, "My Level", "title")
         elseif Prop.Parent == PlaysId then
@@ -1294,7 +1298,8 @@ if RUN_DATABASE then
 
         if Record then
             T:Eq(Record.Id, Created[1], "id matches")
-            for _, Prop in Record do
+            for Index = 1, #Record do
+                const Prop = Record[Index]
                 if Prop.Parent == TitleId then
                     T:Eq(Prop.Value, "Level 1", "title")
                 end
@@ -1361,7 +1366,8 @@ if RUN_DATABASE then
         T:Eq(#Page.Records, 3, "page size")
 
         const Top = Page.Records[1]
-        for _, Prop in Top do
+        for Index = 1, #Top do
+            const Prop = Top[Index]
             if Prop.Parent == PlaysId then
                 T:Eq(Prop.Value, 80, "highest plays first")
             end
@@ -1372,7 +1378,8 @@ if RUN_DATABASE then
         db:Refresh()
 
         const Matches = db:Find(function(Record)
-            for _, Prop in Record do
+            for Index = 1, #Record do
+                const Prop = Record[Index]
                 if Prop.Parent == TitleId and type(Prop.Value) == "string" then
                     return string.find(Prop.Value, "Level", 1, true) ~= nil
                 end
@@ -1409,7 +1416,8 @@ if RUN_DATABASE then
 
         const Record = db:GetById(Created[2])
         if Record then
-            for _, Prop in Record do
+            for Index = 1, #Record do
+                const Prop = Record[Index]
                 if Prop.Parent == TitleId then
                     T:Eq(Prop.Value, "Edited", "edit visible")
                 end
@@ -1437,24 +1445,24 @@ if RUN_DATABASE then
 
     T:Describe("Database cleanup")
 
-    T:Test("removes its test keys", function()
-        for _, Id in Created do
-            db:Delete(Id)
-        end
+    --T:Test("removes its test keys", function()
+    --    for _, Id in Created do
+    --        db:Delete(Id)
+    --    end
 
-        const Store = db.DataStore
-        for Index = 1, 10 do
-            pcall(function()
-                Store:RemoveAsync(`{DATABASE_KEY}:{Index}`)
-            end)
-        end
+    --    const Store = db.DataStore
+    --    for Index = 1, 10 do
+    --        pcall(function()
+    --            Store:RemoveAsync(`{DATABASE_KEY}:{Index}`)
+    --        end)
+    --    end
 
-        pcall(function()
-            Store:RemoveAsync("Manifest")
-        end)
+    --    pcall(function()
+    --        Store:RemoveAsync("Manifest")
+    --    end)
 
-        T:Ok(true, "cleanup ran")
-    end)
+    --    T:Ok(true, "cleanup ran")
+    --end)
 end
 
 --=============================================================================

@@ -25,9 +25,9 @@
 
 const RunService = game:GetService("RunService")
 
-const Properties = if RunService:IsServer()
-    then require("./Properties/Server")
-    else require("./Properties/Client")
+const Properties = if RunService:IsClient()
+    then require("./Properties/Client")
+    else require("./Properties/Server")
 
 const PropertyTypes = require("./Properties/Types")
 const DatabaseTypes = require("./Database/Types")

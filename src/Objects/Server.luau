@@ -1,4 +1,6 @@
 --!strict
+const CollectionService = game:GetService("CollectionService")
+
 const Properties = require("../Properties/Server")
 const Permissions = require("../Permissions/Server")
 const PropertyTypes = require("../Properties/Types")
@@ -408,16 +410,26 @@ function Objects.new(
     end
 
     RuntimeCounter += 1
+    const RuntimeId = RuntimeCounter
 
     -- The registry instance is a template. Handing the same one to every object
     -- meant they all drove the same part, and destroying any one of them took
     -- the part away from the rest.
+    --
+    -- Stamped and tagged before it is parented, so the id and the tag replicate
+    -- together with the instance and a client that only ever sees the part --
+    -- never the reference sent beside the object -- can still find its owner.
     local Inst: Instance? = nil
     if Ref.Instance then
-        Inst = Ref.Instance:Clone()
+        const Clone = Ref.Instance:Clone()
+        Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
+        CollectionService:AddTag(Clone, Shared.ObjectTag)
+
         if Ref.Container then
-            (Inst :: Instance).Parent = Ref.Container
+            Clone.Parent = Ref.Container
         end
+
+        Inst = Clone
     end
 
     const Props = GeneratePropertyMap(Ref.Properties)
@@ -431,7 +443,7 @@ function Objects.new(
     end
 
     const Obj = {}
-    Obj.RuntimeId = RuntimeCounter
+    Obj.RuntimeId = RuntimeId
     Obj.Parent = Ref.Id
     Obj.Name = Ref.Name
     Obj.Destroyed = false

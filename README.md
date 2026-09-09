@@ -246,22 +246,26 @@ with Roblox Script Sync using this layout:
 
 ```text
 ReplicatedStorage
-├── Prism                          <- src/
-└── PrismTests
-    └── Harness                    <- tests/Harness.luau (ModuleScript)
+└── Prism                          <- the repo root, so src/ sits inside it
 ServerScriptService
-└── PrismTest                      <- tests/PrismTest.server.luau
+├── Server                         <- tests/Server.server.luau
+└── Harness                        <- tests/Harness.luau (ModuleScript)
 StarterPlayer
 └── StarterPlayerScripts
-    └── PrismTest                  <- tests/PrismTest.client.luau
+    ├── Client                     <- tests/Client.client.luau
+    └── Harness                    <- tests/Harness.luau (ModuleScript)
 ```
+
+Both suites reach the harness with `require("./Harness")`, so it has to be a
+sibling of each one rather than living in a shared folder.
 
 Then use **Test > Play** with one player. The server creates three integration
 fixtures and intentionally keeps them alive so the client can validate both
 live delivery and late-join replay. A failed test prints its group and
 assertion, then fails the corresponding script.
 
-The database tests are disabled by default because they write to DataStore and
-MemoryStore. To include them, enable Studio API access and set `RUN_DATABASE` to
-`true` near the top of `tests/PrismTest.server.luau`; the suite uses the
-`PrismSelfTest` key and removes its DataStore records afterward.
+The database tests write to real DataStore and MemoryStore keys, so they need
+Studio API access enabled. They are currently switched on by `RUN_DATABASE` near
+the top of `tests/Server.server.luau`; set it to `false` to skip them. The suite
+uses the `PrismSelfTest` key, and its cleanup step is commented out, so records
+accumulate across runs and ids keep climbing rather than restarting at 1.
