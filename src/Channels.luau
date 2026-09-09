@@ -29,30 +29,36 @@ const Channels: {Channel} = {
 
     {
         Name = "Objects.ObjectAdded",
-        -- Handle, Compressor:CompressObject, the replicated instance if the
-        -- object has one so the client can map a clicked part back to an object.
-        Args = {Codecs.Handle, Codecs.Buffer, Codecs.Optional(Codecs.Instance)},
+        -- RuntimeId, the scene instance holding it, Compressor:CompressObject,
+        -- and the replicated instance if the object has one so the client can
+        -- map a clicked part back to an object. The object's persistent id
+        -- rides inside the buffer, so grouping by scene costs nothing here.
+        Args = {Codecs.u32, Codecs.u32, Codecs.Buffer, Codecs.Optional(Codecs.Instance)},
     },
 
     {
         Name = "Objects.ObjectRemoved",
-        Args = {Codecs.Handle},
+        Args = {Codecs.u32}, -- RuntimeId
     },
 
     {
         Name = "Objects.PropertyChanged",
-        Args = {Codecs.Handle, Codecs.u16, Codecs.Buffer}, -- Handle, PropertyId, CompressValue
+        Args = {Codecs.u32, Codecs.u16, Codecs.Buffer}, -- RuntimeId, PropertyId, CompressValue
     },
 
     {
+        -- A runtime id rather than a persistent one, and not only for the byte:
+        -- a persistent id can name more than one live object once a scene has
+        -- been instanced twice, and client input is the last place that should
+        -- be ambiguous.
         Name = "Objects.SetProperty",
-        Args = {Codecs.Handle, Codecs.u16, Codecs.Buffer}, -- Handle, PropertyId, CompressValue
+        Args = {Codecs.u32, Codecs.u16, Codecs.Buffer}, -- RuntimeId, PropertyId, CompressValue
         Returns = {Codecs.Bool},
     },
 
     {
         Name = "Objects.Destroy",
-        Args = {Codecs.Handle},
+        Args = {Codecs.u32}, -- RuntimeId
         Returns = {Codecs.Bool},
     },
 
@@ -96,7 +102,8 @@ const Channels: {Channel} = {
         -- a nil entry would leave a hole and shift every later index.
         Name = "Objects.ObjectsReplayed",
         Args = {
-            Codecs.Array(Codecs.Handle),
+            Codecs.Array(Codecs.u32),
+            Codecs.Array(Codecs.u32),
             Codecs.Array(Codecs.Buffer),
             Codecs.Array(Codecs.Any),
         },
@@ -104,8 +111,9 @@ const Channels: {Channel} = {
 
     {
         -- Scene registries replicate like property and object ones, and have to
-        -- land before any object does: a handle names its scene, so an object
-        -- arriving for a scene the client has never heard of cannot be filed.
+        -- land before any object does: an object names the live copy holding
+        -- it, and one arriving for a copy the client has not been told about
+        -- cannot work out its own persistent identity.
         Name = "Scenes.SceneRegistered",
         Args = {Codecs.Any},
     },
@@ -116,16 +124,29 @@ const Channels: {Channel} = {
     },
 
     {
-        -- One packet for the whole scene. Unloading is a mass destroy, and
-        -- sending an ObjectRemoved per object is precisely the flood the
+        -- A scene instance appearing. Objects name their instance rather than
+        -- their scene, because a scene can be live more than once and an editor
+        -- has to be able to tell the copies apart.
+        Name = "Scenes.InstanceAdded",
+        Args = {Codecs.u32, Codecs.Varint}, -- InstanceId, SceneId
+    },
+
+    {
+        -- One packet for a whole instance going away. Unloading is a mass
+        -- destroy, and an ObjectRemoved per object is precisely the flood the
         -- chunked join replay exists to avoid -- a five thousand object scene
         -- would cost five thousand packets in a frame.
         --
-        -- Loading has no counterpart here because it already has one: the
-        -- objects go out through ObjectsReplayed, the same chunked path a
-        -- joining player receives, only fired at everyone.
-        Name = "Scenes.SceneUnloaded",
-        Args = {Codecs.Varint}, -- SceneId
+        -- Appearing has no such packet because it already has one: the objects
+        -- go out through ObjectsReplayed, the same chunked path a joining
+        -- player receives, only fired at everyone.
+        Name = "Scenes.InstanceRemoved",
+        Args = {Codecs.u32}, -- InstanceId
+    },
+
+    {
+        Name = "Scenes.InstancesReplayed",
+        Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.Varint)},
     },
 }
 

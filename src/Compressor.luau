@@ -40,9 +40,9 @@ const Logger = require("./Logger")
 export type DecompressedObject = {
     __type: "DecompressedObject",
 
-    -- The object's id within its scene, not its handle: the scene half is
-    -- stamped on at load, which is what lets the same pack be loaded into two
-    -- different scenes without the two colliding.
+    -- The object's id within its scene, not the whole persistent id: the scene
+    -- half is stamped on at load, which is what lets the same pack be loaded
+    -- under two different scenes without the two colliding.
     LocalId: Handles.LocalId,
 
     Parent: ObjectTypes.ObjectIdentifier,
@@ -400,9 +400,10 @@ end
 -- [/oh][varint version][varint registry id][varint local id][varint count][properties...]
 --
 -- The local id is the object's identity within its scene and is what makes a
--- saved reference outlive the save. The scene half of the handle is not written
--- -- the scene knows which one it is, and leaving it out is what keeps a pack
--- portable between scenes.
+-- saved reference outlive the save. The scene half is not written -- the scene
+-- knows which one it is, and leaving it out is what keeps a pack portable. The
+-- runtime id is not written either, and never is: it names a live copy, and a
+-- pack describes the thing rather than any copy of it.
 function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject): buffer
     local Size = 0
     local Count = 0

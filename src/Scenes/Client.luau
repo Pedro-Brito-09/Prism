@@ -1,10 +1,15 @@
 --!strict
 -- The client's view of the server's scenes.
 --
--- Read only at this stage: the client is told which scenes exist and which
--- objects belong to them, and can ask, but cannot create one or load one. A
--- scene the client owns outright -- a prefab preview, a local sandbox the
--- server never sees -- is a separate mechanism and comes later.
+-- Read only at this stage: the client is told which scenes exist, which copies
+-- of them are live, and which objects belong to each copy. It cannot create a
+-- scene or load one. A scene the client owns outright -- a prefab preview, a
+-- local sandbox the server never sees -- is a separate mechanism and comes
+-- later.
+--
+-- Objects are filed under their instance rather than their scene, because a
+-- scene can be live more than once and an editor showing five identical rooms
+-- has to be able to tell them apart.
 
 const Objects = require("../Objects/Client")
 const Network = require("./Network")
@@ -12,9 +17,15 @@ const Types = require("./Types")
 
 export type SceneIdentifier = Types.SceneIdentifier
 export type SceneRegistry = Types.SceneRegistry
+export type SceneInstanceId = number
 
 const Scenes = {}
 const Registered: {[SceneIdentifier]: SceneRegistry} = {}
+
+-- Which copies are live. The scene each belongs to is Objects' to hold, because
+-- an object arriving needs it before this module could hand it over.
+const Known: {[SceneInstanceId]: SceneInstanceId} = {}
+
 
 function Scenes:GetRegistered(): {[SceneIdentifier]: SceneRegistry}
     return Registered
@@ -34,11 +45,26 @@ function Scenes:Get(Name: string): SceneRegistry?
     return nil
 end
 
--- The objects the client currently holds for a scene. Answers for an unloaded
--- one too, with an empty list, rather than refusing: the client does not track
--- loaded state, it tracks what it has been sent.
-function Scenes:GetObjects(Identifier: SceneIdentifier): {any}
-    return Objects:GetScene(Identifier)
+-- Which scene a live copy came from.
+function Scenes:GetInstanceScene(Instance_: SceneInstanceId): SceneIdentifier?
+    return Objects:GetInstanceScene(Instance_)
+end
+
+-- The live copies of one scene, in no particular order.
+function Scenes:GetInstances(Identifier: SceneIdentifier): {SceneInstanceId}
+    const List = {}
+    for _, Instance_ in Known do
+        if Objects:GetInstanceScene(Instance_) == Identifier then
+            table.insert(List, Instance_)
+        end
+    end
+
+    return List
+end
+
+-- The objects the client holds for one live copy.
+function Scenes:GetObjects(Instance_: SceneInstanceId): {any}
+    return Objects:GetInstance(Instance_)
 end
 
 const function Register(Payload: SceneRegistry)
@@ -53,11 +79,25 @@ Network.RegistriesReplayed:Connect(function(Payloads: {SceneRegistry})
     end
 end)
 
--- One packet for the whole scene. The objects are already gone on the server
--- and no ObjectRemoved is coming for any of them, so the client tears down what
--- it holds for that scene itself.
-Network.SceneUnloaded:Connect(function(Identifier: SceneIdentifier)
-    Objects.DropScene(Identifier)
+const function AddInstance(Instance_: SceneInstanceId, Scene: SceneIdentifier)
+    Known[Instance_] = Instance_
+    Objects.TrackInstance(Instance_, Scene)
+end
+
+Network.InstanceAdded:Connect(AddInstance)
+
+Network.InstancesReplayed:Connect(function(Instances: {SceneInstanceId}, Scenes_: {SceneIdentifier})
+    for Index, Instance_ in Instances do
+        AddInstance(Instance_, Scenes_[Index])
+    end
+end)
+
+-- One packet for a whole copy going away. Its objects are already gone on the
+-- server and no ObjectRemoved is coming for any of them, so the client tears
+-- down what it holds itself.
+Network.InstanceRemoved:Connect(function(Instance_: SceneInstanceId)
+    Known[Instance_] = nil
+    Objects.DropInstance(Instance_)
 end)
 
 return Scenes

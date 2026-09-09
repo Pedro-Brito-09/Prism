@@ -75,6 +75,23 @@ function Replication.Replay(Plr: Player)
         return
     end
 
+    -- Which copies are live, before any object names one. Sent as two parallel
+    -- lists for the same reason the object replay is: a codec per element.
+    const LiveIds = {}
+    const LiveScenes = {}
+    for Index, Instance_ in Scenes:GetInstances() do
+        LiveIds[Index] = Instance_.Id
+        LiveScenes[Index] = Instance_.Scene
+    end
+
+    if #LiveIds > 0 then
+        if not Plr.Parent then
+            return
+        end
+
+        ScenesNetwork.InstancesReplayed:Fire(Plr, LiveIds, LiveScenes)
+    end
+
     const PropertyRegistries = {}
     for Identifier in Properties:GetRegistered() do
         table.insert(PropertyRegistries, Properties:GetRegistryPayload(Identifier))
@@ -107,7 +124,8 @@ function Replication.Replay(Plr: Player)
     --
     -- Compressed a chunk at a time rather than all at once, so the cost of
     -- serializing a large workspace is spread across frames.
-    local HandleList = {}
+    local RuntimeIds = {}
+    local InstanceIds = {}
     local Buffers = {}
     local Instances = {}
     local Count = 0
@@ -121,9 +139,10 @@ function Replication.Replay(Plr: Player)
             return false
         end
 
-        ObjectsNetwork.ObjectsReplayed:Fire(Plr, HandleList, Buffers, Instances)
+        ObjectsNetwork.ObjectsReplayed:Fire(Plr, RuntimeIds, InstanceIds, Buffers, Instances)
 
-        HandleList = {}
+        RuntimeIds = {}
+        InstanceIds = {}
         Buffers = {}
         Instances = {}
         Count = 0
@@ -138,7 +157,8 @@ function Replication.Replay(Plr: Player)
         end
 
         Count += 1
-        HandleList[Count] = Obj.Id
+        RuntimeIds[Count] = Obj.RuntimeId
+        InstanceIds[Count] = Obj.InstanceId
         Buffers[Count] = Compressor:CompressObject(Obj :: any)
         Instances[Count] = Obj.Instance or false
 

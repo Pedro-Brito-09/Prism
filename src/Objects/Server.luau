@@ -18,18 +18,20 @@ export type InstanceLinkRegistry = Types.InstanceLinkRegistry
 export type InstanceLink = Types.InstanceLink
 export type ObjectRegistry = Types.ObjectRegistry
 export type ObjectConfig = Types.ObjectConfig
-export type Handle = Types.Handle
+export type RuntimeId = Types.RuntimeId
 export type Object = Types.Object
 
+const MAX_RUNTIME_ID = 4294967295
+
 const Objects = {}
+local RuntimeCounter = 0
 
 const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
 
--- Every live object on the server, keyed by handle. Flat rather than nested per
--- scene: the handle already carries its scene, so one lookup answers what two
--- would, and every caller that used to hold a runtime id holds a handle in the
--- same shape.
-const Workspace: {[Handle]: Object} = {}
+-- Every live object on the server. Keyed by runtime id rather than by the
+-- persistent one, because the persistent one is not unique here: instancing a
+-- scene twice puts two objects carrying the same persistent id in this table.
+const Workspace: {[RuntimeId]: Object} = {}
 -- Never recycled, for the same reason property ids are not: a registry id is
 -- written into every saved object as its Parent, so handing the same id to a
 -- different object type later makes every stored object of the old type decode
@@ -266,7 +268,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     if Changed then
         const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
         if Compressed then
-            Network.PropertyChanged:FireAll(self.Id, Prop.Parent, Compressed)
+            Network.PropertyChanged:FireAll(self.RuntimeId, Prop.Parent, Compressed)
         end
     end
 
@@ -310,13 +312,13 @@ const function Teardown(self: Object, Announce: boolean)
         self.Release = nil
     end
 
-    if Workspace[self.Id] then
-        Workspace[self.Id] = nil
+    if Workspace[self.RuntimeId] then
+        Workspace[self.RuntimeId] = nil
 
         -- A scene unloading announces itself once, by name, instead of once per
         -- object it held.
         if Announce then
-            Network.ObjectRemoved:FireAll(self.Id)
+            Network.ObjectRemoved:FireAll(self.RuntimeId)
         end
     end
 
@@ -390,7 +392,8 @@ const ANNOUNCE_CHUNK = 50
 -- joining player receives. A scene loading uses this rather than letting each
 -- object announce itself as it is built.
 function Objects.AnnounceAll(List: {Object})
-    local Handles_ = {}
+    local RuntimeIds = {}
+    local InstanceIds = {}
     local Buffers = {}
     local Instances = {}
     local Count = 0
@@ -400,8 +403,9 @@ function Objects.AnnounceAll(List: {Object})
             return
         end
 
-        Network.ObjectsReplayed:FireAll(Handles_, Buffers, Instances)
-        Handles_ = {}
+        Network.ObjectsReplayed:FireAll(RuntimeIds, InstanceIds, Buffers, Instances)
+        RuntimeIds = {}
+        InstanceIds = {}
         Buffers = {}
         Instances = {}
         Count = 0
@@ -414,7 +418,8 @@ function Objects.AnnounceAll(List: {Object})
         end
 
         Count += 1
-        Handles_[Count] = Obj.Id
+        RuntimeIds[Count] = Obj.RuntimeId
+        InstanceIds[Count] = Obj.InstanceId
         Buffers[Count] = Compressor:CompressObject(Obj :: any)
         Instances[Count] = Obj.Instance or false
 
@@ -426,29 +431,29 @@ function Objects.AnnounceAll(List: {Object})
     Flush()
 end
 
--- Destroys everything a scene holds without a packet per object. The caller
--- sends one naming the scene instead.
-function Objects.DropScene(Scene: any)
-    for _, Obj in table.clone(Scene.Objects) do
+-- Destroys everything a scene instance holds without a packet per object. The
+-- caller sends one naming the instance instead.
+function Objects.DropInstance(Instance_: any)
+    for _, Obj in table.clone(Instance_.Objects) do
         Teardown(Obj, false)
     end
 
-    table.clear(Scene.Objects)
+    table.clear(Instance_.Objects)
+    table.clear(Instance_.ByLocal)
 end
 
-function Objects:GetWorkspace(): {[Handle]: Object}
+function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end
 
-function Objects:Get(Handle: Handle): Object?
-    return Workspace[Handle]
+function Objects:Get(Identifier: RuntimeId): Object?
+    return Workspace[Identifier]
 end
 
--- The two halves of a handle, for a caller that has one and wants to know which
--- scene it names. Objects carry Scene and LocalId already; this is for the ones
--- that only ever had the number.
-function Objects:Split(Handle: Handle): (Types.SceneIdentifier, number)
-    return Handles.Split(Handle)
+-- The two halves of a persistent id, for a caller holding one that did not come
+-- off an object. Objects carry Scene and LocalId already.
+function Objects:Split(Persistent: Types.PersistentId): (Types.SceneIdentifier, number)
+    return Handles.Split(Persistent)
 end
 
 function Objects:GetRegistered(): {[ObjectIdentifier]: ObjectRegistry}
@@ -476,7 +481,7 @@ end
 const function Construct(
     Reference: ObjectRegistry | ObjectIdentifier,
     InitialValues: {[PropertyTypes.PropertyIdentifier]: any}?,
-    Scene: any,
+    Instance_: any,
     LocalId: number?,
     Announce: boolean
 ): Object
@@ -498,32 +503,40 @@ const function Construct(
         Logger:Error("Invalid object reference. The registry it points at is not registered.")
     end
 
-    if not Scene then
-        Logger:Error("Tried creating an object with no scene. Require Prism.Scenes on the server; it registers the default one.")
+    if not Instance_ then
+        Logger:Error("Tried creating an object with no live scene. Either Prism.Scenes was never required -- it registers the default one -- or the scene named is unloaded.")
     end
+
+    const Owner = Instance_.Owner
 
     local Local = LocalId
     if Local then
         -- Restored under the id it was saved with. Refused rather than allowed
-        -- to overwrite: two live objects answering to one handle is exactly the
-        -- silent aliasing the whole scheme exists to prevent.
-        if Scene.Objects[Handles.Join(Scene.Id, Local)] then
-            Logger:Error(`Scene {Scene.Name} already holds an object with local id {Local}.`)
+        -- to overwrite, because within one instance a persistent id still has
+        -- to name exactly one object -- that is what makes Find answerable.
+        if Instance_.ByLocal[Local] then
+            Logger:Error(`Scene {Owner.Name} already holds an object with local id {Local} in this instance.`)
         end
 
         -- The counter only ever climbs, so a pack whose ids came from a longer
         -- lived scene cannot make the next created object reuse one.
-        Scene.LastId = math.max(Scene.LastId, Local)
+        Owner.LastId = math.max(Owner.LastId, Local)
     else
-        if Scene.LastId >= Handles.MAX_LOCAL then
-            Logger:Error(`Scene {Scene.Name} has exhausted its object id space.`)
+        if Owner.LastId >= Handles.MAX_LOCAL then
+            Logger:Error(`Scene {Owner.Name} has exhausted its object id space.`)
         end
 
-        Scene.LastId += 1
-        Local = Scene.LastId
+        Owner.LastId += 1
+        Local = Owner.LastId
     end
 
-    const Handle = Handles.Join(Scene.Id, Local :: number)
+    if RuntimeCounter >= MAX_RUNTIME_ID then
+        Logger:Error("Runtime id space exhausted.")
+    end
+
+    RuntimeCounter += 1
+    const RuntimeId = RuntimeCounter
+    const Persistent = Handles.Join(Instance_.Scene, Local :: number)
 
     -- The registry instance is a template. Handing the same one to every object
     -- meant they all drove the same part, and destroying any one of them took
@@ -536,13 +549,15 @@ const function Construct(
     local Inst: Instance? = nil
     if Ref.Instance then
         const Clone = Ref.Instance:Clone()
-        Clone:SetAttribute(Shared.HandleAttribute, Handle)
+        Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
         CollectionService:AddTag(Clone, Shared.ObjectTag)
 
-        -- The scene's own container wins over the registry's. A registry is a
-        -- template shared by every scene using that object type, so its
-        -- container cannot be where a particular scene's copies belong.
-        const Container = Scene.Container or Ref.Container
+        -- The instance's own container wins over the registry's. A registry is
+        -- a template shared by every scene using that object type, so its
+        -- container cannot be where a particular copy belongs -- and it is the
+        -- instance, not the scene, because two copies of one room have to be
+        -- able to sit in two places.
+        const Container = Instance_.Container or Owner.Container or Ref.Container
         if Container then
             Clone.Parent = Container
         end
@@ -561,9 +576,11 @@ const function Construct(
     end
 
     const Obj = {}
-    Obj.Id = Handle
-    Obj.Scene = Scene.Id
+    Obj.RuntimeId = RuntimeId
+    Obj.PersistentId = Persistent
+    Obj.Scene = Instance_.Scene
     Obj.LocalId = Local
+    Obj.InstanceId = Instance_.Id
     Obj.Parent = Ref.Id
     Obj.Name = Ref.Name
     Obj.Destroyed = false
@@ -580,11 +597,19 @@ const function Construct(
     Obj.Destroy = __destroy
 
     Obj.Release = function()
-        Scene.Objects[Handle] = nil
+        Instance_.Objects[RuntimeId] = nil
+
+        -- Only if it is still the one filed there. Restoring refuses a
+        -- duplicate, so it always is, but a scene tearing down while another
+        -- rebuilds must not have the loser clear the winner's entry.
+        if Instance_.ByLocal[Local] == Obj then
+            Instance_.ByLocal[Local] = nil
+        end
     end
 
-    Workspace[Handle] = Obj
-    Scene.Objects[Handle] = Obj
+    Workspace[RuntimeId] = Obj
+    Instance_.Objects[RuntimeId] = Obj
+    Instance_.ByLocal[Local] = Obj :: any
 
     -- Only the compressed values go out. Firing the live object sent Property
     -- tables carrying Set/SetDefault functions and links carrying connections,
@@ -593,23 +618,35 @@ const function Construct(
     -- A scene being loaded announces nothing here: its objects go out together
     -- through the chunked replay path instead of one packet each.
     if Announce then
-        Network.ObjectAdded:FireAll(Handle, Compressor:CompressObject(Obj :: any), Inst)
+        Network.ObjectAdded:FireAll(RuntimeId, Instance_.Id, Compressor:CompressObject(Obj :: any), Inst)
     end
 
     return Obj :: any
 end
 
+-- Callers reach for a scene, not the instance inside it, so both are taken and
+-- a scene resolves to the canonical copy Load made. A Scene is the one carrying
+-- Instances; a SceneInstance carries Owner.
+const function ResolveInstance(Target: any): any
+    const Scene = Target or SceneRegistry.Default
+    if not Scene then
+        return nil
+    end
+
+    return if Scene.Instances then Scene.Main else Scene
+end
+
 function Objects.new(
     Reference: ObjectRegistry | ObjectIdentifier,
     InitialValues: {[PropertyTypes.PropertyIdentifier]: any}?,
-    Scene: any?
+    Target: any?
 ): Object
-    return Construct(Reference, InitialValues, Scene or SceneRegistry.Default, nil, true)
+    return Construct(Reference, InitialValues, ResolveInstance(Target), nil, true)
 end
 
 -- Rebuilds an object under the id it was saved with. Used by a scene loading its
 -- pack; Announce is the caller's, because a load sends its objects in bulk.
-function Objects.restore(Scene: any, Decompressed: any, Announce: boolean?): Object?
+function Objects.restore(Target: any, Decompressed: any, Announce: boolean?): Object?
     if not Registered[Decompressed.Parent] then
         Logger:Warn(`Failed to restore object. Object type {Decompressed.Parent} is not registered.`)
         return nil
@@ -618,7 +655,7 @@ function Objects.restore(Scene: any, Decompressed: any, Announce: boolean?): Obj
     return Construct(
         Decompressed.Parent,
         Decompressed.Properties,
-        Scene,
+        ResolveInstance(Target),
         Decompressed.LocalId,
         Announce == true
     )
@@ -628,7 +665,7 @@ end
 -- under, and handing that to the new object would alias the two while both are
 -- live -- so this mints a fresh one. Loading a scene wants the saved id and
 -- calls restore instead, on a scene where the original is gone.
-function Objects.fromCompression(CompressedObj: buffer, Scene: any?): Object?
+function Objects.fromCompression(CompressedObj: buffer, Target: any?): Object?
     const Ok, Decompressed = pcall(function()
         return Compressor:DecompressObject(CompressedObj)
     end)
@@ -646,21 +683,21 @@ function Objects.fromCompression(CompressedObj: buffer, Scene: any?): Object?
     return Construct(
         Decompressed.Parent,
         Decompressed.Properties,
-        Scene or SceneRegistry.Default,
+        ResolveInstance(Target),
         nil,
         true
     )
 end
 
-Network.SetProperty.OnInvoke = function(Plr: Player, Handle: Handle, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer): boolean
+Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer): boolean
     -- Budget first. Check used to run after the workspace lookup, so a client
-    -- spamming handles that do not exist returned early and never spent any
+    -- spamming runtime ids that do not exist returned early and never spent any
     -- of its allowance -- the one flood the limiter most needed to catch.
     if not Permissions:Consume(Plr) then
         return false
     end
 
-    const Obj = Workspace[Handle]
+    const Obj = Workspace[Identifier]
     if not Obj or Obj.Destroyed then
         return false
     end
@@ -688,12 +725,12 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Handle: Handle, PropId: Pro
     return Obj:Set(PropId, Value)
 end
 
-Network.Destroy.OnInvoke = function(Plr: Player, Handle: Handle): boolean
+Network.Destroy.OnInvoke = function(Plr: Player, Identifier: RuntimeId): boolean
     if not Permissions:Consume(Plr) then
         return false
     end
 
-    const Obj = Workspace[Handle]
+    const Obj = Workspace[Identifier]
     if not Obj or Obj.Destroyed then
         return false
     end

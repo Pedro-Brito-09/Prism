@@ -41,13 +41,16 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
 ## Done
 
 - [x] **Scenes and object identity.** Objects are created into a named scene
-      rather than one global workspace, and `RuntimeId` — a per session counter
-      that renamed every object on each load — is gone. An object's `Id` is a
-      handle, `SceneId * 2^32 + LocalId`, one exact number and so one argument
-      everywhere. Only the low half is packed, so a pack is portable between
-      scenes. `Scene:Unload` serialises and destroys in a single packet;
-      `Scene:Load` rebuilds under the saved ids and announces down the chunked
-      replay path. `Objects.new` still works, in an implicit `Default` scene.
+      rather than one global workspace. Identity split in two: `RuntimeId` names
+      one live object and is the only thing on the wire or in the workspace key,
+      `PersistentId` (`SceneId * 2^32 + LocalId`) names an object in a pack and
+      is the only thing saved. One crossing between them, `Instance:Find`,
+      scoped to a live copy because a persistent id names an object in every
+      copy at once. Only the low half is packed, so a pack is portable between
+      scenes. `Scene:Load` makes the canonical copy and `Scene:Instance` makes
+      extras, so one saved room can stand in the world five times. Unload
+      serialises and drops every copy in a single packet. `Objects.new` still
+      works, in an implicit `Default` scene.
 
 - [x] **Property access from the object.** `OnChange` and `GetProperty` beside
       `Get` and `Set`, all four taking an id or a name, with the name resolved

@@ -50,9 +50,8 @@ enemy:Get("Health")
 enemy:Destroy()
 ```
 
-Every object carries `Id`, a handle that names it and the scene holding it. It
-is saved with the object, so a reference written down before a scene is unloaded
-still names the same object when it comes back — see Scenes.
+Every object carries two ids: `RuntimeId`, which names this live copy of it, and
+`PersistentId`, which is saved with it and outlives a reload. See Scenes.
 
 A link mirrors a property onto the instance. `Type = "Property"` writes a real
 instance property (the types must match), `Type = "Attribute"` writes an
@@ -104,34 +103,69 @@ local pack = Lobby:Serialize()
 Prism.Scenes.fromBuffer({Name = "Lobby2"}, pack)  -- registered, unloaded
 ```
 
-`Objects.new` with no scene lands in an implicit `Default` scene, always loaded,
-so object creation works with no scene of your own.
+`Objects.new` with no scene lands in an implicit `Default` scene, so object
+creation works with no scene of your own.
 
-### Handles
+### Instances
 
-An object's id carries its scene in the high bits:
+`Load` makes one live copy. `Instance` makes more, from the same pack:
+
+```lua
+local roomA = Rooms:Instance(workspace.SlotA)
+local roomB = Rooms:Instance(workspace.SlotB)
+
+roomA:Find(localId)   -- this copy's object
+roomB:Find(localId)   -- the other copy's
+roomA:Destroy()       -- takes its objects, leaves roomB alone
+```
+
+Every copy carries the persistent ids the pack was written with, so five
+identical rooms agree on *what* each object is and disagree on *which* one it
+is. `Serialize` describes the canonical copy — the one `Load` made — because an
+extra copy is a throwaway and saving one would quietly promote it.
+
+Unloading takes every copy with it: unloaded means the scene is not in the
+world.
+
+### Two identities
+
+Objects carry both, and each has one job:
+
+| | `RuntimeId` | `PersistentId` (`Scene` + `LocalId`) |
+|---|---|---|
+| names | one live object | one object in a pack |
+| unique | across the server, right now | within a scene, forever |
+| saved | never | always |
+| on the wire | always | never |
+
+`RuntimeId` is the only thing that crosses the wire and the only key the
+workspace uses — a client naming an object with a persistent id would be
+ambiguous the moment a scene is instanced twice, and client input is the last
+place that should be. `PersistentId` is the only thing a pack contains.
+
+There is exactly one crossing, `SceneInstance:Find(localId)`, and it is scoped
+to a copy on purpose: a persistent id names an object in *every* live copy of
+its scene, so the question only has an answer once you say which copy.
 
 ```
-Id = SceneId * 2^32 + LocalId
+PersistentId = SceneId * 2^32 + LocalId
 ```
 
-48 bits, well inside the 53 a Luau number holds exactly, so it stays one plain
-number to pass, compare and use as a table key — `Objects:Get(id)` takes one
-argument, not a pair. `Objects:Split(id)` gives back the two halves, and an
-object exposes them as `Scene` and `LocalId`.
+48 bits, well inside the 53 a Luau number holds exactly, so a saved reference is
+one plain number rather than a pair. `Objects:Split(id)` gives back the halves.
 
-Only the low half is written to a pack. The scene stamps its own id back on at
-load, which is what keeps a pack portable: load the same prefab into two scenes
-and you get two non-colliding sets of handles, with the references inside the
-pack remapped together.
+Only the low half is written to a pack. The scene stamps its own id on at load,
+which is what keeps a pack portable: load the same prefab under two scenes and
+you get two distinct persistent identities, with the references inside the pack
+remapped together.
 
 A local id is never handed out twice within a scene, for the same reason a
-property id is never recycled — a reference still holding it would silently name
-a different object. The scene's counter is saved in the pack.
+property id is never recycled — a reference still holding it would name a
+different object. The scene's counter rides along in the pack.
 
 ### Loading and unloading are one packet
 
-Unloading fires a single message naming the scene, and the client drops
+A copy going away fires a single message naming it, and the client drops
 everything it holds for it. Loading sends the objects down the same chunked path
 a joining player receives. One packet per object would put a five thousand
 object scene into the remote queue in a single frame, which is the flood the
@@ -311,8 +345,9 @@ Property ids are **never recycled**, because they are written into saved data �
 reusing one for a different property would silently reinterpret every record
 still carrying it. Object registry ids are not recycled either, for the same
 reason: a registry id is written into every saved object as its type. Nor are
-scene ids, which live in the high bits of every handle, or an object's local id
-within its scene.
+scene ids, which live in the high bits of every persistent id, or an object's
+local id within its scene. Runtime ids are the exception, and only because they
+are never written down at all.
 
 Objects and packs carry a format version, and readers refuse anything newer
 than they understand rather than misreading it. Individual metadata records do

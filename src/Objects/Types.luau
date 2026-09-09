@@ -4,11 +4,18 @@ const Handles = require("../Handles")
 
 export type ObjectIdentifier = number
 
--- The object's own identity, scene included. See Handles: it replaced a per
--- session counter, so a reference kept across an unload still names the same
--- object when the scene comes back.
-export type Handle = Handles.Handle
+-- Names one live object for this session only, and the only identity that ever
+-- crosses the wire. Unique across the server while it exists; never saved.
+export type RuntimeId = number
+
+-- Names an object inside a pack, and survives the session. Deliberately not
+-- unique among live objects: instancing a scene twice gives every copy the ids
+-- its pack was written with. See Handles.
+export type PersistentId = Handles.PersistentId
 export type SceneIdentifier = Handles.SceneIdentifier
+
+-- One live copy of a scene, for this session only.
+export type SceneInstanceId = number
 
 -- Every lookup on an object takes either the property's id or its name.
 export type PropertyReference = PropertyTypes.PropertyIdentifier | string
@@ -51,13 +58,20 @@ export type ObjectConfig = {
 }
 
 export type Object = {
-    -- Id is the whole handle and the only thing anything else should pass
-    -- around. Scene and LocalId are the two halves it is made of, kept here so
-    -- reading one does not mean unpacking it, and so a printed handle -- which
-    -- is a large opaque number -- can be made sense of.
-    Id: Handle,
+    -- What to hold, look up and send. Two objects are the same object when
+    -- their runtime ids match.
+    RuntimeId: RuntimeId,
+
+    -- What to write down. Scene and LocalId are the halves PersistentId is made
+    -- of, kept alongside so reading one does not mean unpacking it, and so a
+    -- printed persistent id -- a large opaque number -- can be made sense of.
+    PersistentId: PersistentId,
     Scene: SceneIdentifier,
     LocalId: number,
+
+    -- The live copy of the scene this object belongs to. Two objects can share
+    -- a persistent id and differ here; that is what instancing a scene means.
+    InstanceId: SceneInstanceId,
 
     Parent: ObjectIdentifier,
     Name: string,
@@ -70,9 +84,9 @@ export type Object = {
 
     Instance: Instance?,
 
-    -- Called by Destroy to drop the object from the scene holding it. A plain
-    -- callback rather than a reference to the scene, because naming the scene
-    -- type here would put Objects and Scenes in a require cycle.
+    -- Called by Destroy to drop the object from the scene instance holding it.
+    -- A plain callback rather than a reference to the instance, because naming
+    -- that type here would put Objects and Scenes in a require cycle.
     Release: (() -> ())?,
 
     -- Keyed by property id, not an array: a link is looked up by the property

@@ -4,7 +4,6 @@
 -- buffer (Instances, arbitrary tables) are pushed into a side channel array and
 -- referenced by index, so a packet is always one buffer plus an optional table.
 
-const Handles = require("./Handles")
 const Varint = require("./Varint")
 const Logger = require("./Logger")
 
@@ -69,28 +68,6 @@ Codecs.SignedVarint = {
 
     Read = function(Buf: buffer, Offset: number): (number, number)
         return Varint.ReadSigned(Buf, Offset)
-    end,
-} :: Codec<number>
-
--- A handle is one number in Lua but two varints on the wire. Written whole it
--- would always be past 2^32 and so always cost six bytes; split, each half is a
--- single byte while the ids stay small, which is most of the time.
-Codecs.Handle = {
-    Measure = function(Value: number): number
-        const Scene, Local = Handles.Split(Value)
-        return Varint.Measure(Scene) + Varint.Measure(Local)
-    end,
-
-    Write = function(Buf: buffer, Offset: number, Value: number): number
-        const Scene, Local = Handles.Split(Value)
-        const Written = Varint.Write(Buf, Offset, Scene)
-        return Written + Varint.Write(Buf, Offset + Written, Local)
-    end,
-
-    Read = function(Buf: buffer, Offset: number): (number, number)
-        const Scene, SceneRead = Varint.Read(Buf, Offset)
-        const Local, LocalRead = Varint.Read(Buf, Offset + SceneRead)
-        return Handles.Join(Scene, Local), SceneRead + LocalRead
     end,
 } :: Codec<number>
 
