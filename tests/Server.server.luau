@@ -1246,6 +1246,27 @@ T:Test("naming a scene loaded twice is refused rather than guessed", function()
     Scene:Destroy()
 end)
 
+T:Test("destroying a scene deregisters it", function()
+    const Scene = Scenes.new({Name = "TestGone"})
+    const Identifier = Scene.Id
+    Scene:Load()
+
+    T:Eq(Scenes:GetById(Identifier), Scene, "listed while it exists")
+    T:Eq(Scenes:Get("TestGone"), Scene, "and findable by name")
+
+    Scene:Destroy()
+    T:Eq(Scenes:GetById(Identifier), nil, "gone by id")
+    T:Eq(Scenes:Get("TestGone"), nil, "gone by name")
+
+    -- The name is free again, but the id is not: a pack still naming the old
+    -- scene must never decode as the new one.
+    const Reused = Scenes.new({Name = "TestGone"})
+    T:Ok(Reused, "the name can be registered again")
+    T:Ok(Reused.Id ~= Identifier, "under a different id")
+
+    Reused:Destroy()
+end)
+
 T:Test("the scene serializes what was committed, a copy what it holds", function()
     const Scene = Scenes.new({Name = "TestCommitted"})
     const Live = Scene:Load()

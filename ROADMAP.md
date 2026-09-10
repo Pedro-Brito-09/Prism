@@ -24,6 +24,11 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
 
 ## Queued
 
+- [ ] **Unregistering does not reach the client.** `Properties:Unregister` drops
+      a registry on the server and tells nobody, so every client keeps serving
+      the old one from its own copy. Scenes now announce it; properties predate
+      that and still do not. Object types have no unregister at all.
+
 - [ ] **Object added / removed signals on the client.** `AddObject` and
       `Teardown` are internal, so UI has to poll `GetWorkspace()` to notice
       anything appearing.

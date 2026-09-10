@@ -26,7 +26,6 @@ const Registered: {[SceneIdentifier]: SceneRegistry} = {}
 -- an object arriving needs it before this module could hand it over.
 const Known: {[SceneInstanceId]: SceneInstanceId} = {}
 
-
 function Scenes:GetRegistered(): {[SceneIdentifier]: SceneRegistry}
     return Registered
 end
@@ -70,6 +69,13 @@ end
 const function Register(Payload: SceneRegistry)
     Registered[Payload.Id] = Payload
 end
+
+-- Gone on the server. Its copies were dropped by their own packets first, so
+-- there is nothing here but the registry entry -- which an editor listing the
+-- scenes would otherwise keep drawing.
+Network.SceneUnregistered:Connect(function(Identifier: SceneIdentifier)
+    Registered[Identifier] = nil
+end)
 
 Network.SceneRegistered:Connect(Register)
 

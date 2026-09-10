@@ -189,11 +189,15 @@ const function __get_instances(self: Scene): {any}
 end
 
 const function __destroy(self: Scene)
+    -- Unloaded first, so the copies go as copies rather than being orphaned by
+    -- a scene that has already stopped existing.
     __unload(self)
 
     Registry.ById[self.Id] = nil
     Registry.ByName[self.Name] = nil
     self.Data = nil
+
+    Network.SceneUnregistered:FireAll(self.Id)
 
     -- The id is not released: see the pool above.
 end

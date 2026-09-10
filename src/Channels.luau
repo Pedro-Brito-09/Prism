@@ -148,6 +148,15 @@ const Channels: {Channel} = {
         Name = "Scenes.InstancesReplayed",
         Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.Varint)},
     },
+
+    {
+        -- A scene ceasing to exist. Its copies have already gone one packet
+        -- each, but the registry entry would otherwise sit on every client for
+        -- the rest of the session, and a scene list is exactly the sort of
+        -- thing an editor renders straight from that registry.
+        Name = "Scenes.SceneUnregistered",
+        Args = {Codecs.Varint}, -- SceneId
+    },
 }
 
 const ById: {Channel} = Channels
