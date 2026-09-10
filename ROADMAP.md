@@ -53,21 +53,32 @@ reads right, never that it was run with a player in it.
       ValidateLinks already runs on both sides. That deletes Objects:Localize
       entirely, and with it the only awkward step in client owned scenes.
 
-      *Where the parts go.* Not a Container field on three different configs,
-      but one tree the framework owns:
+      *Where the instances go.* Not a Container field on three different
+      configs. A copy owns one folder, every object's instance is parented into
+      the folder of the copy holding it, and `Load` says where that folder goes.
+      Named nothing, it lands in a tree the framework keeps for the purpose:
 
           workspace.__prism.__scene_{SceneId}.__copy_{CopyId}
 
       keyed by the copy rather than the scene, because a scene loaded five
-      times is five copies and they cannot share a folder. The copy's node is a
-      **Model**, not a Folder, so placing a copy is still possible and becomes
-      easier than it was — `copy.Instance:PivotTo(cf)` moves the whole room,
-      where before you supplied a container to parent it into. Unloading
-      destroys the model rather than walking objects to destroy each instance.
-      A client rendering a copy builds the same tree locally, which is also
-      what keeps two open sessions from drawing into the same folder; local
-      scenes cannot collide with server ones there, because their ids count
-      down from the top of the space while the server's count up.
+      times is five copies and they cannot share one.
+
+      A Folder rather than a Model, and that is the point: a folder parents
+      anywhere, so a scene made of ScreenGuis loads into PlayerGui, a scene of
+      atmospheres into Lighting, and a scene you want to move as a unit into a
+      Model of your own that you pivot. It is what lets this be a level editor
+      framework for any kind of instance rather than for geometry, and it means
+      Prism never needs a table mapping classes to the services they belong in
+      -- the kind of table that is never finished.
+
+      Unloading a copy destroys its folder and what is in it. A default scene
+      folder goes with the last of its copies; a parent the caller supplied is
+      the caller's and is left alone. A client rendering a copy builds its own
+      folder the same way, which is also what keeps two open sessions apart --
+      and a client editing interfaces hands PlayerGui to Load and never touches
+      the workspace at all. Local scenes cannot collide with the server's
+      there, because their ids count down from the top of the space while the
+      server's count up.
 
       There is no "no scene" case to handle: since scenes landed, every object
       belongs to a copy, including one created with no scene named, which lands
