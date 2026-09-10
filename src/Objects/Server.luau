@@ -44,7 +44,17 @@ const Ids = IdPool.new(nil, false)
 -- Whether an object's data goes to every player or only to the ones its scene
 -- admits. A type that is somehow not registered answers Admitted, which sends
 -- nothing to anybody not already owed everything.
+--
+-- An object in an opened copy is kept for the admitted whatever its type says.
+-- Replicate only means anything for a copy the server built: a player who is
+-- not admitted has no part of an opened copy to attach data to, so sending it
+-- would buy nothing.
 const function ReachOf(Obj: Object): Types.Reach
+    const Copy = SceneRegistry.Instances[Obj.InstanceId]
+    if Copy and Copy.Opened then
+        return "Admitted"
+    end
+
     const Registry = Registered[Obj.Parent]
     return if Registry then Registry.Replicate else "Admitted"
 end
@@ -560,8 +570,10 @@ const function Construct(
     -- replicate together with the instance and a client that only ever sees the
     -- part -- never the reference sent beside the object -- can still find its
     -- owner.
+    --
+    -- None at all in an opened copy, whose parts each admitted client draws.
     local Inst: Instance? = nil
-    if Ref.Instance then
+    if Ref.Instance and not Instance_.Opened then
         const Clone = Ref.Instance:Clone()
         Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
         CollectionService:AddTag(Clone, Shared.ObjectTag)

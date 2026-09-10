@@ -128,7 +128,11 @@ const Channels: {Channel} = {
         -- their scene, because a scene can be live more than once and an editor
         -- has to be able to tell the copies apart.
         Name = "Scenes.InstanceAdded",
-        Args = {Codecs.u32, Codecs.Varint}, -- InstanceId, SceneId
+        -- InstanceId, SceneId, and whether the server opened the copy rather
+        -- than loading it. Without that a client cannot tell "the server built
+        -- no part" from "the reference to the part did not survive the trip",
+        -- and on a slow join it would draw a second part for every object.
+        Args = {Codecs.u32, Codecs.Varint, Codecs.Bool},
     },
 
     {
@@ -146,7 +150,7 @@ const Channels: {Channel} = {
 
     {
         Name = "Scenes.InstancesReplayed",
-        Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.Varint)},
+        Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.Varint), Codecs.Array(Codecs.Bool)},
     },
 
     {

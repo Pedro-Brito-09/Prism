@@ -41,6 +41,10 @@ const ByInstance: {[Types.SceneInstanceId]: {[RuntimeId]: Object}} = {}
 -- and Objects cannot require Scenes without a cycle.
 const InstanceScene: {[Types.SceneInstanceId]: Types.SceneIdentifier} = {}
 
+-- The folder this client draws each opened copy into. A copy with no entry
+-- here is one the server loaded, whose parts are the server's.
+const DrawInto: {[Types.SceneInstanceId]: Folder} = {}
+
 const function Index(Obj: Object)
     local Held = ByInstance[Obj.InstanceId]
     if not Held then
@@ -182,9 +186,9 @@ const function Teardown(Obj: Object)
         ByPart[Obj.Instance] = nil
 
         -- A replicated object's part belongs to the server and goes when the
-        -- server takes it away. A local one was cloned here and is nobody
-        -- else's to remove.
-        if Obj.Local then
+        -- server takes it away. A local or drawn one was cloned here and is
+        -- nobody else's to remove.
+        if Obj.Local or Obj.Drawn then
             Obj.Instance:Destroy()
         end
 
@@ -479,9 +483,11 @@ function Objects:GetInstanceScene(Live: Types.SceneInstanceId): Types.SceneIdent
     return InstanceScene[Live]
 end
 
--- Told by Scenes/Client as the server announces copies appearing.
-function Objects.TrackInstance(Live: Types.SceneInstanceId, Scene: Types.SceneIdentifier)
+-- Told by Scenes/Client as the server announces copies appearing, with the
+-- folder to draw into when the server opened the copy rather than loading it.
+function Objects.TrackInstance(Live: Types.SceneInstanceId, Scene: Types.SceneIdentifier, Folder: Folder?)
     InstanceScene[Live] = Scene
+    DrawInto[Live] = Folder
 end
 
 -- Tears down every object of one live copy. Called by Scenes/Client when the
@@ -489,6 +495,7 @@ end
 -- are already gone there and no ObjectRemoved is coming for any of them.
 function Objects.DropInstance(Live: Types.SceneInstanceId)
     InstanceScene[Live] = nil
+    DrawInto[Live] = nil
 
     const Held = ByInstance[Live]
     if not Held then
@@ -548,9 +555,26 @@ const function AddObject(
         return
     end
 
-    -- The reference that came with the object is the fast path. When it did not
-    -- survive, the part may already be here and tracked under its runtime id.
-    const Resolved = Inst or ByRuntimeId[RuntimeId]
+    -- A copy the server opened has no part anywhere: this client draws one,
+    -- from the template that came with the registry, into the folder it keeps
+    -- for the copy. Anything else has a part the server built, and the
+    -- reference that came with the object is the fast path to it. When that did
+    -- not survive, the part may already be here and tracked under its runtime
+    -- id.
+    const Into = DrawInto[Live]
+    local Resolved: Instance? = nil
+
+    if Into then
+        if Registry.Instance then
+            const Clone = Registry.Instance:Clone()
+            Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
+            CollectionService:AddTag(Clone, Shared.ObjectTag)
+            Clone.Parent = Into
+            Resolved = Clone
+        end
+    else
+        Resolved = Inst or ByRuntimeId[RuntimeId]
+    end
 
     -- The persistent half is assembled here rather than sent: the local id
     -- rides inside the buffer already, and the scene is whichever one the copy
@@ -583,6 +607,14 @@ const function AddObject(
         -- Whatever the object arrived holding is what the server holds.
         Confirmed[Prop] = Prop.Value
         Obj.Properties[PropId] = Prop
+    end
+
+    -- A drawn part is driven from here, through the links that came with the
+    -- registry. Wired after the values land, as on the server, so the part
+    -- starts at the object's value rather than the template's.
+    if Into then
+        Obj.Drawn = true
+        Obj.Links = Shared.BuildLinks(Resolved, Registry.Links, Obj.Properties)
     end
 
     Obj.Set = __setter

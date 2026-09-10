@@ -70,6 +70,7 @@ const function Reveal(Plr: Player, List: {Scene})
     const Payloads: {SceneRegistry} = {}
     const CopyIds: {number} = {}
     const CopyScenes: {SceneIdentifier} = {}
+    const CopyOpened: {boolean} = {}
     const Held: {any} = {}
 
     for _, Scene in List do
@@ -98,9 +99,13 @@ const function Reveal(Plr: Player, List: {Scene})
         end
 
         for _, Copy in Scene.Instances do
-            if Glimpse then
+            -- A loaded copy is every player's to know of. An opened one is kept
+            -- for the admitted: a player who is not admitted has no part of it
+            -- to attach anything to, so telling them would buy nothing.
+            if (Glimpse and not Copy.Opened) or (Whole and Copy.Opened) then
                 table.insert(CopyIds, Copy.Id)
                 table.insert(CopyScenes, Scene.Id)
+                table.insert(CopyOpened, Copy.Opened)
             end
 
             for _, Obj in Copy.Objects do
@@ -121,7 +126,7 @@ const function Reveal(Plr: Player, List: {Scene})
     end
 
     if #CopyIds > 0 then
-        Network.InstancesReplayed:Fire(Plr, CopyIds, CopyScenes)
+        Network.InstancesReplayed:Fire(Plr, CopyIds, CopyScenes, CopyOpened)
     end
 
     Objects.Stream(Plr, Held, function(Obj: any): boolean
@@ -145,6 +150,13 @@ const function Withdraw(Plr: Player, Scene: Scene)
 
     const Kept = {}
     for _, Copy in Scene.Instances do
+        -- An opened copy goes whole: everything in it was kept for the
+        -- admitted, and the client drops what it drew along with the copy.
+        if Copy.Opened then
+            Network.InstanceRemoved:Fire(Plr, Copy.Id)
+            continue
+        end
+
         for _, Obj in Copy.Objects do
             if not Obj.Destroyed and Objects.ReachOf(Obj) == "Admitted" then
                 table.insert(Kept, Obj.RuntimeId)
@@ -236,17 +248,22 @@ const function __instance_unload(self: SceneInstance)
     -- The folder goes after its objects, so nothing is left holding a
     -- reference to an instance that is already gone.
     World.DropCopy(self.Scene, self.Folder)
-    Audience.Fire(Network.InstanceRemoved, self.Scene, "Everyone", self.Id)
+    Audience.Fire(Network.InstanceRemoved, self.Scene, if self.Opened then "Admitted" else "Everyone", self.Id)
 end
 
-const function NewInstance(Owner: Scene, Parent: Instance?): SceneInstance
+const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean): SceneInstance
     InstanceCounter += 1
 
     const Instance_ = {}
     Instance_.Id = InstanceCounter
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
-    Instance_.Folder = World.Copy(Owner.Id, Instance_.Id, Parent)
+    Instance_.Opened = Opened
+
+    -- None for an opened copy. It would hold nothing, and an empty folder named
+    -- for the scene, in a workspace every player can see, is exactly the
+    -- announcement opening exists to avoid.
+    Instance_.Folder = if Opened then nil else World.Copy(Owner.Id, Instance_.Id, Parent)
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
@@ -262,10 +279,11 @@ const function NewInstance(Owner: Scene, Parent: Instance?): SceneInstance
 
     -- Announced before its objects, so a client is never handed an object
     -- belonging to a copy it has not been told about.
-    -- To every player, not only the admitted: an object that replicates to
-    -- everyone has to be filed under its copy, and this is the copy. It says a
-    -- copy of some scene exists, and nothing more.
-    Audience.Fire(Network.InstanceAdded, Owner.Id, "Everyone", Instance_.Id, Owner.Id)
+    -- A loaded copy to every player, not only the admitted: an object that
+    -- replicates to everyone has to be filed under its copy, and this is the
+    -- copy. It says a copy of some scene exists, and nothing more. An opened
+    -- copy only to the admitted, who are the only ones it sends anything to.
+    Audience.Fire(Network.InstanceAdded, Owner.Id, if Opened then "Admitted" else "Everyone", Instance_.Id, Owner.Id, Opened)
     return Instance_ :: any
 end
 
@@ -273,8 +291,10 @@ end
 -- Scenes
 --=============================================================================
 
-const function __load(self: Scene, Parent: Instance?): any
-    const Instance_ = NewInstance(self, Parent)
+-- Load and Open are one reading of the pack, and differ only in whether the
+-- server builds the parts.
+const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
+    const Instance_ = NewInstance(self, Parent, Opened)
 
     const Data = self.Data
     if not Data then
@@ -307,6 +327,14 @@ const function __load(self: Scene, Parent: Instance?): any
 
     Objects.AnnounceAll(Restored)
     return Instance_
+end
+
+const function __load(self: Scene, Parent: Instance?): any
+    return Read(self, Parent, false)
+end
+
+const function __open(self: Scene): any
+    return Read(self, nil, true)
 end
 
 -- Every copy at once. Nothing is written back: with more than one copy live,
@@ -442,6 +470,7 @@ function Scenes.new(Config: SceneConfig): Scene?
     end
 
     Scene.Load = __load
+    Scene.Open = __open
     Scene.Unload = __unload
     Scene.Serialize = __serialize
     Scene.GetInstances = __get_instances
