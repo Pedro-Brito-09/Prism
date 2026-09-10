@@ -218,6 +218,19 @@ const Channels: {Channel} = {
         Name = "Permissions.SceneAssigned",
         Args = {Codecs.Varint, Codecs.Any}, -- SceneId, SceneRightsPayload?
     },
+
+    {
+        -- Registries going away. Scenes announced theirs from the start;
+        -- properties used to drop theirs on the server and tell nobody, so
+        -- every client kept serving the old one for the rest of the session.
+        Name = "Properties.PropertyUnregistered",
+        Args = {Codecs.u16}, -- PropertyId
+    },
+
+    {
+        Name = "Objects.ObjectUnregistered",
+        Args = {Codecs.u16}, -- ObjectIdentifier
+    },
 }
 
 const ById: {Channel} = Channels

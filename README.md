@@ -28,6 +28,10 @@ Types: `Text`, `Number`, `Bool`, `Color`, `Vector`, `CFrame`, `Enum`, `CustomEnu
 Constraints reject or clamp depending on the constraint: `MinLength` rejects an
 invalid value, `MinValue`/`MaxValue`/`MaxLength` clamp it into range.
 
+`Properties:Unregister(id)` drops a property on the server and on every client.
+It's refused while an object type or a database is built on it. The id is never
+handed out again, because saved data names it.
+
 ## Objects
 
 An object type is a named set of properties, optionally backed by a template
@@ -63,6 +67,10 @@ on their own, and only the people editing pay for its properties. Keep the
 default for anything a client script reads, like a spinning part's speed. An
 object's data goes whole or not at all. Any value other than those two strings
 counts as `"Admitted"`, with a warning.
+
+`Objects:Unregister(id)` drops an object type on the server and on every client.
+It's refused while any object of the type is live, and it releases the
+properties the type was holding. Like property ids, the id is never reused.
 
 Every object carries two ids: `RuntimeId`, which names this live copy of it, and
 `PersistentId`, which is saved with it and outlives a reload. See Scenes.

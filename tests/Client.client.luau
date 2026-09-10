@@ -23,6 +23,7 @@ const DENIED_MARKER = "FixtureDenied"
 const EDITABLE_MARKER = "FixtureEditable"
 const DESTROY_MARKER = "FixtureDestroy"
 const EVICT_MARKER = "EvictPulse"
+const UNREGISTER_MARKER = "UnregisterPulse"
 const TIMEOUT = 15
 
 const Prism = require(PRISM)
@@ -344,6 +345,39 @@ T:Test("watching copies hands back a disconnect", function()
     Disconnect()
     Disconnect()
     T:Ok(true, "safe to call twice")
+end)
+
+--=============================================================================
+-- Unregistering
+--=============================================================================
+
+T:Describe("Unregistering")
+
+T:Test("an unregistered type and property leave the client too", function()
+    if not Editable or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    const Type = WaitFor("doomed type", function()
+        return FindObjectType("FixtureDoomedType")
+    end)
+
+    T:Ok(Type, "the type arrived")
+    T:Ok(FindProperty("FixtureDoomedProperty"), "and its property")
+
+    -- The server drops both when the editable fixture carries the marker.
+    T:Ok(Editable:Set(TitleId, UNREGISTER_MARKER), "asked the server to drop them")
+
+    T:Eventually(function()
+        return FindObjectType("FixtureDoomedType") == nil
+    end, 5, "the type went")
+
+    T:Eventually(function()
+        return FindProperty("FixtureDoomedProperty") == nil
+    end, 5, "and so did the property")
+
+    Editable:Set(TitleId, EDITABLE_MARKER)
 end)
 
 --=============================================================================

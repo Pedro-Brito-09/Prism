@@ -812,6 +812,36 @@ T:Test("an object type replicates to everyone unless it says otherwise", functio
     T:Eq(Objects:GetRegistry(Typo).Replicate, "Admitted", "a value that is neither keeps it back")
 end)
 
+T:Test("a property cannot be unregistered while anything is built on it", function()
+    T:Ok(not Properties:Unregister(TitleId), "refused: object types carry it")
+    T:Ok(Properties:GetRegistry(TitleId), "and still registered")
+
+    const Loose = Properties:Register({Name = "TestLoose", Type = "Text", DefaultValue = ""}) :: number
+    T:Ok(Properties:Unregister(Loose), "one nothing carries goes")
+    T:Eq(Properties:GetRegistry(Loose), nil, "gone")
+
+    const Next = Properties:Register({Name = "TestLooseAfter", Type = "Text", DefaultValue = ""}) :: number
+    T:Ok(Next ~= Loose, "and its id is not handed out again")
+end)
+
+T:Test("an object type cannot be unregistered while objects of it are live", function()
+    const Carried = Properties:Register({Name = "TestCarried", Type = "Text", DefaultValue = ""}) :: number
+    const Doomed = Objects:Register({Name = "TestDoomed", Properties = {Carried}}) :: number
+    const Obj = Objects.new(Doomed)
+
+    T:Ok(not Objects:Unregister(Doomed), "refused while one is live")
+    T:Ok(not Properties:Unregister(Carried), "and its property is held by it")
+
+    Obj:Destroy()
+    T:Ok(Objects:Unregister(Doomed), "goes once none are")
+    T:Eq(Objects:GetRegistry(Doomed), nil, "gone")
+    T:Ok(Properties:Unregister(Carried), "and lets go of its property")
+
+    T:Throws(function()
+        Objects.new(Doomed)
+    end, "nothing can be made of it")
+end)
+
 T:Test("instances get their own clone of the template", function()
     const A = Objects.new(CrateId)
     const B = Objects.new(CrateId)
@@ -2178,6 +2208,12 @@ AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmittedPrivate"})
 const OpenedScene = Scenes.new({Name = "FixtureOpened", Admitted = {1}})
 OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
 
+-- A property and a type the client watches go. Registered here so they reach
+-- the client with everything else, and unregistered when the client writes the
+-- unregister marker, by which point it has seen them arrive.
+const DoomedProperty = Properties:Register({Name = "FixtureDoomedProperty", Type = "Text", DefaultValue = ""}) :: number
+const DoomedType = Objects:Register({Name = "FixtureDoomedType", Properties = {DoomedProperty}}) :: number
+
 -- Global rights for the budget and pushing, and rights on the default scene,
 -- which is where every editable fixture above lives.
 const function AssignBuilder(Plr: Player)
@@ -2197,6 +2233,12 @@ Players.PlayerAdded:Connect(AssignBuilder)
 -- then the builder again, so the remaining accepted-edit and destroy tests can
 -- proceed deterministically.
 EditableFixture:OnChange(TitleId, function(Value)
+    if Value == "UnregisterPulse" then
+        Objects:Unregister(DoomedType)
+        Properties:Unregister(DoomedProperty)
+        return
+    end
+
     if Value == "EvictPulse" then
         for _, Plr in Players:GetPlayers() do
             AdmittedScene:Evict(Plr)
