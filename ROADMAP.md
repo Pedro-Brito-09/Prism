@@ -12,8 +12,8 @@ reads right, never that it was run with a player in it.
 
 - [ ] **Permissions, scoped and stored.** A permission today is a role a player
       is assigned, global to the server, held in memory and gone when they
-      leave. An editor several people share needs three things it does not
-      have.
+      leave. Two of those are wrong for an editor several people share. The
+      third turns out to be right, and deliberately so.
 
       *Scope.* Rights over a level belong to that level. Two groups editing two
       scenes in one server means "may edit" has to mean "may edit **this**
@@ -39,13 +39,28 @@ reads right, never that it was run with a player in it.
       cache keyed by role name. The price, taken knowingly: editing a role
       later does not reach anyone already holding it.
 
-      *They persist.* Global sets get their own key. A scene's sets are saved
-      with the scene but **not inside its pack** — a pack carries only local
-      ids precisely so it can be loaded under any scene, and writing user ids
-      into it would make a copied prefab arrive carrying someone else's
-      collaborators. A record keyed by scene, saved alongside, keeps the pack
-      portable. Both are plain data over ids that are never recycled, so
-      storing them is safe by the same rule that makes saved objects safe.
+      *They stay session state.* Prism does not persist a scene's rights.
+      Who owns a level and who they invited is a question every game answers
+      differently — group ranks, friends, a gamepass, a record in a service of
+      its own — and a store built in here would be bypassed by half of them
+      while the game keeps that record anyway to draw a menu. It is also the
+      division the framework already makes: the database holds metadata, a
+      pack holds contents, and saving a level's contents is somebody else's
+      job. So rights are granted after a scene is loaded, out of whatever the
+      game kept, and they live as long as the session does.
+
+      Not saving them settles the prefab question too. A level published as a
+      model would otherwise carry its collaborator list wherever it was
+      inserted, and a pack that names people is no longer the portable thing
+      the format works so hard to keep it.
+
+      What that leaves to get right is that rights are granted at two moments:
+      when the scene loads, and again for whoever arrives afterwards. Taking a
+      user id as well as a Player removes it — the game hands over the
+      collaborator list once at load, and a player who joins later binds
+      themselves, rather than every game writing the same PlayerAdded hook.
+      Rights drop when their scene is destroyed and when their player leaves,
+      as the rate budget already does.
 
       Capabilities are plain strings — `Publish`, `Invite` — and exist by
       appearing in a role's grant list rather than by being registered, with a
