@@ -84,6 +84,34 @@ local stop = Prism.Objects:OnAdded(function(object)
 end)
 ```
 
+### Locks
+
+A client takes a lock when it starts on an object. While it holds one, nobody
+else may edit or destroy that object, so two people dragging one part no longer
+fight over it.
+
+```lua
+if Prism.Objects:Lock(selected) then   -- one object or a list: all or none
+    -- drag
+    Prism.Objects:Unlock(selected)
+end
+
+Prism.Objects:GetLock(object)          -- the holder's user id, or nil
+Prism.Objects:OnLockChanged(function(runtimeId, userId) ... end)
+```
+
+Taking a lock needs edit rights on the object, costs one action per object, and
+fails if anyone else holds any of the objects named. Releasing needs no rights.
+A lock goes when its object goes or its holder leaves. The server's own edits
+ignore locks. The server can take locks on a player's behalf with
+`Objects:Lock(list, player)`, which is refused the same way if someone else
+holds any of them, and release anyone's with `Objects:Unlock(list)`.
+
+Who holds what is presence as well as a lock. It's told only to the players the
+object's scene admits, because who is editing a private level is part of the
+level. Objects in scenes a client owns are never locked; nobody else can touch
+them.
+
 Every object carries two ids: `RuntimeId`, which names this live copy of it, and
 `PersistentId`, which is saved with it and outlives a reload. See Scenes.
 

@@ -1971,6 +1971,68 @@ T:Test("a transaction is charged one action per operation", function()
 end)
 
 --=============================================================================
+-- Locks
+--=============================================================================
+
+T:Describe("Locks")
+
+T:Test("a lock keeps everyone else's edits off an object", function()
+    const Holder = Ghost(-3101)
+    const Other = Ghost(-3102)
+    const Default = Scenes:GetDefault()
+
+    for _, Plr in {Holder, Other} do
+        Permissions:Grant(Plr, "TestBulk")
+        Default:Grant(Plr, "TestBulk")
+    end
+
+    const Obj = Objects.new(BareId)
+
+    const function SetAs(Plr: any, Value: string): boolean
+        return (Transactions.Apply(Plr, {
+            {Kind = "Set", Target = Obj.RuntimeId, Property = TitleId, Value = Value, Type = "Text"},
+        } :: any))
+    end
+
+    T:Ok(Objects:Lock({Obj}, Holder), "locked")
+    T:Eq(Objects:GetLock(Obj), -3101, "held by its user id")
+    T:Ok(Objects:Lock({Obj}, Holder), "taking it again is fine for the holder")
+    T:Ok(not Objects:Lock({Obj}, Other), "but not for anyone else")
+
+    T:Ok(not SetAs(Other, "Theirs"), "another player's edit is refused")
+    T:Ok(SetAs(Holder, "Mine"), "the holder's goes through")
+    T:Ok(Transactions.Apply(nil, {
+        {Kind = "Set", Target = Obj.RuntimeId, Property = TitleId, Value = "Server", Type = "Text"},
+    } :: any), "and the server's own ignores it")
+
+    T:Ok(not Objects:Unlock({Obj}, Other), "someone else cannot release it")
+    T:Eq(Objects:GetLock(Obj), -3101, "which stays held")
+    T:Ok(Objects:Unlock({Obj}, Holder), "the holder can")
+    T:Eq(Objects:GetLock(Obj), nil, "free again")
+    T:Ok(SetAs(Other, "Theirs"), "and anyone with rights may edit it")
+
+    -- All or nothing, so a multi-object drag never ends up half held.
+    const Second = Objects.new(BareId)
+    Objects:Lock({Obj}, Other)
+    T:Ok(not Objects:Lock({Second, Obj}, Holder), "one taken refuses the lot")
+    T:Eq(Objects:GetLock(Second), nil, "and takes none of it")
+
+    Objects:Unlock({Obj})
+    T:Eq(Objects:GetLock(Obj), nil, "the server can release anyone's")
+
+    Objects:Lock({Second}, Holder)
+    Second:Destroy()
+    T:Eq(Objects:GetLock(Second), nil, "a lock goes with its object")
+
+    Obj:Destroy()
+
+    for _, Plr in {Holder, Other} do
+        Default:Revoke(Plr)
+        Permissions:Revoke(Plr)
+    end
+end)
+
+--=============================================================================
 -- Scene commits from a client
 --=============================================================================
 

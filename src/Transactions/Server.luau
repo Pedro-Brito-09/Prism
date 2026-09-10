@@ -178,6 +178,12 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 return Refuse(Plr, `object {Operation.Target} is not here.`)
             end
 
+            -- Held by someone else. The server's own transactions pass: a lock
+            -- is between players, and the server is the one enforcing it.
+            if Plr and Objects.LockedAgainst(Obj, Plr) then
+                return Refuse(Plr, `{Obj.Name} is locked by someone else.`)
+            end
+
             if Plr and not Permissions:Can(Plr, "Edit", Obj, Operation.Property) then
                 return Refuse(Plr, `not allowed to edit {Obj.Name}.`)
             end
@@ -207,6 +213,10 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             const Obj = Objects:Get(Operation.Target)
             if not Obj or Obj.Destroyed or (Plr and not Audience.Sees(Plr, Obj.Scene)) then
                 return Refuse(Plr, `object {Operation.Target} is not here.`)
+            end
+
+            if Plr and Objects.LockedAgainst(Obj, Plr) then
+                return Refuse(Plr, `{Obj.Name} is locked by someone else.`)
             end
 
             if Plr and not Permissions:Can(Plr, "Destroy", Obj) then

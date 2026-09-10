@@ -231,6 +231,31 @@ const Channels: {Channel} = {
         Name = "Objects.ObjectUnregistered",
         Args = {Codecs.u16}, -- ObjectIdentifier
     },
+
+    {
+        -- A client asking to hold objects, all of them or none. Answers
+        -- whether it got them. Two clients dragging one object used to fight,
+        -- and the loser's screen jumped when its edits were rolled back.
+        Name = "Objects.Lock",
+        Args = {Codecs.Array(Codecs.u32)}, -- RuntimeIds
+        Returns = {Codecs.Bool},
+    },
+
+    {
+        -- Releasing what it holds. Answers false if any named object is held
+        -- by someone else, which stays theirs.
+        Name = "Objects.Unlock",
+        Args = {Codecs.Array(Codecs.u32)}, -- RuntimeIds
+        Returns = {Codecs.Bool},
+    },
+
+    {
+        -- Who holds which object now, to the players a scene admits. A user id
+        -- of zero means free; ids are signed because Studio's test players are
+        -- negative.
+        Name = "Objects.LocksChanged",
+        Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.SignedVarint)}, -- RuntimeIds, UserIds
+    },
 }
 
 const ById: {Channel} = Channels

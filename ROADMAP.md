@@ -10,9 +10,6 @@ reads right, never that it was run with a player in it.
 
 ## Queued
 
-- [ ] **Per object locks and presence.** Two clients dragging the same object
-      fight each other, and the optimistic-set rollback makes the loser's screen
-      jump. Needs to know who has what selected.
 - [ ] **Property display metadata.** `Display = {Category, Order, Description,
       Hidden, ReadOnly}` on the registry, which already replicates — enough for
       a property panel to be generated rather than written per property.
@@ -33,6 +30,15 @@ reads right, never that it was run with a player in it.
       object can come back under the id it had.
 
 ## Done
+
+- [x] **Per object locks and presence.** Explicit rather than tied to the
+      selection: `Objects:Lock` and `Unlock`, one object or a list, all or
+      none. While a player holds an object nobody else may edit or destroy
+      it, through the single remotes and transactions alike; the server's own
+      edits ignore locks. Taking one needs edit rights and admission and costs
+      an action per object; releasing needs nothing. A lock goes with its
+      object or its holder. Who holds what is the presence, told to the
+      scene's admitted only and sent with a scene when it is revealed.
 
 - [x] **Object added / removed signals on the client.** `Objects:OnAdded` and
       `OnRemoved`, for every object however it arrived: replicated, built in a
