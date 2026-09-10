@@ -1,5 +1,7 @@
 --!strict
 const CollectionService = game:GetService("CollectionService")
+const ServerStorage = game:GetService("ServerStorage")
+const ServerScriptService = game:GetService("ServerScriptService")
 
 const Properties = require("../Properties/Server")
 const Permissions = require("../Permissions/Server")
@@ -116,14 +118,28 @@ const function __destroy(self: Object)
     Teardown(self, true)
 end
 
--- The client only needs the shape of a registry, never the template instance or
--- the link table, so neither goes over the wire.
+-- The whole registry, template and links included, because a client drawing a
+-- copy or owning a scene builds instances from exactly what the server does.
+-- The template is a plain reference: it resolves on a client exactly when that
+-- instance replicates to them, and arrives as nil otherwise. The links are
+-- plain data and were validated against the template at registration.
 const function ToRegistryPayload(Registry: ObjectRegistry)
     return {
         Id = Registry.Id,
         Name = Registry.Name,
         Properties = Registry.Properties,
+        Instance = Registry.Instance,
+        Links = Registry.Links,
     }
+end
+
+-- Whether a template can reach a client at all. Not a table of where every
+-- class belongs: only two places never replicate, plus an instance that was
+-- never parented into the game.
+const function Replicates(Inst: Instance): boolean
+    return Inst:IsDescendantOf(game)
+        and not Inst:IsDescendantOf(ServerStorage)
+        and not Inst:IsDescendantOf(ServerScriptService)
 end
 
 function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
@@ -144,6 +160,13 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
         else
             Logger:Warn(`Object {Config.Name} references unregistered property {PropId}. Will be skipped.`)
         end
+    end
+
+    -- Said once, here, rather than left for a client to discover as objects
+    -- that quietly have no instance. A copy the server loads is unaffected:
+    -- the server clones the template itself and the clone replicates.
+    if Config.Instance and not Replicates(Config.Instance) then
+        Logger:Warn(`Object {Config.Name}'s template {Config.Instance:GetFullName()} does not replicate, so clients receive this type without it and cannot build its instances themselves. Put it in ReplicatedStorage if a client will draw or own copies of it.`)
     end
 
     const Obj: ObjectRegistry = {

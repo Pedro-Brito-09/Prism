@@ -87,9 +87,6 @@ const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
 const MAX_RUNTIME_ID = 4294967295
 local LocalRuntime = MAX_RUNTIME_ID
 
--- What the wire could not carry, per object type. See Objects:Localize.
-const Localized: {[ObjectIdentifier]: Types.LocalRegistry} = {}
-
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -330,15 +327,14 @@ const function Construct(
     const RuntimeId = LocalRuntime
     LocalRuntime -= 1
 
-    -- The template and the links the caller handed over for this type, because
-    -- neither crossed the wire. A type nobody localised still builds objects --
-    -- they simply have no instance, which is exactly what a server side object
+    -- The template came with the registry, and is nil if it lives somewhere
+    -- that never replicates here. The type still builds objects then -- they
+    -- simply have no instance, which is exactly what a server side object
     -- registered without one does.
-    const Supplied = Localized[Ref.Id]
     local Inst: Instance? = nil
 
-    if Supplied and Supplied.Instance then
-        const Clone = Supplied.Instance:Clone()
+    if Ref.Instance then
+        const Clone = Ref.Instance:Clone()
         Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
         CollectionService:AddTag(Clone, Shared.ObjectTag)
 
@@ -374,7 +370,7 @@ const function Construct(
     Obj.Instance = Inst
     -- Wired after the initial values land, so a link starts at the object's own
     -- value rather than at the registry default and then being corrected.
-    Obj.Links = Shared.BuildLinks(Inst, if Supplied then Supplied.Links else nil, Props)
+    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Props)
     Obj.Set = __local_setter
     Obj.Destroy = __local_destroy
 
@@ -413,36 +409,6 @@ function Objects.restore(Target: any, Decompressed: any): Object?
     end
 
     return Construct(Decompressed.Parent, Decompressed.Properties, Target, Decompressed.LocalId)
-end
-
--- The half of a registry the wire cannot carry, handed over once per object
--- type. Without it a local object of that type is built with no instance at
--- all; with it, it clones and drives one exactly as a server side object does.
-function Objects:Localize(Reference: ObjectRegistry | ObjectIdentifier, Config: Types.LocalRegistry): boolean
-    const Identifier = if type(Reference) == "table"
-        then (Reference :: ObjectRegistry).Id
-        else Reference
-
-    const Registry = if type(Identifier) == "number" then Registered[Identifier] else nil
-    if not Registry or type(Identifier) ~= "number" then
-        Logger:Warn(`Cannot localize {tostring(Identifier)}: no object type is registered here with that id.`)
-        return false
-    end
-
-    Localized[Identifier] = {
-        Instance = Config.Instance,
-
-        -- Checked here rather than per object, for the same reason the server
-        -- checks at registration: every clone shares the template's shape, so a
-        -- malformed link would otherwise warn once per object ever built.
-        Links = Shared.ValidateLinks(Registry.Name, Config.Instance, Config.Links, Registry.Properties),
-    }
-
-    return true
-end
-
-function Objects:GetLocalized(Identifier: ObjectIdentifier): Types.LocalRegistry?
-    return Localized[Identifier]
 end
 
 -- A tagged part has arrived: file it, and hand it to its object if that object

@@ -748,6 +748,21 @@ const BareId = Objects:Register({
     Properties = {TitleId},
 }) :: number
 
+-- A template clients can see, so its registry reaches them carrying a
+-- reference that resolves -- which is what a client building its own objects
+-- clones. TestCrate's sits in ServerStorage and reaches them as nil.
+const ShownTemplate = Instance.new("Part")
+ShownTemplate.Name = "PrismShownTemplate"
+ShownTemplate.Anchored = true
+ShownTemplate.Parent = ReplicatedStorage
+
+const ShownId = Objects:Register({
+    Name = "TestShown",
+    Properties = {TitleId},
+    Instance = ShownTemplate,
+    Links = {{Property = TitleId, Type = "Attribute", Name = "TestTitle"}},
+}) :: number
+
 T:Test("registration validates its property list", function()
     T:Ok(CrateId, "registered")
     T:Eq(Objects:GetRegistry(CrateId).Name, "TestCrate", "name")
@@ -758,6 +773,20 @@ T:Test("registration validates its property list", function()
     }) :: number
 
     T:Eq(#Objects:GetRegistry(Sparse).Properties, 1, "unregistered property dropped")
+end)
+
+T:Test("a registry payload carries its template and links", function()
+    const Crate = Objects:GetRegistryPayload(CrateId)
+    T:Eq(Crate.Instance, Template, "the template, as a reference")
+    T:Eq(#Crate.Links, 2, "the validated links")
+
+    const Shown = Objects:GetRegistryPayload(ShownId)
+    T:Eq(Shown.Instance, ShownTemplate, "a replicated template too")
+    T:Eq(Shown.Links[1].Name, "TestTitle", "with its link")
+
+    const Bare = Objects:GetRegistryPayload(BareId)
+    T:Eq(Bare.Instance, nil, "a type with no template sends none")
+    T:Eq(Bare.Links, nil, "and no links")
 end)
 
 T:Test("instances get their own clone of the template", function()

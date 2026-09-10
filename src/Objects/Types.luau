@@ -40,22 +40,11 @@ export type ObjectRegistry = {
     Properties: {PropertyTypes.PropertyIdentifier},
 
     -- Template only. Objects.new clones it and parents the clone into the copy
-    -- the object belongs to, so put it somewhere that does not replicate or
-    -- render on its own -- ServerStorage or ReplicatedStorage rather than
-    -- Workspace.
-    Instance: Instance?,
-    Links: {InstanceLinkRegistry}?,
-}
-
--- The half of a registry that cannot cross the wire, handed to a client that
--- owns scenes of its own.
---
--- A registry replicates as an id, a name and a property list. The template
--- instance is deliberately left behind -- it is an asset sitting in
--- ServerStorage, and shipping one per type to every client would be absurd --
--- and so are the links, which only mean anything beside a template. A client
--- building its own objects supplies both itself, once per object type.
-export type LocalRegistry = {
+    -- the object belongs to, so put it somewhere that does not render on its
+    -- own. ReplicatedStorage if a client will ever build these objects itself
+    -- -- the registry replicates with this reference, and it resolves only on
+    -- a client the instance replicates to -- or ServerStorage if only the
+    -- server ever will.
     Instance: Instance?,
     Links: {InstanceLinkRegistry}?,
 }

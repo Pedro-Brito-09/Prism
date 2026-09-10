@@ -37,7 +37,7 @@ instance. `Objects.new` clones that template per instance.
 local Enemy = Prism.Objects:Register({
     Name = "Enemy",
     Properties = {Health},
-    Instance = ServerStorage.EnemyTemplate,
+    Instance = ReplicatedStorage.EnemyTemplate,
     Links = {
         {Property = Health, Type = "Attribute", Name = "Health"},
     },
@@ -48,6 +48,13 @@ enemy:Set(Health, 50)
 enemy:Get("Health")
 enemy:Destroy()
 ```
+
+A registry replicates whole, template and links included, so a client can build
+the same objects the server does. The template travels as a reference and
+resolves only on a client it replicates to: keep it in ReplicatedStorage if a
+client will ever build these objects itself, or in ServerStorage if only the
+server will. Registration warns about the second case, because clients then
+receive the type without its template.
 
 Every object carries two ids: `RuntimeId`, which names this live copy of it, and
 `PersistentId`, which is saved with it and outlives a reload. See Scenes.
@@ -221,11 +228,6 @@ difference: nothing in it replicates, so its objects apply their own edits
 instead of asking for them. There is nobody to ask and nothing to roll back to.
 
 ```lua
-Prism.Objects:Localize(Crate, {
-    Instance = ReplicatedStorage.CrateTemplate,
-    Links = {{Property = Tint, Type = "Property", Name = "Color"}},
-})
-
 local Sandbox = Prism.Scenes.new({Name = "Sandbox"})
 local preview = Sandbox:Load()
 
@@ -234,12 +236,9 @@ crate:Set(Tint, Color3.new(0, 1, 0))   -- applied here, and that is the end of i
 preview:Commit()
 ```
 
-`Localize` hands over the half of a registry the wire cannot carry. A registry
-replicates as an id, a name and a property list: the template instance is left
-behind deliberately — it is an asset sitting in ServerStorage, and shipping one
-per type to every client would be absurd — and so are its links, which mean
-nothing without a template. Supply them once per object type and local objects
-clone and drive an instance exactly as server side ones do.
+Local objects clone and drive their type's template exactly as server side ones
+do, from the registry that replicated with it. A type whose template lives in
+ServerStorage still builds local objects, but with no instance.
 
 `Prism.Scenes.new` on the client returns a scene you own, with the same `Load`,
 `Create`, `Find`, `Commit`, `Serialize` and `Unload` a server scene has.

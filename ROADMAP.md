@@ -207,7 +207,8 @@ Nothing here is merged yet; the branches are on the remote.
        `workspace.__prism.__scene_N.__copy_N` as the default for a copy that
        names no parent. Docs and tests updated with it.
 
-2. [ ] **Registry payloads carry the template and links** — stop
+2. [x] **Registry payloads carry the template and links** —
+       `feat/registry-payloads`. Stop
        `ToRegistryPayload` stripping `Instance` and `Links`. An instance
        reference resolves on a client exactly when that instance replicates to
        them, so a template in ReplicatedStorage arrives and one in
