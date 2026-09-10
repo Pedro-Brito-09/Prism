@@ -240,7 +240,7 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
     -- sending both would replay the transaction's history rather than its
     -- result. Keyed by the property instance, which is already unique per
     -- object and property.
-    const Changes: {{RuntimeId: ObjectTypes.RuntimeId, Scene: ObjectTypes.SceneIdentifier, Property: PropertyTypes.PropertyIdentifier, Value: buffer}} = {}
+    const Changes: {{Object: ObjectTypes.Object, Property: PropertyTypes.PropertyIdentifier, Value: buffer}} = {}
     const At: {[any]: number} = {}
 
     -- What to write back if the apply throws partway, captured before the first
@@ -281,8 +281,7 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
             end
 
             const Entry = {
-                RuntimeId = Set.Object.RuntimeId,
-                Scene = Set.Object.Scene,
+                Object = Set.Object,
                 Property = Prop.Parent,
                 Value = Compressed,
             }
@@ -335,8 +334,7 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
             -- A property changed on an object the same transaction went on to
             -- destroy is not worth a packet: its removal is already in the one
             -- below.
-            const Obj = Objects:Get(Change.RuntimeId)
-            if Obj and not Obj.Destroyed then
+            if not Change.Object.Destroyed then
                 table.insert(Announce, Change)
             end
         end

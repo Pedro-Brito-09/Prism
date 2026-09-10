@@ -58,39 +58,57 @@ end
 -- Scene registries per packet when several are revealed at once, as at a join.
 const REGISTRY_CHUNK = 50
 
--- Tells one player about scenes they had not been told of: each registry, each
--- live copy, then every object in them down the chunked path. The registries
--- and copies go out before anything yields, so from the moment the player is on
--- a scene's audience there is nothing a broadcast could name that they have not
--- already been handed. The objects stream after, and stop for any scene
--- withdrawn from the player part way through.
+-- Sends one player whatever they are owed of some scenes and do not yet hold.
+-- Every player is owed a scene's copies and the objects that replicate to
+-- everyone; an admitted player is owed its name and the rest of its objects as
+-- well. The names and copies go out before anything yields, so from the moment
+-- the player holds a scene at a reach there is nothing a broadcast at that
+-- reach could name that they have not already been handed. The objects stream
+-- after, and stop for any scene withdrawn from the player part way through.
 const function Reveal(Plr: Player, List: {Scene})
-    const Tokens: {[SceneIdentifier]: number} = {}
+    const Tokens: {[SceneIdentifier]: {[string]: number}} = {}
     const Payloads: {SceneRegistry} = {}
     const CopyIds: {number} = {}
     const CopyScenes: {SceneIdentifier} = {}
     const Held: {any} = {}
 
     for _, Scene in List do
-        if Registry.ById[Scene.Id] ~= Scene or Audience.Holds(Plr, Scene.Id) then
+        if Registry.ById[Scene.Id] ~= Scene then
             continue
         end
 
-        Tokens[Scene.Id] = Audience.Remember(Plr, Scene.Id)
-        table.insert(Payloads, ToPayload(Scene))
+        const Glimpse = not Audience.Holds(Plr, Scene.Id, "Everyone")
+        const Whole = Audience.Sees(Plr, Scene.Id) and not Audience.Holds(Plr, Scene.Id, "Admitted")
+
+        if not Glimpse and not Whole then
+            continue
+        end
+
+        -- Everyone before Admitted, which is only ever held on top of it.
+        const Taken: {[string]: number} = {}
+        Tokens[Scene.Id] = Taken
+
+        if Glimpse then
+            Taken.Everyone = Audience.Remember(Plr, Scene.Id, "Everyone")
+        end
+
+        if Whole then
+            Taken.Admitted = Audience.Remember(Plr, Scene.Id, "Admitted")
+            table.insert(Payloads, ToPayload(Scene))
+        end
 
         for _, Copy in Scene.Instances do
-            table.insert(CopyIds, Copy.Id)
-            table.insert(CopyScenes, Scene.Id)
+            if Glimpse then
+                table.insert(CopyIds, Copy.Id)
+                table.insert(CopyScenes, Scene.Id)
+            end
 
             for _, Obj in Copy.Objects do
-                table.insert(Held, Obj)
+                if Taken[Objects.ReachOf(Obj)] then
+                    table.insert(Held, Obj)
+                end
             end
         end
-    end
-
-    if #Payloads == 0 then
-        return
     end
 
     if #Payloads == 1 then
@@ -107,39 +125,50 @@ const function Reveal(Plr: Player, List: {Scene})
     end
 
     Objects.Stream(Plr, Held, function(Obj: any): boolean
-        return Audience.Holds(Plr, Obj.Scene, Tokens[Obj.Scene])
+        const Reach = Objects.ReachOf(Obj)
+        return Audience.Holds(Plr, Obj.Scene, Reach, Tokens[Obj.Scene][Reach])
     end)
 end
 
--- The reverse: one packet per copy and one for the scene. A client told a copy
--- is gone drops everything it held, which is the same bulk removal an unload
--- already is.
-const function Conceal(Plr: Player, Scene: Scene)
-    if not Audience.Holds(Plr, Scene.Id) then
+-- Admission taken away. The scene's name goes, and so does every object kept
+-- for the admitted; its copies and the objects that replicate to everyone stay,
+-- because every player is owed those. The removals stream, and stop if the
+-- player is admitted again before they are through: the reveal that follows is
+-- sending those objects back, and a late removal would take one of them away.
+const function Withdraw(Plr: Player, Scene: Scene)
+    if not Audience.Holds(Plr, Scene.Id, "Admitted") then
         return
     end
 
-    Audience.Forget(Plr, Scene.Id)
+    Audience.Forget(Plr, Scene.Id, "Admitted")
+    Network.SceneUnregistered:Fire(Plr, Scene.Id)
 
+    const Kept = {}
     for _, Copy in Scene.Instances do
-        Network.InstanceRemoved:Fire(Plr, Copy.Id)
+        for _, Obj in Copy.Objects do
+            if not Obj.Destroyed and Objects.ReachOf(Obj) == "Admitted" then
+                table.insert(Kept, Obj.RuntimeId)
+            end
+        end
     end
 
-    Network.SceneUnregistered:Fire(Plr, Scene.Id)
+    Objects.Unsend(Plr, Kept, function(): boolean
+        return not Audience.Holds(Plr, Scene.Id, "Admitted")
+    end)
 end
 
--- Brings what one player has been told about one scene into line with whether
--- they are admitted to it. Revealing yields as it streams, so it gets a thread
--- of its own -- which task.spawn only hands back after the registry and the
--- copies are out, because nothing before them yields.
+-- Brings what one player holds of one scene into line with whether they are
+-- admitted to it. Both directions yield as they stream, so each gets a thread
+-- of its own -- which task.spawn only hands back after the part that must land
+-- first is out, because nothing before it yields.
 const function Settle(Plr: Player, Scene: Scene)
     const Sees = Audience.Sees(Plr, Scene.Id)
-    const Holds = Audience.Holds(Plr, Scene.Id)
+    const Admitted = Audience.Holds(Plr, Scene.Id, "Admitted")
 
-    if Sees and not Holds then
+    if not Audience.Holds(Plr, Scene.Id, "Everyone") or (Sees and not Admitted) then
         task.spawn(Reveal, Plr, {Scene})
-    elseif Holds and not Sees then
-        Conceal(Plr, Scene)
+    elseif Admitted and not Sees then
+        task.spawn(Withdraw, Plr, Scene)
     end
 end
 
@@ -207,7 +236,7 @@ const function __instance_unload(self: SceneInstance)
     -- The folder goes after its objects, so nothing is left holding a
     -- reference to an instance that is already gone.
     World.DropCopy(self.Scene, self.Folder)
-    Audience.Fire(Network.InstanceRemoved, self.Scene, self.Id)
+    Audience.Fire(Network.InstanceRemoved, self.Scene, "Everyone", self.Id)
 end
 
 const function NewInstance(Owner: Scene, Parent: Instance?): SceneInstance
@@ -233,7 +262,10 @@ const function NewInstance(Owner: Scene, Parent: Instance?): SceneInstance
 
     -- Announced before its objects, so a client is never handed an object
     -- belonging to a copy it has not been told about.
-    Audience.Fire(Network.InstanceAdded, Owner.Id, Instance_.Id, Owner.Id)
+    -- To every player, not only the admitted: an object that replicates to
+    -- everyone has to be filed under its copy, and this is the copy. It says a
+    -- copy of some scene exists, and nothing more.
+    Audience.Fire(Network.InstanceAdded, Owner.Id, "Everyone", Instance_.Id, Owner.Id)
     return Instance_ :: any
 end
 
@@ -310,8 +342,9 @@ const function __destroy(self: Scene)
     Registry.ByName[self.Name] = nil
     self.Data = nil
 
-    -- To whoever was told about it, after which nobody holds it.
-    Audience.Fire(Network.SceneUnregistered, self.Id, self.Id)
+    -- To whoever was told its name, after which nobody holds it at all. Its
+    -- copies went to everyone already, one packet each, as they unloaded.
+    Audience.Fire(Network.SceneUnregistered, self.Id, "Admitted", self.Id)
     Audience.ForgetScene(self.Id)
 
     -- The id is not released: see the pool above.
@@ -476,19 +509,18 @@ function Scenes:GetInstance(Identifier: ObjectTypes.SceneInstanceId): SceneInsta
 end
 
 -- The scene half of a join, called by Replication once the player has every
--- property and object type. Every scene they may see is revealed at once, so
--- the registries and copies share packets. Then the player counts as synced,
--- and whatever changed while this streamed -- a scene registered, an admission
--- granted or taken -- is settled against what they were actually sent.
+-- property and object type. Every scene is revealed at once, each as far as
+-- the player is owed, so the names and copies share packets. Then the player
+-- counts as synced, and whatever changed while this streamed -- a scene
+-- registered, an admission granted or taken -- is settled against what they
+-- were actually sent.
 function Scenes.Catchup(Plr: Player)
-    const Visible = {}
+    const All = {}
     for _, Scene in Registry.ById do
-        if Audience.Sees(Plr, Scene.Id) then
-            table.insert(Visible, Scene)
-        end
+        table.insert(All, Scene)
     end
 
-    Reveal(Plr, Visible)
+    Reveal(Plr, All)
 
     if not Plr.Parent then
         return

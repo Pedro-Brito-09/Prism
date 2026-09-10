@@ -20,6 +20,11 @@ export type SceneInstanceId = number
 -- Every lookup on an object takes either the property's id or its name.
 export type PropertyReference = PropertyTypes.PropertyIdentifier | string
 
+-- How far an object's data goes, named for the two audiences a scene has:
+-- every player, all of whom are shown the copies of every scene the server
+-- built, and the players the scene admits.
+export type Reach = "Everyone" | "Admitted"
+
 export type InstanceLinkRegistry = {
     Property: PropertyTypes.PropertyIdentifier,
     Type: "Property" | "Attribute",
@@ -47,6 +52,13 @@ export type ObjectRegistry = {
     -- server ever will.
     Instance: Instance?,
     Links: {InstanceLinkRegistry}?,
+
+    -- Who is sent the data of this type's objects: every player, or only the
+    -- ones the scene holding the object admits. Whole objects either way --
+    -- nothing withholds some of an object's properties and sends the rest.
+    -- The part is another matter: one the server built replicates to everybody
+    -- whatever this says.
+    Replicate: Reach,
 }
 
 export type ObjectConfig = {
@@ -56,6 +68,9 @@ export type ObjectConfig = {
 
     Instance: Instance?,
     Links: {InstanceLinkRegistry}?,
+
+    -- Everyone when left out.
+    Replicate: Reach?,
 }
 
 export type Object = {

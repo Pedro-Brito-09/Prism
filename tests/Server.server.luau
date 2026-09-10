@@ -763,6 +763,15 @@ const ShownId = Objects:Register({
     Links = {{Property = TitleId, Type = "Attribute", Name = "TestTitle"}},
 }) :: number
 
+-- Data only for the players a scene admits. The client checks that a scene it
+-- was not admitted to still sends it objects of every other type, and none of
+-- these.
+const PrivateId = Objects:Register({
+    Name = "TestPrivate",
+    Properties = {TitleId},
+    Replicate = "Admitted",
+}) :: number
+
 T:Test("registration validates its property list", function()
     T:Ok(CrateId, "registered")
     T:Eq(Objects:GetRegistry(CrateId).Name, "TestCrate", "name")
@@ -787,6 +796,20 @@ T:Test("a registry payload carries its template and links", function()
     const Bare = Objects:GetRegistryPayload(BareId)
     T:Eq(Bare.Instance, nil, "a type with no template sends none")
     T:Eq(Bare.Links, nil, "and no links")
+end)
+
+T:Test("an object type replicates to everyone unless it says otherwise", function()
+    T:Eq(Objects:GetRegistry(BareId).Replicate, "Everyone", "everyone by default")
+    T:Eq(Objects:GetRegistry(PrivateId).Replicate, "Admitted", "the admitted, when asked")
+    T:Eq(Objects:GetRegistryPayload(PrivateId).Replicate, "Admitted", "and the client is told which")
+
+    const Typo = Objects:Register({
+        Name = "TestReplicateTypo",
+        Properties = {TitleId},
+        Replicate = "admitted" :: any,
+    }) :: number
+
+    T:Eq(Objects:GetRegistry(Typo).Replicate, "Admitted", "a value that is neither keeps it back")
 end)
 
 T:Test("instances get their own clone of the template", function()
@@ -2039,15 +2062,19 @@ const DestroyFixture = Objects.new(BareId)
 DestroyFixture:Set(TitleId, "FixtureDestroy")
 
 -- Two private scenes, each admitting only user id 1, which nobody running this
--- is. The test player never gets into the first, and the client checks it hears
--- nothing of it: not its name, not its copy, not its object. The player is
--- admitted to the second as they arrive, and evicted from it when the client
--- writes the evict marker on the editable fixture.
-const HiddenScene = Scenes.new({Name = "FixtureHidden", Admitted = {1}})
-HiddenScene:Load():Create(BareId, {[TitleId] = "FixtureHiddenObject"})
+-- is, and each holding one object that replicates to everyone and one kept for
+-- the admitted. The test player never gets into the first, and the client
+-- checks it is sent the first object and neither the second nor the scene's
+-- name. The player is admitted to the second as they arrive, and evicted from
+-- it when the client writes the evict marker on the editable fixture.
+const HiddenCopy = Scenes.new({Name = "FixtureHidden", Admitted = {1}}):Load()
+HiddenCopy:Create(BareId, {[TitleId] = "FixtureHiddenScenery"})
+HiddenCopy:Create(PrivateId, {[TitleId] = "FixtureHiddenPrivate"})
 
 const AdmittedScene = Scenes.new({Name = "FixtureAdmitted", Admitted = {1}})
-AdmittedScene:Load():Create(BareId, {[TitleId] = "FixtureAdmittedObject"})
+const AdmittedCopy = AdmittedScene:Load()
+AdmittedCopy:Create(BareId, {[TitleId] = "FixtureAdmittedScenery"})
+AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmittedPrivate"})
 
 const function AssignBuilder(Plr: Player)
     Permissions:Assign(Plr, "TestBuilder")

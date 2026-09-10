@@ -56,6 +56,14 @@ client will ever build these objects itself, or in ServerStorage if only the
 server will. Registration warns about the second case, because clients then
 receive the type without its template.
 
+`Replicate` says who is sent an object's data: `"Everyone"`, the default, or
+`"Admitted"`, meaning only the players its scene admits. Scenery that no client
+script reads can be `"Admitted"`. Players still see its parts, which replicate
+on their own, and only the people editing pay for its properties. Keep the
+default for anything a client script reads, like a spinning part's speed. An
+object's data goes whole or not at all. Any value other than those two strings
+counts as `"Admitted"`, with a warning.
+
 Every object carries two ids: `RuntimeId`, which names this live copy of it, and
 `PersistentId`, which is saved with it and outlives a reload. See Scenes.
 
@@ -222,9 +230,9 @@ join replay exists to avoid.
 
 ### Who hears about a scene
 
-Every scene is public until it admits someone. After that, the players it
-admitted are the only ones told anything about it: its name, its copies and its
-objects.
+Every scene is public until it admits someone. After that, only the players it
+admits are told its name or sent objects whose type has
+`Replicate = "Admitted"`.
 
 ```lua
 local Workshop = Prism.Scenes.new({Name = "Workshop", Admitted = {ownerUserId}})
@@ -233,11 +241,16 @@ Workshop:Evict(otherUserId)
 Workshop:Admits(player)       -- true if admitted, or if the scene is public
 ```
 
-Admitting someone reveals the scene to them: its registry, its copies and every
-object in them, down the chunked path a joining player receives. Evicting
-someone withdraws it with one packet per copy. The list is keyed by user id and
-belongs to the scene, so it outlives whoever is connected. Someone admitted
-while away is shown the scene when they join.
+Admitting someone sends them the scene's name and its admitted-only objects,
+down the chunked path a joining player receives. Evicting someone takes those
+away again. The list is keyed by user id and belongs to the scene, so it
+outlives whoever is connected. Someone admitted while away is shown the scene
+when they join.
+
+Players who aren't admitted still get the scene's copies and every object whose
+type replicates to everyone, which is the default. The client needs the copy to
+file those objects under. What leaks is that a copy of scene N exists: a copy id
+and a scene id, with no name and no admitted-only objects.
 
 Two consequences of an empty list meaning public:
 
@@ -253,9 +266,9 @@ everyone its name.
 A player who isn't admitted can't edit a scene either. Their edits are refused
 as though its objects didn't exist.
 
-Admission hides a scene's data, not its parts. A copy loaded with `Load` is
-built on the server, and Roblox replicates its parts to everybody; admission
-decides who gets the objects behind them.
+Admission decides who gets an object's data, not who sees its part. A copy
+loaded with `Load` is built on the server, and Roblox replicates its parts to
+everybody.
 
 ### Scenes the client owns
 
