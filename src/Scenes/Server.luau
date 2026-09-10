@@ -21,6 +21,7 @@ const Network = require("./Network")
 const Handles = require("../Handles")
 const IdPool = require("../IdPool")
 const Logger = require("../Logger")
+const ObjectTypes = require("../Objects/Types")
 const Types = require("./Types")
 
 export type SceneIdentifier = Types.SceneIdentifier
@@ -94,6 +95,8 @@ const function __instance_unload(self: SceneInstance)
         Owner.Instances[self.Id] = nil
     end
 
+    Registry.Instances[self.Id] = nil
+
     Objects.DropInstance(self)
     Network.InstanceRemoved:FireAll(self.Id)
 end
@@ -117,6 +120,7 @@ const function NewInstance(Owner: Scene, Container: Instance?): SceneInstance
     Instance_.Unload = __instance_unload
 
     Owner.Instances[Instance_.Id] = Instance_ :: any
+    Registry.Instances[Instance_.Id] = Instance_
 
     -- Announced before its objects, so a client is never handed an object
     -- belonging to a copy it has not been told about.
@@ -276,13 +280,18 @@ end
 -- told about before any object reaches them.
 function Scenes:GetInstances(): {SceneInstance}
     const List = {}
-    for _, Scene in Registry.ById do
-        for _, Instance_ in Scene.Instances do
-            table.insert(List, Instance_)
-        end
+    for _, Instance_ in Registry.Instances do
+        table.insert(List, Instance_)
     end
 
     return List
+end
+
+-- One live copy by its own id. The id names a copy rather than a scene, so this
+-- answers for a caller holding one off an object or off the wire without having
+-- to know which scene it belongs to first.
+function Scenes:GetInstance(Identifier: ObjectTypes.SceneInstanceId): SceneInstance?
+    return Registry.Instances[Identifier]
 end
 
 -- The scene an object lands in when the caller names none, so Objects.new keeps

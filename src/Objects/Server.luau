@@ -442,6 +442,80 @@ function Objects.DropInstance(Instance_: any)
     table.clear(Instance_.ByLocal)
 end
 
+-- The bulk counterpart to the PropertyChanged a single Set fires, chunked on
+-- the same terms as the object replay. A transaction is one packet on the way
+-- up; answering it with one packet per operation on the way down would put the
+-- flood back where it was taken out.
+function Objects.AnnounceChanged(Changes: {{RuntimeId: RuntimeId, Property: PropertyTypes.PropertyIdentifier, Value: buffer}})
+    local RuntimeIds = {}
+    local PropertyIds = {}
+    local Values = {}
+    local Count = 0
+
+    const function Flush()
+        if Count == 0 then
+            return
+        end
+
+        Network.PropertiesChanged:FireAll(RuntimeIds, PropertyIds, Values)
+        RuntimeIds = {}
+        PropertyIds = {}
+        Values = {}
+        Count = 0
+    end
+
+    for _, Change in Changes do
+        Count += 1
+        RuntimeIds[Count] = Change.RuntimeId
+        PropertyIds[Count] = Change.Property
+        Values[Count] = Change.Value
+
+        if Count >= ANNOUNCE_CHUNK then
+            Flush()
+            task.wait()
+        end
+    end
+
+    Flush()
+end
+
+-- Objects going away together. A whole copy unloading is still one packet
+-- naming the copy rather than a list naming its objects -- this is for a
+-- transaction, which destroys some of a copy rather than all of it.
+function Objects.AnnounceRemoved(RuntimeIds: {RuntimeId})
+    local Chunk = {}
+    local Count = 0
+
+    const function Flush()
+        if Count == 0 then
+            return
+        end
+
+        Network.ObjectsRemoved:FireAll(Chunk)
+        Chunk = {}
+        Count = 0
+    end
+
+    for _, Identifier in RuntimeIds do
+        Count += 1
+        Chunk[Count] = Identifier
+
+        if Count >= ANNOUNCE_CHUNK then
+            Flush()
+            task.wait()
+        end
+    end
+
+    Flush()
+end
+
+-- Destroys one object without a packet naming it, for a caller that will send
+-- one covering the whole batch. Objects.DropInstance is the same idea for
+-- everything a scene copy holds.
+function Objects.Drop(Obj: Object)
+    Teardown(Obj, false)
+end
+
 function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end
@@ -663,12 +737,16 @@ const function ResolveInstance(Target: any): any
     return Instance_
 end
 
+-- Announce defaults to true and is the caller's only where it has a batch to
+-- send instead: a transaction builds its objects silently and announces them
+-- together, down the same chunked path a scene load uses.
 function Objects.new(
     Reference: ObjectRegistry | ObjectIdentifier,
     InitialValues: {[PropertyTypes.PropertyIdentifier]: any}?,
-    Target: any?
+    Target: any?,
+    Announce: boolean?
 ): Object
-    return Construct(Reference, InitialValues, ResolveInstance(Target), nil, true)
+    return Construct(Reference, InitialValues, ResolveInstance(Target), nil, Announce ~= false)
 end
 
 -- Rebuilds an object under the id it was saved with. Used by a scene loading its

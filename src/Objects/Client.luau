@@ -417,7 +417,9 @@ Network.ObjectsReplayed:Connect(function(
     end
 end)
 
-Network.ObjectRemoved:Connect(function(RuntimeId: RuntimeId)
+-- Shared by the single broadcast and the batched one a transaction answers
+-- with, which carry the same thing and differ only in how many arrive at once.
+const function RemoveObject(RuntimeId: RuntimeId)
     const Obj = Workspace[RuntimeId]
     if not Obj then
         return
@@ -425,9 +427,9 @@ Network.ObjectRemoved:Connect(function(RuntimeId: RuntimeId)
 
     Workspace[RuntimeId] = nil
     Teardown(Obj)
-end)
+end
 
-Network.PropertyChanged:Connect(function(RuntimeId: RuntimeId, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer)
+const function ApplyChange(RuntimeId: RuntimeId, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer)
     const Obj = Workspace[RuntimeId]
     if not Obj then
         return
@@ -449,6 +451,32 @@ Network.PropertyChanged:Connect(function(RuntimeId: RuntimeId, PropId: PropertyT
         Pending[Prop] = nil
         Prop:Set(Value)
         Confirmed[Prop] = Prop.Value
+    end
+end
+
+Network.ObjectRemoved:Connect(RemoveObject)
+
+Network.ObjectsRemoved:Connect(function(RuntimeIds: {RuntimeId})
+    for _, RuntimeId in RuntimeIds do
+        RemoveObject(RuntimeId)
+    end
+end)
+
+Network.PropertyChanged:Connect(ApplyChange)
+
+-- Three parallel lists, like the object replay, and for the same reason: a
+-- codec is per element, so one array of records cannot be declared.
+Network.PropertiesChanged:Connect(function(
+    RuntimeIds: {RuntimeId},
+    PropIds: {PropertyTypes.PropertyIdentifier},
+    Values: {buffer}
+)
+    for Index, RuntimeId in RuntimeIds do
+        -- One bad entry must not cost the rest of the batch.
+        const Ok, Err = pcall(ApplyChange, RuntimeId, PropIds[Index], Values[Index])
+        if not Ok then
+            Logger:Warn(`Failed to apply a batched change to object {RuntimeId}: {Err}`)
+        end
     end
 end)
 

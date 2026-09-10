@@ -157,6 +157,37 @@ const Channels: {Channel} = {
         Name = "Scenes.SceneUnregistered",
         Args = {Codecs.Varint}, -- SceneId
     },
+    {
+        -- A whole edit as one packet: create, set and destroy operations
+        -- validated and applied together or not at all. The operation list is
+        -- one buffer rather than a set of parallel arrays because the shapes
+        -- differ per kind -- a create carries a variable number of values --
+        -- and Codecs.Array needs one codec for every element it holds.
+        --
+        -- Returns whether the whole list applied, and the runtime ids of the
+        -- objects it created, in the order the creates were declared. A client
+        -- cannot name what it is about to create -- the server mints the id --
+        -- so this is the only way it learns what it made.
+        Name = "Transactions.Apply",
+        Args = {Codecs.Buffer}, -- Compressor:CompressTransaction
+        Returns = {Codecs.Bool, Codecs.Array(Codecs.u32)},
+    },
+
+    {
+        -- The bulk form of PropertyChanged. A transaction that moves two
+        -- hundred objects is one packet up; sending its result back as two
+        -- hundred is the flood every other batched path here exists to avoid.
+        Name = "Objects.PropertiesChanged",
+        Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.u16), Codecs.Array(Codecs.Buffer)},
+    },
+
+    {
+        -- The bulk form of ObjectRemoved, for the same reason. Unloading a
+        -- whole copy still goes through Scenes.InstanceRemoved, which is one
+        -- packet naming the copy rather than a list naming its objects.
+        Name = "Objects.ObjectsRemoved",
+        Args = {Codecs.Array(Codecs.u32)}, -- RuntimeIds
+    },
 }
 
 const ById: {Channel} = Channels

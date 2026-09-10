@@ -25,6 +25,7 @@ const TIMEOUT = 15
 const Prism = require(PRISM)
 const Harness = require("./Harness")
 
+const Transactions = Prism.Transactions
 const Permissions = Prism.Permissions
 const Objects = Prism.Objects
 const Properties = Prism.Properties
@@ -321,6 +322,110 @@ T:Test("an allowed destroy tears down the client object", function()
     T:Eq(Destroyable:GetProperty(FIXTURE_PROPERTY), nil, "stale lookup is safe")
     T:Eq(typeof(Destroyable:OnChange(FIXTURE_PROPERTY, function() end)), "function", "stale watch answers a disconnect")
     T:Eq(Destroyable.Instance, nil, "instance reference released")
+end)
+
+--=============================================================================
+-- Client transactions
+--=============================================================================
+
+T:Describe("Client transactions")
+
+-- TestBuilder's budget is five operations a second and a transaction spends one
+-- per operation, so every test that sends one opens a fresh window first.
+const function Window()
+    task.wait(1.1)
+end
+
+local CreatedId: number? = nil
+
+T:Test("a client creates an object, which it cannot do any other way", function()
+    if not BareId or not TitleId then
+        T:Ok(false, "no bare registry")
+        return
+    end
+
+    Window()
+
+    const Applied, Created = Transactions.new()
+        :Create(BareId, {[TitleId] = "FromClient"})
+        :Commit()
+
+    T:Ok(Applied, "the server applied it")
+    T:Eq(#Created, 1, "one runtime id came back")
+
+    CreatedId = Created[1]
+
+    const Made = T:Eventually(function()
+        return Objects:Get(Created[1])
+    end, 5, "the created object replicated back")
+
+    if Made then
+        T:Eq(Made:Get(TitleId), "FromClient", "with the value the create carried")
+        T:Eq(Made.Parent, BareId, "of the type the create named")
+    end
+end)
+
+T:Test("a blacklisted type is refused", function()
+    if not CrateId then
+        T:Ok(false, "no crate registry")
+        return
+    end
+
+    Window()
+
+    const Applied = Transactions.new():Create(CrateId, {}):Commit()
+    T:Ok(not Applied, "refused")
+end)
+
+T:Test("a copy that is not live is refused", function()
+    if not BareId then
+        T:Ok(false, "no bare registry")
+        return
+    end
+
+    Window()
+
+    const Applied = Transactions.new():Create(BareId, {}, 999999):Commit()
+    T:Ok(not Applied, "refused")
+end)
+
+T:Test("a set and a destroy land as one edit", function()
+    const Made = if CreatedId then Objects:Get(CreatedId) else nil
+    if not Made or not TitleId then
+        T:Ok(false, "nothing to edit")
+        return
+    end
+
+    Window()
+
+    const Applied = Transactions.new()
+        :Set(Made, TitleId, "EditedThenGone")
+        :Destroy(Made)
+        :Commit()
+
+    T:Ok(Applied, "applied")
+    T:Eventually(function()
+        return Objects:Get(CreatedId :: number) == nil and Made.Destroyed
+    end, 5, "the removal replicated")
+end)
+
+T:Test("an operation that cannot be built never reaches the server", function()
+    if not Editable then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    const Edit = Transactions.new():Set(Editable, "NoSuchProperty", "x")
+
+    T:Eq(Edit.Rejected, 1, "refused while building")
+    T:Eq(#Edit.Operations, 0, "nothing to send")
+    T:Ok(not Edit:Commit(), "commit refused")
+end)
+
+T:Test("committing nothing succeeds without a round trip", function()
+    const Applied, Created = Transactions.new():Commit()
+    T:Ok(Applied, "succeeded")
+    T:Eq(#Created, 0, "created nothing")
 end)
 
 --=============================================================================

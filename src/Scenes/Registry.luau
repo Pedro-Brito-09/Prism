@@ -11,6 +11,13 @@ return {
     ById = {} :: {[number]: any},
     ByName = {} :: {[string]: any},
 
+    -- Every live copy across every scene, keyed by its own id. Kept flat rather
+    -- than reached through the scene holding it because a caller naming a copy
+    -- -- a transaction says which copy each object it creates belongs in --
+    -- resolves one per operation, and walking every scene's copies to answer
+    -- would make that cost the size of the world.
+    Instances = {} :: {[number]: any},
+
     -- Set by Scenes/Server as it registers the implicit scene. Objects.new with
     -- no scene of its own lands here, which is what keeps plain object creation
     -- working exactly as it did before scenes existed.
