@@ -198,8 +198,9 @@ reads right, never that it was run with a player in it.
 
 ## In progress
 
-The three items above are being built in slices, one branch each off `main`.
-Nothing here is merged yet; the branches are on the remote.
+The three items above are being built in slices, one branch each. The world
+tree is merged; each later slice branches off the one before it while that one
+is unmerged, and all of them are on the remote.
 
 1. [x] **The world tree** — `feat/world-tree`. Container fields gone from the
        object registry, the scene config and the copy. A copy owns a folder,
@@ -217,7 +218,7 @@ Nothing here is merged yet; the branches are on the remote.
        `Objects:Localize`, `GetLocalized` and the `LocalRegistry` type, and the
        client builds its instances from the replicated registry instead.
 
-3. [ ] **Admission** — `Scene:Admit` and `Evict`, taking a user id as readily
+3. [x] **Admission** — `feat/admission`. `Scene:Admit` and `Evict`, taking a user id as readily
        as a Player, with an empty list meaning public. Every FireAll about a
        copy or its objects becomes a fire at that scene's admitted; the join
        replay skips what it may not send; admitting is a targeted replay and

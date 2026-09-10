@@ -30,6 +30,7 @@ const ObjectTypes = require("../Objects/Types")
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
 const Scenes = require("../Scenes/Server")
+const Audience = require("../Scenes/Audience")
 const Network = require("./Network")
 const Shared = require("./Shared")
 const Logger = require("../Logger")
@@ -113,6 +114,12 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 end
             end
 
+            -- A copy of a scene the player was never admitted to is one they
+            -- have not been told exists, and is refused as if it were not live.
+            if Plr and not Audience.Sees(Plr, if Live then Live.Scene else Scenes:GetDefault().Id) then
+                return Refuse(Plr, `scene copy {Operation.Instance} is not live.`)
+            end
+
             const Carried: {[PropertyTypes.PropertyIdentifier]: true} = {}
             for _, PropertyId in Registry.Properties do
                 Carried[PropertyId] = true
@@ -150,8 +157,10 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 Properties = Initial,
             })
         elseif Operation.Kind == "Set" then
+            -- An object in a scene the player was never admitted to is not
+            -- here, as far as they are concerned. The same goes for destroys.
             const Obj = Objects:Get(Operation.Target)
-            if not Obj or Obj.Destroyed then
+            if not Obj or Obj.Destroyed or (Plr and not Audience.Sees(Plr, Obj.Scene)) then
                 return Refuse(Plr, `object {Operation.Target} is not here.`)
             end
 
@@ -182,7 +191,7 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             })
         elseif Operation.Kind == "Destroy" then
             const Obj = Objects:Get(Operation.Target)
-            if not Obj or Obj.Destroyed then
+            if not Obj or Obj.Destroyed or (Plr and not Audience.Sees(Plr, Obj.Scene)) then
                 return Refuse(Plr, `object {Operation.Target} is not here.`)
             end
 
@@ -224,14 +233,14 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
     end
 
     const Created: {ObjectTypes.Object} = {}
-    const Removed: {ObjectTypes.RuntimeId} = {}
+    const Removed: {ObjectTypes.Object} = {}
 
     -- What to broadcast, and at most one entry per property: two sets on the
     -- same property in one transaction are one change by the time it lands, and
     -- sending both would replay the transaction's history rather than its
     -- result. Keyed by the property instance, which is already unique per
     -- object and property.
-    const Changes: {{RuntimeId: ObjectTypes.RuntimeId, Property: PropertyTypes.PropertyIdentifier, Value: buffer}} = {}
+    const Changes: {{RuntimeId: ObjectTypes.RuntimeId, Scene: ObjectTypes.SceneIdentifier, Property: PropertyTypes.PropertyIdentifier, Value: buffer}} = {}
     const At: {[any]: number} = {}
 
     -- What to write back if the apply throws partway, captured before the first
@@ -273,6 +282,7 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
 
             const Entry = {
                 RuntimeId = Set.Object.RuntimeId,
+                Scene = Set.Object.Scene,
                 Property = Prop.Parent,
                 Value = Compressed,
             }
@@ -287,9 +297,8 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
         end
 
         for _, Obj in Planned.Destroys do
-            const Identifier = Obj.RuntimeId
             Objects.Drop(Obj)
-            table.insert(Removed, Identifier)
+            table.insert(Removed, Obj)
         end
     end)
 

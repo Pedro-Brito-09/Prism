@@ -8,6 +8,12 @@ export type PersistentId = Handles.PersistentId
 export type SceneConfig = {
     CustomId: SceneIdentifier?,
     Name: string,
+
+    -- Server only. Who the scene admits from the moment it exists, by Player or
+    -- user id. Admitting after registering is too late for a scene that should
+    -- never have been public: registering it has already told everyone present
+    -- its name.
+    Admitted: {Player | number}?,
 }
 
 export type SceneRegistry = {
@@ -95,6 +101,25 @@ export type Scene = {
 
     GetInstances: (self: Scene) -> {SceneInstance},
     Destroy: (self: Scene) -> (),
+}
+
+-- A scene on the server also decides who hears about it. One that has admitted
+-- nobody is public, which is what every scene was before admission existed;
+-- one that has admitted anybody is told to them and to nobody else -- its name,
+-- its copies and its objects alike.
+export type ServerScene = Scene & {
+    -- User ids. The scene's rather than anyone's session, so it outlives
+    -- whoever is connected: dropping an entry when its player left would leave
+    -- a private scene with an empty list, and an empty list means public.
+    Admitted: {[number]: true},
+
+    Admit: (self: ServerScene, Who: Player | number) -> (),
+    Evict: (self: ServerScene, Who: Player | number) -> (),
+
+    -- True for anyone at all while the scene is public.
+    Admits: (self: ServerScene, Who: Player | number) -> boolean,
+    GetAdmitted: (self: ServerScene) -> {number},
+    IsPublic: (self: ServerScene) -> boolean,
 }
 
 -- A scene the client owns outright: a prefab preview, a local sandbox, a room

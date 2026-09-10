@@ -18,6 +18,7 @@ const Permissions = require("../Permissions/Server")
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
 const Registry = require("./Registry")
+const Audience = require("./Audience")
 const World = require("../World")
 const Network = require("./Network")
 const Handles = require("../Handles")
@@ -30,7 +31,7 @@ export type SceneIdentifier = Types.SceneIdentifier
 export type SceneConfig = Types.SceneConfig
 export type SceneRegistry = Types.SceneRegistry
 export type SceneInstance = Types.SceneInstance
-export type Scene = Types.Scene
+export type Scene = Types.ServerScene
 
 const Scenes = {}
 
@@ -48,6 +49,108 @@ const function ToPayload(Scene: Scene): SceneRegistry
         Id = Scene.Id,
         Name = Scene.Name,
     }
+end
+
+--=============================================================================
+-- Who hears about a scene
+--=============================================================================
+
+-- Scene registries per packet when several are revealed at once, as at a join.
+const REGISTRY_CHUNK = 50
+
+-- Tells one player about scenes they had not been told of: each registry, each
+-- live copy, then every object in them down the chunked path. The registries
+-- and copies go out before anything yields, so from the moment the player is on
+-- a scene's audience there is nothing a broadcast could name that they have not
+-- already been handed. The objects stream after, and stop for any scene
+-- withdrawn from the player part way through.
+const function Reveal(Plr: Player, List: {Scene})
+    const Tokens: {[SceneIdentifier]: number} = {}
+    const Payloads: {SceneRegistry} = {}
+    const CopyIds: {number} = {}
+    const CopyScenes: {SceneIdentifier} = {}
+    const Held: {any} = {}
+
+    for _, Scene in List do
+        if Registry.ById[Scene.Id] ~= Scene or Audience.Holds(Plr, Scene.Id) then
+            continue
+        end
+
+        Tokens[Scene.Id] = Audience.Remember(Plr, Scene.Id)
+        table.insert(Payloads, ToPayload(Scene))
+
+        for _, Copy in Scene.Instances do
+            table.insert(CopyIds, Copy.Id)
+            table.insert(CopyScenes, Scene.Id)
+
+            for _, Obj in Copy.Objects do
+                table.insert(Held, Obj)
+            end
+        end
+    end
+
+    if #Payloads == 0 then
+        return
+    end
+
+    if #Payloads == 1 then
+        Network.SceneRegistered:Fire(Plr, Payloads[1])
+    else
+        for Start = 1, #Payloads, REGISTRY_CHUNK do
+            const Stop = math.min(Start + REGISTRY_CHUNK - 1, #Payloads)
+            Network.RegistriesReplayed:Fire(Plr, table.move(Payloads, Start, Stop, 1, {}))
+        end
+    end
+
+    if #CopyIds > 0 then
+        Network.InstancesReplayed:Fire(Plr, CopyIds, CopyScenes)
+    end
+
+    Objects.Stream(Plr, Held, function(Obj: any): boolean
+        return Audience.Holds(Plr, Obj.Scene, Tokens[Obj.Scene])
+    end)
+end
+
+-- The reverse: one packet per copy and one for the scene. A client told a copy
+-- is gone drops everything it held, which is the same bulk removal an unload
+-- already is.
+const function Conceal(Plr: Player, Scene: Scene)
+    if not Audience.Holds(Plr, Scene.Id) then
+        return
+    end
+
+    Audience.Forget(Plr, Scene.Id)
+
+    for _, Copy in Scene.Instances do
+        Network.InstanceRemoved:Fire(Plr, Copy.Id)
+    end
+
+    Network.SceneUnregistered:Fire(Plr, Scene.Id)
+end
+
+-- Brings what one player has been told about one scene into line with whether
+-- they are admitted to it. Revealing yields as it streams, so it gets a thread
+-- of its own -- which task.spawn only hands back after the registry and the
+-- copies are out, because nothing before them yields.
+const function Settle(Plr: Player, Scene: Scene)
+    const Sees = Audience.Sees(Plr, Scene.Id)
+    const Holds = Audience.Holds(Plr, Scene.Id)
+
+    if Sees and not Holds then
+        task.spawn(Reveal, Plr, {Scene})
+    elseif Holds and not Sees then
+        Conceal(Plr, Scene)
+    end
+end
+
+-- Every player past their join, after a scene appears or its admission list
+-- changes. A player still joining is left alone: their replay settles every
+-- scene once it is through, and a scene revealed to them now could reach them
+-- ahead of the object types its objects need.
+const function Reconcile(Scene: Scene)
+    for _, Plr in Audience.GetSynced() do
+        Settle(Plr, Scene)
+    end
 end
 
 --=============================================================================
@@ -104,7 +207,7 @@ const function __instance_unload(self: SceneInstance)
     -- The folder goes after its objects, so nothing is left holding a
     -- reference to an instance that is already gone.
     World.DropCopy(self.Scene, self.Folder)
-    Network.InstanceRemoved:FireAll(self.Id)
+    Audience.Fire(Network.InstanceRemoved, self.Scene, self.Id)
 end
 
 const function NewInstance(Owner: Scene, Parent: Instance?): SceneInstance
@@ -130,7 +233,7 @@ const function NewInstance(Owner: Scene, Parent: Instance?): SceneInstance
 
     -- Announced before its objects, so a client is never handed an object
     -- belonging to a copy it has not been told about.
-    Network.InstanceAdded:FireAll(Instance_.Id, Owner.Id)
+    Audience.Fire(Network.InstanceAdded, Owner.Id, Instance_.Id, Owner.Id)
     return Instance_ :: any
 end
 
@@ -207,9 +310,64 @@ const function __destroy(self: Scene)
     Registry.ByName[self.Name] = nil
     self.Data = nil
 
-    Network.SceneUnregistered:FireAll(self.Id)
+    -- To whoever was told about it, after which nobody holds it.
+    Audience.Fire(Network.SceneUnregistered, self.Id, self.Id)
+    Audience.ForgetScene(self.Id)
 
     -- The id is not released: see the pool above.
+end
+
+-- Admitting someone to a public scene makes it private, and everyone else
+-- present is told it is gone. Evicting the last makes it public again, and
+-- everyone is told about it -- the evicted included, because an empty list
+-- means public. Admit the next person before evicting the last to keep a scene
+-- closed while its list changes hands.
+const function __admit(self: Scene, Who: Player | number)
+    const UserId = Audience.Resolve(Who)
+    if not UserId then
+        Logger:Warn(`Scene {self.Name} admits a Player or a user id, not a {typeof(Who)}.`)
+        return
+    end
+
+    if self.Admitted[UserId] then
+        return
+    end
+
+    self.Admitted[UserId] = true
+    Reconcile(self)
+end
+
+const function __evict(self: Scene, Who: Player | number)
+    const UserId = Audience.Resolve(Who)
+    if not UserId then
+        Logger:Warn(`Scene {self.Name} evicts a Player or a user id, not a {typeof(Who)}.`)
+        return
+    end
+
+    if not self.Admitted[UserId] then
+        return
+    end
+
+    self.Admitted[UserId] = nil
+    Reconcile(self)
+end
+
+const function __admits(self: Scene, Who: Player | number): boolean
+    const UserId = Audience.Resolve(Who)
+    return UserId ~= nil and (next(self.Admitted) == nil or self.Admitted[UserId] == true)
+end
+
+const function __get_admitted(self: Scene): {number}
+    const List = {}
+    for UserId in self.Admitted do
+        table.insert(List, UserId)
+    end
+
+    return List
+end
+
+const function __is_public(self: Scene): boolean
+    return next(self.Admitted) == nil
 end
 
 -- Names have to be unique as well as ids. A name is how a caller asks for a
@@ -238,16 +396,34 @@ function Scenes.new(Config: SceneConfig): Scene?
     Scene.Data = nil
     Scene.Instances = {}
 
+    -- Filled before the scene is announced, so a scene that should never be
+    -- public never is, not even for the packet that registers it.
+    Scene.Admitted = {}
+    for _, Who in Config.Admitted or {} do
+        const UserId = Audience.Resolve(Who)
+        if UserId then
+            Scene.Admitted[UserId] = true
+        else
+            Logger:Warn(`Scene {Config.Name} admits a Player or a user id, not a {typeof(Who)}.`)
+        end
+    end
+
     Scene.Load = __load
     Scene.Unload = __unload
     Scene.Serialize = __serialize
     Scene.GetInstances = __get_instances
     Scene.Destroy = __destroy
+    Scene.Admit = __admit
+    Scene.Evict = __evict
+    Scene.Admits = __admits
+    Scene.GetAdmitted = __get_admitted
+    Scene.IsPublic = __is_public
 
     Registry.ById[Identifier] = Scene
     Registry.ByName[Config.Name] = Scene
 
-    Network.SceneRegistered:FireAll(ToPayload(Scene :: any))
+    -- Told to whoever it admits, which for a scene with no list is everyone.
+    Reconcile(Scene :: any)
     return Scene :: any
 end
 
@@ -297,6 +473,32 @@ end
 -- to know which scene it belongs to first.
 function Scenes:GetInstance(Identifier: ObjectTypes.SceneInstanceId): SceneInstance?
     return Registry.Instances[Identifier]
+end
+
+-- The scene half of a join, called by Replication once the player has every
+-- property and object type. Every scene they may see is revealed at once, so
+-- the registries and copies share packets. Then the player counts as synced,
+-- and whatever changed while this streamed -- a scene registered, an admission
+-- granted or taken -- is settled against what they were actually sent.
+function Scenes.Catchup(Plr: Player)
+    const Visible = {}
+    for _, Scene in Registry.ById do
+        if Audience.Sees(Plr, Scene.Id) then
+            table.insert(Visible, Scene)
+        end
+    end
+
+    Reveal(Plr, Visible)
+
+    if not Plr.Parent then
+        return
+    end
+
+    Audience.MarkSynced(Plr)
+
+    for _, Scene in Registry.ById do
+        Settle(Plr, Scene)
+    end
 end
 
 --=============================================================================

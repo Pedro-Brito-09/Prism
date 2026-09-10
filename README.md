@@ -220,6 +220,43 @@ a joining player receives. One packet per object would put a five thousand
 object scene into the remote queue in a single frame, which is the flood the
 join replay exists to avoid.
 
+### Who hears about a scene
+
+Every scene is public until it admits someone. After that, the players it
+admitted are the only ones told anything about it: its name, its copies and its
+objects.
+
+```lua
+local Workshop = Prism.Scenes.new({Name = "Workshop", Admitted = {ownerUserId}})
+Workshop:Admit(player)        -- a Player or a user id
+Workshop:Evict(otherUserId)
+Workshop:Admits(player)       -- true if admitted, or if the scene is public
+```
+
+Admitting someone reveals the scene to them: its registry, its copies and every
+object in them, down the chunked path a joining player receives. Evicting
+someone withdraws it with one packet per copy. The list is keyed by user id and
+belongs to the scene, so it outlives whoever is connected. Someone admitted
+while away is shown the scene when they join.
+
+Two consequences of an empty list meaning public:
+
+- Admitting the first player to a public scene hides it from everyone else.
+- Evicting the last player makes it public again, and it is revealed to
+  everyone, including the player you evicted. Admit the next person before
+  evicting the last.
+
+A scene that should never be public names its admitted in `Scenes.new`.
+Admitting afterwards is too late, because registering the scene has already told
+everyone its name.
+
+A player who isn't admitted can't edit a scene either. Their edits are refused
+as though its objects didn't exist.
+
+Admission hides a scene's data, not its parts. A copy loaded with `Load` is
+built on the server, and Roblox replicates its parts to everybody; admission
+decides who gets the objects behind them.
+
 ### Scenes the client owns
 
 A client can own a scene outright — a prefab preview, a sandbox, a room built
