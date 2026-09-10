@@ -25,18 +25,31 @@ reads right, never that it was run with a player in it.
       site already holds the object, an object knows its copy and a copy knows
       its scene, so `Can` resolves it.
 
-      This subsumes the audience idea rather than sitting beside it. A scene's
-      audience is the set of players holding any right on it, so admitting
-      someone is granting them one, and there is no second list to keep in
-      step. What replicates to whom follows from that: a copy's objects go to
-      its audience, and to nobody else unless the object type says otherwise.
+      Seeing a scene and changing one stay separate. A scene admits players by
+      name -- `Scene:Admit`, taking a user id as readily as a Player -- and a
+      scene that has admitted nobody is public, which is what every scene that
+      exists today already is. Rights say what you may do once you are in;
+      admission says whether you are in at all, and holding rights on a scene
+      you were never admitted to is inert rather than clever.
 
-      So a grant is a replication event rather than bookkeeping. Rights
-      arriving means a targeted replay of that copy to that player, and rights
-      going away means a bulk removal, both of which the scene and transaction
-      work already built. That is also what keeps things out of here that look
-      like they belong: a moderator who may look into any level is a capability
-      the game checks and a grant it makes, not a feature Prism has to carry.
+      The list is the scene's and outlives whoever is connected. Dropping an
+      admission when its player disconnects would make a private level whose
+      last editor logged off empty, and an empty list means public -- so a room
+      would let itself out.
+
+      Admission is therefore the replication event: being admitted means a
+      targeted replay of each of that scene's copies, and being evicted means a
+      bulk removal, both of which the scene and transaction work already built.
+      It is also what keeps things out of here that look like they belong: a
+      moderator who may look into any level is a capability the game checks and
+      an Admit it calls, not a feature Prism has to carry.
+
+      A player is told nothing about a scene they are not admitted to -- not
+      that it exists, not what it is called. The one exception falls out of the
+      field below: an object type that replicates to everyone still belongs to
+      a copy, and its arrival necessarily says that copy exists, or the client
+      has nowhere to file it and cannot work out the object's persistent
+      identity. That is a copy id and a scene id, and nothing else.
 
       *Roles stop being live.* A role becomes a template. Granting one clears
       the player's set and copies its capabilities in; from then on the
@@ -94,10 +107,9 @@ reads right, never that it was run with a player in it.
       client holds is decided by the scene it has rights on, and what it may
       change is decided here.
 
-      Open: whether a scene loaded twice can carry different rights per copy,
-      and what a joining player is told about scenes it has no rights on --
-      probably that they exist, since an object type marked for everyone has to
-      be filable against a copy the client has heard of.
+      Open: whether a scene loaded twice can carry different rights per copy.
+      Admission does not have the question -- it is the scene's, so every copy
+      of it admits the same people.
 
 - [ ] **`Replicate` on an object type.** Whether an object's *data* reaches a
       client, as against its instance, which ordinary replication delivers on
