@@ -104,11 +104,8 @@ is no answer — ask a copy and there is.
 one.
 
 ```lua
-local a = Rooms:Load()
-local b = Rooms:Load()
-
-a.Model:PivotTo(CFrame.new(0, 0, 0))     -- and they can stand apart
-b.Model:PivotTo(CFrame.new(200, 0, 0))
+local a = Rooms:Load(workspace.SlotA)   -- where this copy's folder goes
+local b = Rooms:Load(workspace.SlotB)
 
 a:Find(localId)   -- this copy's object
 b:Find(localId)   -- the other copy's
@@ -120,9 +117,17 @@ Every copy carries the persistent ids the pack was written with, so five
 identical rooms agree on *what* each object is and disagree on *which* one it
 is.
 
-### Where the parts live
+### Where the instances live
 
-Prism owns one tree in the workspace and puts every object's instance in it:
+Every copy owns a folder, and every object's instance is parented into the
+folder of the copy holding it. `Load` says where that folder goes:
+
+```lua
+local room = Rooms:Load(workspace.SlotA)
+room.Folder                              -- the copy's own folder
+```
+
+Name no parent and it lands in the tree Prism keeps for the purpose:
 
 ```
 workspace
@@ -133,11 +138,17 @@ workspace
 ```
 
 Keyed by the copy rather than the scene, because a scene loaded five times is
-five copies and they cannot share a folder. A copy's node is a `Model`, so
-placing one is `copy.Model:PivotTo(cf)` — which is what containers used to be
-for, with the framework handing you the model rather than asking you to supply
-one. Unloading a copy destroys its model, and the scene's folder goes with the
-last of its copies.
+five copies and they cannot share a folder.
+
+It is a `Folder`, and that is deliberate: a folder can be parented anywhere, so
+a scene made of `ScreenGui` objects loads into `PlayerGui`, a scene of
+atmospheres into `Lighting`, and a scene you want to move as a unit into a
+`Model` of your own that you pivot. Prism never needs to know what class your
+objects are or where that class belongs.
+
+Unloading a copy destroys its folder and everything in it. A default scene
+folder goes with the last of its copies; a parent you supplied is yours and is
+left alone.
 
 ### Saving
 

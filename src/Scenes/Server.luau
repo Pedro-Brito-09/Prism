@@ -101,20 +101,20 @@ const function __instance_unload(self: SceneInstance)
 
     Objects.DropInstance(self)
 
-    -- The model goes after its objects, so nothing is left holding a reference
-    -- to a part that is already gone.
-    World.DropCopy(self.Scene, self.Id)
+    -- The folder goes after its objects, so nothing is left holding a
+    -- reference to an instance that is already gone.
+    World.DropCopy(self.Scene, self.Folder)
     Network.InstanceRemoved:FireAll(self.Id)
 end
 
-const function NewInstance(Owner: Scene): SceneInstance
+const function NewInstance(Owner: Scene, Parent: Instance?): SceneInstance
     InstanceCounter += 1
 
     const Instance_ = {}
     Instance_.Id = InstanceCounter
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
-    Instance_.Model = World.Copy(Owner.Id, Instance_.Id)
+    Instance_.Folder = World.Copy(Owner.Id, Instance_.Id, Parent)
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
@@ -138,8 +138,8 @@ end
 -- Scenes
 --=============================================================================
 
-const function __load(self: Scene): any
-    const Instance_ = NewInstance(self)
+const function __load(self: Scene, Parent: Instance?): any
+    const Instance_ = NewInstance(self, Parent)
 
     const Data = self.Data
     if not Data then

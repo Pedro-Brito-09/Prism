@@ -769,9 +769,9 @@ T:Test("instances get their own clone of the template", function()
     T:Ok(A.Instance ~= B.Instance, "instances are distinct")
     T:Ok(A.Instance ~= Template, "not the template itself")
 
-    -- Both landed in the default scene, so both are in that copy's model.
+    -- Both landed in the default scene, so both are in that copy's folder.
     const Copy = A.Instance.Parent
-    T:Ok(Copy and Copy:IsA("Model"), "parented into a copy's model")
+    T:Ok(Copy and Copy:IsA("Folder"), "parented into a copy's folder")
     T:Eq(B.Instance.Parent, Copy, "and both into the same one")
     T:Eq(Copy.Parent.Parent.Name, World.RootName, "which hangs under the prism root")
 
@@ -1284,31 +1284,52 @@ T:Test("the scene serializes what was committed, a copy what it holds", function
     Scene:Destroy()
 end)
 
-T:Test("a copy owns a model in the world tree", function()
+T:Test("a copy owns a folder, in the default tree when none is named", function()
     const Scene = Scenes.new({Name = "TestWorldTree"})
     const A = Scene:Load()
     const B = Scene:Load()
 
-    T:Ok(A.Model and A.Model:IsA("Model"), "a copy has a model")
-    T:Ok(A.Model ~= B.Model, "one each, because a copy is what gets placed")
-    T:Eq(A.Model.Name, `__copy_{A.Id}`, "named for the copy")
+    T:Ok(A.Folder and A.Folder:IsA("Folder"), "a copy has a folder")
+    T:Ok(A.Folder ~= B.Folder, "one each, because a copy is what gets placed")
+    T:Eq(A.Folder.Name, `__copy_{A.Id}`, "named for the copy")
 
-    const SceneFolder = A.Model.Parent
-    T:Eq(B.Model.Parent, SceneFolder, "both under the scene's folder")
+    const SceneFolder = A.Folder.Parent
+    T:Eq(B.Folder.Parent, SceneFolder, "both under the scene's folder")
     T:Eq(SceneFolder.Name, `__scene_{Scene.Id}`, "named for the scene")
     T:Eq(SceneFolder.Parent.Name, World.RootName, "which hangs under the prism root")
 
     const Obj = A:Create(CrateId)
-    T:Eq(Obj.Instance.Parent, A.Model, "objects land in their own copy's model")
+    T:Eq(Obj.Instance.Parent, A.Folder, "objects land in their own copy's folder")
 
     A:Unload()
-    T:Eq(A.Model.Parent, nil, "unloading takes the model with it")
+    T:Eq(A.Folder.Parent, nil, "unloading takes the folder with it")
     T:Ok(SceneFolder.Parent, "the scene's folder stays while a copy remains")
 
     B:Unload()
     T:Eq(SceneFolder.Parent, nil, "and goes with the last of them")
 
     Scene:Destroy()
+end)
+
+T:Test("a copy goes wherever it is told, and takes its objects with it", function()
+    -- A folder rather than a model precisely so this works: a scene of
+    -- interfaces loads into PlayerGui, one of atmospheres into Lighting.
+    const Elsewhere = Instance.new("Folder")
+    Elsewhere.Name = "PrismTestElsewhere"
+    Elsewhere.Parent = workspace
+
+    const Scene = Scenes.new({Name = "TestNamedParent"})
+    const Copy = Scene:Load(Elsewhere)
+
+    T:Eq(Copy.Folder.Parent, Elsewhere, "parented where it was told")
+    T:Eq(Copy:Create(CrateId).Instance.Parent, Copy.Folder, "and its objects with it")
+
+    Copy:Unload()
+    T:Eq(#Elsewhere:GetChildren(), 0, "unloading took the copy's folder")
+    T:Ok(Elsewhere.Parent, "and left the parent alone, because it is not ours")
+
+    Scene:Destroy()
+    Elsewhere:Destroy()
 end)
 
 --=============================================================================

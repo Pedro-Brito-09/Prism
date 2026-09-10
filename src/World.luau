@@ -13,10 +13,12 @@
 -- is five copies and they cannot share a folder -- the same reason objects are
 -- filed by copy everywhere else.
 --
--- A copy's node is a Model rather than a Folder so that a copy can still be
--- placed: PivotTo moves the whole room at once. That is what a Container was
--- really for, and it is easier this way round, since the framework hands you
--- the model rather than asking you to supply one.
+-- That tree is only where a copy goes when nobody says otherwise. Load takes a
+-- parent, and a copy's folder is parented wherever it is handed -- PlayerGui
+-- for a scene made of interfaces, a Model of your own if you want to pivot it,
+-- Lighting for a scene of atmospheres. A Folder can be parented anywhere, which
+-- is the whole reason it is a Folder: the framework has no business knowing
+-- what class your objects are or where that class belongs.
 
 const RunService = game:GetService("RunService")
 const Logger = require("./Logger")
@@ -76,47 +78,47 @@ end
 
 World.GetRoot = GetRoot
 
--- The model a copy's objects are parented into, built on the way down if it is
--- not there yet. Idempotent: a copy asks for it once, but a client rendering a
--- copy of a scene the server also holds finds the folder already there.
-function World.Copy(Scene: number, Copy: number): Model
+-- Where a copy goes when its loader named no parent of its own. Built on the
+-- way down, and shared by every copy of that scene that also named none.
+const function DefaultParent(Scene: number): Instance
     const RootFolder = GetRoot()
 
-    local SceneFolder = RootFolder:FindFirstChild(SceneName(Scene))
-    if not SceneFolder then
-        const Folder = Instance.new("Folder")
-        Folder.Name = SceneName(Scene)
-        Folder.Parent = RootFolder
-        SceneFolder = Folder
+    const Existing = RootFolder:FindFirstChild(SceneName(Scene))
+    if Existing then
+        return Existing
     end
 
-    local CopyModel = (SceneFolder :: Instance):FindFirstChild(CopyName(Copy))
-    if not CopyModel then
-        const Model = Instance.new("Model")
-        Model.Name = CopyName(Copy)
-        Model.Parent = SceneFolder
-        CopyModel = Model
-    end
-
-    return CopyModel :: Model
+    const Folder = Instance.new("Folder")
+    Folder.Name = SceneName(Scene)
+    Folder.Parent = RootFolder
+    return Folder
 end
 
--- Takes the copy's model and everything parented to it. The scene's folder goes
--- with the last of its copies, so an unloaded scene leaves nothing behind.
-function World.DropCopy(Scene: number, Copy: number)
-    const RootFolder = GetRoot()
+-- The folder a copy's objects are parented into. Named for the copy rather than
+-- the scene, because a scene loaded five times is five copies and they cannot
+-- share one -- the same reason objects are filed by copy everywhere else.
+function World.Copy(Scene: number, Copy: number, Parent: Instance?): Folder
+    const Folder = Instance.new("Folder")
+    Folder.Name = CopyName(Copy)
+    Folder.Parent = Parent or DefaultParent(Scene)
+    return Folder
+end
 
-    const SceneFolder = RootFolder:FindFirstChild(SceneName(Scene))
-    if not SceneFolder then
+-- Takes the copy's folder and everything parented to it. A default scene folder
+-- goes with the last of its copies, so an unloaded scene leaves nothing behind;
+-- a parent the caller supplied is the caller's and is left alone.
+function World.DropCopy(Scene: number, Folder: Instance?)
+    if Folder then
+        Folder:Destroy()
+    end
+
+    const RootFolder = Root
+    if not RootFolder or not RootFolder.Parent then
         return
     end
 
-    const CopyModel = SceneFolder:FindFirstChild(CopyName(Copy))
-    if CopyModel then
-        CopyModel:Destroy()
-    end
-
-    if #SceneFolder:GetChildren() == 0 then
+    const SceneFolder = RootFolder:FindFirstChild(SceneName(Scene))
+    if SceneFolder and #SceneFolder:GetChildren() == 0 then
         SceneFolder:Destroy()
     end
 end

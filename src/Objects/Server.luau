@@ -403,8 +403,9 @@ const function Construct(
 
         -- Into the copy holding it, and nowhere else. Which copy rather than
         -- which scene, because two copies of one room have to be able to sit
-        -- in two places, and the copy's model is what moves them.
-        Clone.Parent = Instance_.Model
+        -- in two places -- and where that is, is the copy's folder's business
+        -- rather than this object's.
+        Clone.Parent = Instance_.Folder
 
         Inst = Clone
     end

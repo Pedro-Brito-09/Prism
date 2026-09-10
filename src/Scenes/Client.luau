@@ -196,12 +196,12 @@ const function __instance_unload(self: SceneInstance)
     -- Every object it held, torn down here rather than announced: nothing
     -- outside this client ever knew about them.
     Objects.DropInstance(self.Id)
-    World.DropCopy(self.Scene, self.Id)
+    World.DropCopy(self.Scene, self.Folder)
     table.clear(self.Objects)
     table.clear(self.ByLocal)
 end
 
-const function NewInstance(Owner: any): SceneInstance
+const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     if NextInstanceId <= 0 then
         Logger:Error("Local scene copy id space exhausted.")
     end
@@ -213,10 +213,12 @@ const function NewInstance(Owner: any): SceneInstance
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
 
-    -- The same tree the server's copies live in, built locally. A local scene's
-    -- ids count down from the top of the space while the server's count up, so
-    -- a folder of this client's cannot be mistaken for one of the server's.
-    Instance_.Model = World.Copy(Owner.Id, Instance_.Id)
+    -- The same tree the server's copies default into, built locally. A local
+    -- scene's ids count down from the top of the space while the server's count
+    -- up, so a folder of this client's cannot be mistaken for one of the
+    -- server's -- and a client editing interfaces hands PlayerGui to Load and
+    -- never touches the workspace at all.
+    Instance_.Folder = World.Copy(Owner.Id, Instance_.Id, Parent)
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
@@ -236,8 +238,8 @@ const function NewInstance(Owner: any): SceneInstance
     return Instance_ :: any
 end
 
-const function __load(self: any): any
-    const Instance_ = NewInstance(self)
+const function __load(self: any, Parent: Instance?): any
+    const Instance_ = NewInstance(self, Parent)
 
     const Data = self.Data
     if not Data then

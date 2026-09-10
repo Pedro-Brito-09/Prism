@@ -28,10 +28,12 @@ export type SceneInstance = {
     -- here would be circular with the field below.
     Owner: any,
 
-    -- Where this copy's objects live: workspace.__prism.__scene_N.__copy_N, a
-    -- Model so that placing a copy is one PivotTo rather than a container the
-    -- caller has to supply and keep track of.
-    Model: Model,
+    -- Where this copy's objects live. A folder Prism makes and names for the
+    -- copy, parented wherever Load was told to put it -- or under
+    -- workspace.__prism.__scene_N when it was told nothing. Parent it into a
+    -- Model of your own to pivot a whole copy, into PlayerGui for a scene made
+    -- of interfaces, anywhere a Folder can go.
+    Folder: Folder,
 
     Objects: {[ObjectTypes.RuntimeId]: ObjectTypes.Object},
 
@@ -82,7 +84,7 @@ export type Scene = {
     -- A new live copy. Called twice, it gives two, and they are equals -- which
     -- is what makes one saved room able to stand in the world five times. Nil
     -- only where the scene's pack could not be read.
-    Load: (self: Scene) -> SceneInstance?,
+    Load: (self: Scene, Parent: Instance?) -> SceneInstance?,
 
     -- Every copy at once. A single copy unloads itself.
     Unload: (self: Scene) -> (),

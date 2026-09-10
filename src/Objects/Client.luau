@@ -345,7 +345,7 @@ const function Construct(
         -- Into the copy holding it, exactly as on the server: two copies of
         -- one room have to be able to sit in two places, and the copy's model
         -- is what moves them.
-        Clone.Parent = Live.Model
+        Clone.Parent = Live.Folder
 
         Inst = Clone
     end
