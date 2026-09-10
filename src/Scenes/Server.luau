@@ -18,6 +18,7 @@ const Permissions = require("../Permissions/Server")
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
 const Registry = require("./Registry")
+const World = require("../World")
 const Network = require("./Network")
 const Handles = require("../Handles")
 const IdPool = require("../IdPool")
@@ -99,17 +100,21 @@ const function __instance_unload(self: SceneInstance)
     Registry.Instances[self.Id] = nil
 
     Objects.DropInstance(self)
+
+    -- The folder goes after its objects, so nothing is left holding a
+    -- reference to an instance that is already gone.
+    World.DropCopy(self.Scene, self.Folder)
     Network.InstanceRemoved:FireAll(self.Id)
 end
 
-const function NewInstance(Owner: Scene, Container: Instance?): SceneInstance
+const function NewInstance(Owner: Scene, Parent: Instance?): SceneInstance
     InstanceCounter += 1
 
     const Instance_ = {}
     Instance_.Id = InstanceCounter
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
-    Instance_.Container = Container or Owner.Container
+    Instance_.Folder = World.Copy(Owner.Id, Instance_.Id, Parent)
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
@@ -133,8 +138,8 @@ end
 -- Scenes
 --=============================================================================
 
-const function __load(self: Scene, Container: Instance?): any
-    const Instance_ = NewInstance(self, Container)
+const function __load(self: Scene, Parent: Instance?): any
+    const Instance_ = NewInstance(self, Parent)
 
     const Data = self.Data
     if not Data then
@@ -229,7 +234,6 @@ function Scenes.new(Config: SceneConfig): Scene?
     const Scene = {}
     Scene.Id = Identifier
     Scene.Name = Config.Name
-    Scene.Container = Config.Container
     Scene.LastId = 0
     Scene.Data = nil
     Scene.Instances = {}

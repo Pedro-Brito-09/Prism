@@ -41,6 +41,7 @@ else
 end
 
 Prism.CustomEnum = require("@self/CustomEnum")
+Prism.World = require("@self/World")
 Prism.Compressor = require("@self/Compressor")
 Prism.Networking = require("@self/Networking")
 Prism.Handles = require("@self/Handles")

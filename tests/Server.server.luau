@@ -32,6 +32,7 @@ const Encoding = Prism.Encoding
 const Objects = Prism.Objects
 const Handles = Prism.Handles
 const Scenes = Prism.Scenes
+const World = Prism.World
 const IdPool = Prism.IdPool
 const Codecs = Prism.Codecs
 const Varint = Prism.Varint
@@ -732,15 +733,10 @@ Template.Name = "PrismTestTemplate"
 Template.Anchored = true
 Template.Parent = ServerStorage
 
-const Container = Instance.new("Folder")
-Container.Name = "PrismTestContainer"
-Container.Parent = workspace
-
 const CrateId = Objects:Register({
     Name = "TestCrate",
     Properties = {TitleId, HealthId, TintId},
     Instance = Template,
-    Container = Container,
     Links = {
         {Property = TintId, Type = "Property", Name = "Color"},
         {Property = HealthId, Type = "Attribute", Name = "Health"},
@@ -772,10 +768,15 @@ T:Test("instances get their own clone of the template", function()
     T:Ok(B.Instance, "B has an instance")
     T:Ok(A.Instance ~= B.Instance, "instances are distinct")
     T:Ok(A.Instance ~= Template, "not the template itself")
-    T:Eq(A.Instance.Parent, Container, "parented to the container")
+
+    -- Both landed in the default scene, so both are in that copy's folder.
+    const Copy = A.Instance.Parent
+    T:Ok(Copy and Copy:IsA("Folder"), "parented into a copy's folder")
+    T:Eq(B.Instance.Parent, Copy, "and both into the same one")
+    T:Eq(Copy.Parent.Parent.Name, World.RootName, "which hangs under the prism root")
 
     A:Destroy()
-    T:Ok(B.Instance and B.Instance.Parent == Container, "destroying A leaves B alone")
+    T:Ok(B.Instance and B.Instance.Parent == Copy, "destroying A leaves B alone")
     B:Destroy()
 end)
 
@@ -915,7 +916,6 @@ T:Test("links that cannot work are refused at registration", function()
         Name = "TestBadLinks",
         Properties = {TitleId, HealthId, ShapeId},
         Instance = Template,
-        Container = Container,
         Links = {
             -- SetAttribute throws on a table, which is what an option is.
             {Property = ShapeId, Type = "Attribute", Name = "Shape"},
@@ -940,7 +940,6 @@ T:Test("a property linked twice keeps only the first link", function()
         Name = "TestDuplicateLink",
         Properties = {TintId},
         Instance = Template,
-        Container = Container,
         Links = {
             {Property = TintId, Type = "Property", Name = "Color"},
             {Property = TintId, Type = "Attribute", Name = "Tint"},
@@ -1283,6 +1282,54 @@ T:Test("the scene serializes what was committed, a copy what it holds", function
     T:Eq(Current[1].Properties[TitleId], "Drifted", "the copy says what it holds")
 
     Scene:Destroy()
+end)
+
+T:Test("a copy owns a folder, in the default tree when none is named", function()
+    const Scene = Scenes.new({Name = "TestWorldTree"})
+    const A = Scene:Load()
+    const B = Scene:Load()
+
+    T:Ok(A.Folder and A.Folder:IsA("Folder"), "a copy has a folder")
+    T:Ok(A.Folder ~= B.Folder, "one each, because a copy is what gets placed")
+    T:Eq(A.Folder.Name, `__copy_{A.Id}`, "named for the copy")
+
+    const SceneFolder = A.Folder.Parent
+    T:Eq(B.Folder.Parent, SceneFolder, "both under the scene's folder")
+    T:Eq(SceneFolder.Name, `__scene_{Scene.Id}`, "named for the scene")
+    T:Eq(SceneFolder.Parent.Name, World.RootName, "which hangs under the prism root")
+
+    const Obj = A:Create(CrateId)
+    T:Eq(Obj.Instance.Parent, A.Folder, "objects land in their own copy's folder")
+
+    A:Unload()
+    T:Eq(A.Folder.Parent, nil, "unloading takes the folder with it")
+    T:Ok(SceneFolder.Parent, "the scene's folder stays while a copy remains")
+
+    B:Unload()
+    T:Eq(SceneFolder.Parent, nil, "and goes with the last of them")
+
+    Scene:Destroy()
+end)
+
+T:Test("a copy goes wherever it is told, and takes its objects with it", function()
+    -- A folder rather than a model precisely so this works: a scene of
+    -- interfaces loads into PlayerGui, one of atmospheres into Lighting.
+    const Elsewhere = Instance.new("Folder")
+    Elsewhere.Name = "PrismTestElsewhere"
+    Elsewhere.Parent = workspace
+
+    const Scene = Scenes.new({Name = "TestNamedParent"})
+    const Copy = Scene:Load(Elsewhere)
+
+    T:Eq(Copy.Folder.Parent, Elsewhere, "parented where it was told")
+    T:Eq(Copy:Create(CrateId).Instance.Parent, Copy.Folder, "and its objects with it")
+
+    Copy:Unload()
+    T:Eq(#Elsewhere:GetChildren(), 0, "unloading took the copy's folder")
+    T:Ok(Elsewhere.Parent, "and left the parent alone, because it is not ours")
+
+    Scene:Destroy()
+    Elsewhere:Destroy()
 end)
 
 --=============================================================================
@@ -2262,7 +2309,7 @@ end
 
 --=============================================================================
 
--- Template, Container, and the three fixtures deliberately remain alive until
+-- The template and the three fixtures deliberately remain alive until
 -- the play session ends so a late-starting client can receive them via replay.
 
 const Passed = T:Report()

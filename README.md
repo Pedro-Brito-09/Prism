@@ -38,7 +38,6 @@ local Enemy = Prism.Objects:Register({
     Name = "Enemy",
     Properties = {Health},
     Instance = ServerStorage.EnemyTemplate,
-    Container = workspace.Level,
     Links = {
         {Property = Health, Type = "Attribute", Name = "Health"},
     },
@@ -87,7 +86,7 @@ loaded as. Registering one creates data and nothing else. `Load` reads it into a
 live copy.
 
 ```lua
-local Rooms = Prism.Scenes.new({Name = "Rooms", Container = workspace.Levels})
+local Rooms = Prism.Scenes.new({Name = "Rooms"})
 
 local room = Rooms:Load()              -- one live copy
 room:Create(Crate, {[Health] = 50})
@@ -105,7 +104,7 @@ is no answer — ask a copy and there is.
 one.
 
 ```lua
-local a = Rooms:Load(workspace.SlotA)
+local a = Rooms:Load(workspace.SlotA)   -- where this copy's folder goes
 local b = Rooms:Load(workspace.SlotB)
 
 a:Find(localId)   -- this copy's object
@@ -117,6 +116,39 @@ Rooms:Unload()    -- takes every copy
 Every copy carries the persistent ids the pack was written with, so five
 identical rooms agree on *what* each object is and disagree on *which* one it
 is.
+
+### Where the instances live
+
+Every copy owns a folder, and every object's instance is parented into the
+folder of the copy holding it. `Load` says where that folder goes:
+
+```lua
+local room = Rooms:Load(workspace.SlotA)
+room.Folder                              -- the copy's own folder
+```
+
+Name no parent and it lands in the tree Prism keeps for the purpose:
+
+```
+workspace
+└── __prism
+    └── __scene_4
+        ├── __copy_11
+        └── __copy_12
+```
+
+Keyed by the copy rather than the scene, because a scene loaded five times is
+five copies and they cannot share a folder.
+
+It is a `Folder`, and that is deliberate: a folder can be parented anywhere, so
+a scene made of `ScreenGui` objects loads into `PlayerGui`, a scene of
+atmospheres into `Lighting`, and a scene you want to move as a unit into a
+`Model` of your own that you pivot. Prism never needs to know what class your
+objects are or where that class belongs.
+
+Unloading a copy destroys its folder and everything in it. A default scene
+folder goes with the last of its copies; a parent you supplied is yours and is
+left alone.
 
 ### Saving
 
@@ -191,7 +223,6 @@ instead of asking for them. There is nobody to ask and nothing to roll back to.
 ```lua
 Prism.Objects:Localize(Crate, {
     Instance = ReplicatedStorage.CrateTemplate,
-    Container = workspace.Preview,
     Links = {{Property = Tint, Type = "Property", Name = "Color"}},
 })
 

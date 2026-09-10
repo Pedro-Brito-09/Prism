@@ -1,0 +1,126 @@
+--!strict
+-- The tree Prism owns in the workspace.
+--
+-- An object's instance used to be parented wherever a Container field named:
+-- one on the object registry, one on the scene, one on the copy, resolved in
+-- that order. Three places to set it, three chances for them to disagree, and
+-- nothing in the explorer to say which room a part belonged to. There is one
+-- place instead, and the framework owns it:
+--
+--     workspace.__prism.__scene_{SceneId}.__copy_{CopyId}
+--
+-- Keyed by the copy rather than by the scene, because a scene loaded five times
+-- is five copies and they cannot share a folder -- the same reason objects are
+-- filed by copy everywhere else.
+--
+-- That tree is only where a copy goes when nobody says otherwise. Load takes a
+-- parent, and a copy's folder is parented wherever it is handed -- PlayerGui
+-- for a scene made of interfaces, a Model of your own if you want to pivot it,
+-- Lighting for a scene of atmospheres. A Folder can be parented anywhere, which
+-- is the whole reason it is a Folder: the framework has no business knowing
+-- what class your objects are or where that class belongs.
+
+const RunService = game:GetService("RunService")
+const Logger = require("./Logger")
+
+const IS_SERVER = RunService:IsServer()
+const ROOT_NAME = "__prism"
+const WAIT_TIMEOUT = 10
+
+const World = {}
+
+World.RootName = ROOT_NAME
+
+local Root: Instance? = nil
+
+const function SceneName(Scene: number): string
+    return `__scene_{Scene}`
+end
+
+const function CopyName(Copy: number): string
+    return `__copy_{Copy}`
+end
+
+-- The server builds the root and it replicates from there. A client waits for
+-- it rather than building one of its own: two folders named __prism under the
+-- workspace would make every lookup here ambiguous, and which one a client got
+-- would depend on replication timing.
+--
+-- Resolved on first use rather than at require, so a client that never draws
+-- anything never waits for it.
+const function GetRoot(): Instance
+    const Current = Root
+    if Current and Current.Parent then
+        return Current
+    end
+
+    if IS_SERVER then
+        local Found = workspace:FindFirstChild(ROOT_NAME)
+        if not Found then
+            const Folder = Instance.new("Folder")
+            Folder.Name = ROOT_NAME
+            Folder.Parent = workspace
+            Found = Folder
+        end
+
+        Root = Found
+        return Found
+    end
+
+    const Found = workspace:WaitForChild(ROOT_NAME, WAIT_TIMEOUT)
+    if not Found then
+        Logger:Error(`Waited {WAIT_TIMEOUT}s for workspace.{ROOT_NAME}, which the server creates. Is Prism required on the server?`)
+    end
+
+    Root = Found
+    return Found
+end
+
+World.GetRoot = GetRoot
+
+-- Where a copy goes when its loader named no parent of its own. Built on the
+-- way down, and shared by every copy of that scene that also named none.
+const function DefaultParent(Scene: number): Instance
+    const RootFolder = GetRoot()
+
+    const Existing = RootFolder:FindFirstChild(SceneName(Scene))
+    if Existing then
+        return Existing
+    end
+
+    const Folder = Instance.new("Folder")
+    Folder.Name = SceneName(Scene)
+    Folder.Parent = RootFolder
+    return Folder
+end
+
+-- The folder a copy's objects are parented into. Named for the copy rather than
+-- the scene, because a scene loaded five times is five copies and they cannot
+-- share one -- the same reason objects are filed by copy everywhere else.
+function World.Copy(Scene: number, Copy: number, Parent: Instance?): Folder
+    const Folder = Instance.new("Folder")
+    Folder.Name = CopyName(Copy)
+    Folder.Parent = Parent or DefaultParent(Scene)
+    return Folder
+end
+
+-- Takes the copy's folder and everything parented to it. A default scene folder
+-- goes with the last of its copies, so an unloaded scene leaves nothing behind;
+-- a parent the caller supplied is the caller's and is left alone.
+function World.DropCopy(Scene: number, Folder: Instance?)
+    if Folder then
+        Folder:Destroy()
+    end
+
+    const RootFolder = Root
+    if not RootFolder or not RootFolder.Parent then
+        return
+    end
+
+    const SceneFolder = RootFolder:FindFirstChild(SceneName(Scene))
+    if SceneFolder and #SceneFolder:GetChildren() == 0 then
+        SceneFolder:Destroy()
+    end
+end
+
+return World

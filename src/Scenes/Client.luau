@@ -26,6 +26,7 @@
 
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Client")
+const World = require("../World")
 const Network = require("./Network")
 const Handles = require("../Handles")
 const Logger = require("../Logger")
@@ -195,11 +196,12 @@ const function __instance_unload(self: SceneInstance)
     -- Every object it held, torn down here rather than announced: nothing
     -- outside this client ever knew about them.
     Objects.DropInstance(self.Id)
+    World.DropCopy(self.Scene, self.Folder)
     table.clear(self.Objects)
     table.clear(self.ByLocal)
 end
 
-const function NewInstance(Owner: any, Container: Instance?): SceneInstance
+const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     if NextInstanceId <= 0 then
         Logger:Error("Local scene copy id space exhausted.")
     end
@@ -210,7 +212,13 @@ const function NewInstance(Owner: any, Container: Instance?): SceneInstance
 
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
-    Instance_.Container = Container or Owner.Container
+
+    -- The same tree the server's copies default into, built locally. A local
+    -- scene's ids count down from the top of the space while the server's count
+    -- up, so a folder of this client's cannot be mistaken for one of the
+    -- server's -- and a client editing interfaces hands PlayerGui to Load and
+    -- never touches the workspace at all.
+    Instance_.Folder = World.Copy(Owner.Id, Instance_.Id, Parent)
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
@@ -230,8 +238,8 @@ const function NewInstance(Owner: any, Container: Instance?): SceneInstance
     return Instance_ :: any
 end
 
-const function __load(self: any, Container: Instance?): any
-    const Instance_ = NewInstance(self, Container)
+const function __load(self: any, Parent: Instance?): any
+    const Instance_ = NewInstance(self, Parent)
 
     const Data = self.Data
     if not Data then
@@ -340,7 +348,6 @@ function Scenes.new(Config: SceneConfig): LocalScene?
     const Scene = {}
     Scene.Id = Identifier
     Scene.Name = Config.Name
-    Scene.Container = Config.Container
     Scene.LastId = 0
     Scene.Data = nil
     Scene.Instances = {}
