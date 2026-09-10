@@ -73,6 +73,10 @@ const function Reveal(Plr: Player, List: {Scene})
     const CopyOpened: {boolean} = {}
     const Held: {any} = {}
 
+    -- Every object in a scene revealed whole, for its locks: who holds what is
+    -- told to the admitted, whatever each object's own reach.
+    const Watched: {any} = {}
+
     for _, Scene in List do
         if Registry.ById[Scene.Id] ~= Scene then
             continue
@@ -112,6 +116,10 @@ const function Reveal(Plr: Player, List: {Scene})
                 if Taken[Objects.ReachOf(Obj)] then
                     table.insert(Held, Obj)
                 end
+
+                if Whole then
+                    table.insert(Watched, Obj)
+                end
             end
         end
     end
@@ -128,6 +136,10 @@ const function Reveal(Plr: Player, List: {Scene})
     if #CopyIds > 0 then
         Network.InstancesReplayed:Fire(Plr, CopyIds, CopyScenes, CopyOpened)
     end
+
+    -- Before anything yields, like the copies: a lock taken from here on is
+    -- announced to this player, so the one they were owed has to be out first.
+    Objects.SendLocks(Plr, Watched)
 
     Objects.Stream(Plr, Held, function(Obj: any): boolean
         const Reach = Objects.ReachOf(Obj)

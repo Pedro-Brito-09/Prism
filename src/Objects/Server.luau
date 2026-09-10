@@ -1,5 +1,6 @@
 --!strict
 const CollectionService = game:GetService("CollectionService")
+const Players = game:GetService("Players")
 
 const Properties = require("../Properties/Server")
 const Permissions = require("../Permissions/Server")
@@ -33,6 +34,10 @@ const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
 -- persistent one, because the persistent one is not unique here: instancing a
 -- scene twice puts two objects carrying the same persistent id in this table.
 const Workspace: {[RuntimeId]: Object} = {}
+
+-- Who holds each locked object: the holder's user id, and the connection the
+-- lock was taken on, which is what lets it go with the player who took it.
+const Locks: {[RuntimeId]: {UserId: number, Holder: any}} = {}
 -- Never recycled, for the same reason property ids are not: a registry id is
 -- written into every saved object as its Parent, so handing the same id to a
 -- different object type later makes every stored object of the old type decode
@@ -96,6 +101,10 @@ const function Teardown(self: Object, Announce: boolean)
 
     Shared.ReleaseLinks(self.Links)
     self.Links = nil
+
+    -- Gone with its object. The packet saying the object went is all a client
+    -- needs to drop the lock it knew about.
+    Locks[self.RuntimeId] = nil
 
     for _, Prop in self.Properties do
         Prop:Destroy()
@@ -764,6 +773,199 @@ function Objects.fromCompression(CompressedObj: buffer, Target: any?): Object?
     )
 end
 
+--=============================================================================
+-- Locks
+--=============================================================================
+
+-- A lock is explicit: a client takes one when it starts on an object, and while
+-- it holds it nobody else may edit or destroy that object. Presence comes with
+-- it -- who holds what is told to the players the object's scene admits, and
+-- nobody else, because who is editing a private level is part of the level.
+
+-- The most one request may name, for the same reason a transaction has a cap.
+const MAX_LOCKS = 1024
+
+const function UserIdOf(Who: any): number?
+    if typeof(Who) == "Instance" and Who:IsA("Player") then
+        return (Who :: Player).UserId
+    end
+
+    if type(Who) == "table" and type(Who.UserId) == "number" then
+        return Who.UserId
+    end
+
+    return nil
+end
+
+-- Who holds what, to the players each object's scene admits. Zero means free.
+const function AnnounceLocks(Changed: {Object})
+    const ByScene: {[Types.SceneIdentifier]: {Ids: {RuntimeId}, Holders: {number}}} = {}
+
+    for _, Obj in Changed do
+        local Batch = ByScene[Obj.Scene]
+        if not Batch then
+            Batch = {Ids = {}, Holders = {}}
+            ByScene[Obj.Scene] = Batch
+        end
+
+        const Held = Locks[Obj.RuntimeId]
+        table.insert(Batch.Ids, Obj.RuntimeId)
+        table.insert(Batch.Holders, if Held then Held.UserId else 0)
+    end
+
+    for Scene, Batch in ByScene do
+        Audience.Fire(Network.LocksChanged, Scene, "Admitted", Batch.Ids, Batch.Holders)
+    end
+end
+
+-- Takes every object named for Who, or none of them: an object someone else
+-- holds refuses the lot, so a multi-object drag never ends up half held.
+-- Taking one Who already holds is not a refusal.
+function Objects:Lock(List: {Object}, Who: any): boolean
+    const UserId = UserIdOf(Who)
+    if not UserId then
+        return false
+    end
+
+    for _, Obj in List do
+        const Held = Locks[Obj.RuntimeId]
+        if Obj.Destroyed or (Held and Held.UserId ~= UserId) then
+            return false
+        end
+    end
+
+    for _, Obj in List do
+        Locks[Obj.RuntimeId] = {UserId = UserId, Holder = Who}
+    end
+
+    AnnounceLocks(List)
+    return true
+end
+
+-- Releases what Who holds among the objects named. With no Who it is the
+-- server releasing anyone's. Answers false if any named object is held by
+-- someone else, which stays theirs; the rest are released regardless.
+function Objects:Unlock(List: {Object}, Who: any?): boolean
+    const UserId = if Who ~= nil then UserIdOf(Who) else nil
+    const Released = {}
+    local All = true
+
+    for _, Obj in List do
+        const Held = Locks[Obj.RuntimeId]
+        if not Held then
+            continue
+        end
+
+        if Who ~= nil and Held.UserId ~= UserId then
+            All = false
+            continue
+        end
+
+        Locks[Obj.RuntimeId] = nil
+        table.insert(Released, Obj)
+    end
+
+    if #Released > 0 then
+        AnnounceLocks(Released)
+    end
+
+    return All
+end
+
+-- The user id holding an object, or nil when it is free.
+function Objects:GetLock(Obj: Object): number?
+    const Held = Locks[Obj.RuntimeId]
+    return if Held then Held.UserId else nil
+end
+
+-- Whether someone other than Plr holds the object, which is what every edit
+-- path asks before it lets one through.
+function Objects.LockedAgainst(Obj: Object, Plr: any): boolean
+    const Held = Locks[Obj.RuntimeId]
+    return Held ~= nil and Held.UserId ~= UserIdOf(Plr)
+end
+
+-- The locks among some objects, for a player a scene is being revealed to:
+-- they are owed who holds what as well as the objects themselves.
+function Objects.SendLocks(Plr: Player, List: {Object})
+    const Ids = {}
+    const Holders = {}
+
+    for _, Obj in List do
+        const Held = Locks[Obj.RuntimeId]
+        if Held and not Obj.Destroyed then
+            table.insert(Ids, Obj.RuntimeId)
+            table.insert(Holders, Held.UserId)
+        end
+    end
+
+    if #Ids > 0 then
+        Network.LocksChanged:Fire(Plr, Ids, Holders)
+    end
+end
+
+-- Resolves what a client named, refusing the whole request over one it may not
+-- have: an object that is gone, in a scene it was never admitted to, or one it
+-- may not edit. A lock on something you cannot change would only be a way to
+-- stop others changing it.
+const function Claimable(Plr: Player, Ids: {RuntimeId}): {Object}?
+    if #Ids > MAX_LOCKS or not Permissions:Consume(Plr, #Ids) then
+        return nil
+    end
+
+    const List = {}
+    for _, Identifier in Ids do
+        const Obj = Workspace[Identifier]
+        if not Obj or Obj.Destroyed or not Audience.Sees(Plr, Obj.Scene) or not Permissions:Can(Plr, "Edit", Obj) then
+            return nil
+        end
+
+        table.insert(List, Obj)
+    end
+
+    return List
+end
+
+Network.Lock.OnInvoke = function(Plr: Player, Ids: {RuntimeId}): boolean
+    const List = Claimable(Plr, Ids)
+    return List ~= nil and Objects:Lock(List, Plr)
+end
+
+-- Releasing needs no rights: a player who lost them since should still be able
+-- to let go. Objects that are gone are simply skipped.
+Network.Unlock.OnInvoke = function(Plr: Player, Ids: {RuntimeId}): boolean
+    if #Ids > MAX_LOCKS or not Permissions:Consume(Plr) then
+        return false
+    end
+
+    const List = {}
+    for _, Identifier in Ids do
+        const Obj = Workspace[Identifier]
+        if Obj and not Obj.Destroyed then
+            table.insert(List, Obj)
+        end
+    end
+
+    return Objects:Unlock(List, Plr)
+end
+
+-- A lock goes with the connection it was taken on.
+Players.PlayerRemoving:Connect(function(Plr: Player)
+    const Released = {}
+    for Identifier, Held in Locks do
+        if Held.Holder == Plr then
+            const Obj = Workspace[Identifier]
+            if Obj then
+                table.insert(Released, Obj)
+            end
+        end
+    end
+
+    if #Released > 0 then
+        Objects:Unlock(Released)
+    end
+end)
+
 Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer): boolean
     -- Budget first. Check used to run after the workspace lookup, so a client
     -- spamming runtime ids that do not exist returned early and never spent any
@@ -782,6 +984,10 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, Prop
     -- Holding rights over such a scene is inert rather than clever, and this is
     -- what makes it so.
     if not Audience.Sees(Plr, Obj.Scene) then
+        return false
+    end
+
+    if Objects.LockedAgainst(Obj, Plr) then
         return false
     end
 
@@ -815,6 +1021,10 @@ Network.Destroy.OnInvoke = function(Plr: Player, Identifier: RuntimeId): boolean
 
     const Obj = Workspace[Identifier]
     if not Obj or Obj.Destroyed or not Audience.Sees(Plr, Obj.Scene) then
+        return false
+    end
+
+    if Objects.LockedAgainst(Obj, Plr) then
         return false
     end
 

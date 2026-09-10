@@ -4,6 +4,10 @@ return {
     ObjectRegistered = Networking:Get("Objects.ObjectRegistered"),
     RegistriesReplayed = Networking:Get("Objects.RegistriesReplayed"),
     ObjectUnregistered = Networking:Get("Objects.ObjectUnregistered"),
+
+    Lock = Networking:Get("Objects.Lock"),
+    Unlock = Networking:Get("Objects.Unlock"),
+    LocksChanged = Networking:Get("Objects.LocksChanged"),
     ObjectsReplayed = Networking:Get("Objects.ObjectsReplayed"),
 
     ObjectAdded = Networking:Get("Objects.ObjectAdded"),

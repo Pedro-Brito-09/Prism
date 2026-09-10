@@ -135,6 +135,10 @@ end
 -- scenes would otherwise keep drawing.
 Network.SceneUnregistered:Connect(function(Identifier: SceneIdentifier)
     Registered[Identifier] = nil
+
+    -- Who holds what is told to the admitted, and this player no longer is:
+    -- whatever they still have of the scene, they stop being told its locks.
+    Objects.ForgetLocks(Identifier)
 end)
 
 Network.SceneRegistered:Connect(Register)

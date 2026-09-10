@@ -65,6 +65,85 @@ function Objects:OnRemoved(Callback: (Obj: Object) -> ()): () -> ()
     return Listeners.Watch(Removed, Callback, "objects going")
 end
 
+--=============================================================================
+-- Locks
+--=============================================================================
+
+-- Who holds each locked object, by runtime id, as the server last said. Told
+-- only for scenes this player is admitted to.
+const Locks: {[RuntimeId]: number} = {}
+const LockChanged: {(RuntimeId: RuntimeId, UserId: number?) -> ()} = {}
+
+const function Named(Refs: Object | {Object}): {Object}
+    return if (Refs :: any).RuntimeId ~= nil then {Refs :: Object} else Refs :: {Object}
+end
+
+-- The ids worth asking the server about. An object in a scene this client owns
+-- is nobody else's to touch, so there is nothing to lock.
+const function Remote(List: {Object}): {RuntimeId}
+    const Ids = {}
+    for _, Obj in List do
+        if not Obj.Local and not Obj.Destroyed then
+            table.insert(Ids, Obj.RuntimeId)
+        end
+    end
+
+    return Ids
+end
+
+-- Takes an object, or several at once, all or none. Yields for the server's
+-- answer: while this player holds them, nobody else may edit or destroy them.
+function Objects:Lock(Refs: Object | {Object}): boolean
+    const Ids = Remote(Named(Refs))
+    if #Ids == 0 then
+        return true
+    end
+
+    const Ok, Granted = pcall(function()
+        return Network.Lock:Invoke(Ids)
+    end)
+
+    return Ok and Granted == true
+end
+
+-- Lets go of what this player holds among the objects named. False if any of
+-- them is held by someone else.
+function Objects:Unlock(Refs: Object | {Object}): boolean
+    const Ids = Remote(Named(Refs))
+    if #Ids == 0 then
+        return true
+    end
+
+    const Ok, Released = pcall(function()
+        return Network.Unlock:Invoke(Ids)
+    end)
+
+    return Ok and Released == true
+end
+
+-- The user id holding an object, or nil when it is free -- or when this player
+-- is not admitted to its scene, and so is not told.
+function Objects:GetLock(Ref: Object | RuntimeId): number?
+    return Locks[if type(Ref) == "number" then Ref else Ref.RuntimeId]
+end
+
+-- Fired with a runtime id and the user id now holding it, nil once free.
+function Objects:OnLockChanged(Callback: (RuntimeId: RuntimeId, UserId: number?) -> ()): () -> ()
+    return Listeners.Watch(LockChanged, Callback, "locks")
+end
+
+-- A scene this player is no longer admitted to stops telling them its locks,
+-- so what they knew of them is dropped rather than left to go stale.
+function Objects.ForgetLocks(Scene: Types.SceneIdentifier)
+    for Identifier in table.clone(Locks) do
+        const Obj = Workspace[Identifier]
+        if not Obj or Obj.Scene == Scene then
+            Locks[Identifier] = nil
+            Listeners.Notify(LockChanged, Identifier, nil)
+        end
+    end
+end
+
 const function Index(Obj: Object)
     local Held = ByInstance[Obj.InstanceId]
     if not Held then
@@ -240,6 +319,9 @@ const function Teardown(Obj: Object)
 
     ByRuntimeId[Obj.RuntimeId] = nil
     Unindex(Obj)
+
+    -- Its removal is the only news a listener needs; no lock change follows.
+    Locks[Obj.RuntimeId] = nil
 
     -- Out of the scene copy before out of the workspace, so a copy walking its
     -- own objects while they are torn down never sees one that is already gone
@@ -696,6 +778,17 @@ end)
 -- nothing new can be made of it.
 Network.ObjectUnregistered:Connect(function(Identifier: ObjectIdentifier)
     Registered[Identifier] = nil
+end)
+
+-- Kept by runtime id rather than on the object, so a lock that arrives ahead of
+-- its object -- the reveal sends locks before it streams objects -- is still
+-- there when the object lands.
+Network.LocksChanged:Connect(function(Ids: {RuntimeId}, Holders: {number})
+    for Index, Identifier in Ids do
+        const Holder = Holders[Index]
+        Locks[Identifier] = if Holder ~= 0 then Holder else nil
+        Listeners.Notify(LockChanged, Identifier, Locks[Identifier])
+    end
 end)
 
 Network.ObjectAdded:Connect(AddObject)

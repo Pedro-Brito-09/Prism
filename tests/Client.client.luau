@@ -348,6 +348,50 @@ T:Test("watching copies hands back a disconnect", function()
 end)
 
 --=============================================================================
+-- Locks
+--=============================================================================
+
+T:Describe("Locks")
+
+T:Test("a lock is taken, announced and released", function()
+    if not Editable or not Builder then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    const Me = game:GetService("Players").LocalPlayer.UserId
+    local HeardHeld = false
+    local HeardFree = false
+
+    const Stop = Objects:OnLockChanged(function(RuntimeId, UserId)
+        if RuntimeId ~= Editable.RuntimeId then
+            return
+        end
+
+        if UserId == Me then
+            HeardHeld = true
+        elseif UserId == nil then
+            HeardFree = true
+        end
+    end)
+
+    -- The builder's budget is five a second, and earlier tests spend it.
+    task.wait(1.1)
+
+    T:Ok(Objects:Lock(Editable), "locked")
+    T:Eventually(function()
+        return Objects:GetLock(Editable) == Me and HeardHeld
+    end, 3, "announced back as this player's")
+
+    T:Ok(Objects:Unlock(Editable), "released")
+    T:Eventually(function()
+        return Objects:GetLock(Editable) == nil and HeardFree
+    end, 3, "announced free")
+
+    Stop()
+end)
+
+--=============================================================================
 -- Unregistering
 --=============================================================================
 
