@@ -270,6 +270,42 @@ Admission decides who gets an object's data, not who sees its part. A copy
 loaded with `Load` is built on the server, and Roblox replicates its parts to
 everybody.
 
+### Opening instead of loading
+
+`Load` builds every object's part on the server, so the parts replicate to
+every player whether or not they're admitted. `Open` builds none. The server
+still owns the copy and its data, but it clones no templates, and each admitted
+client draws the copy itself from the template that came with the registry.
+
+```lua
+local Draft = Prism.Scenes.new({Name = "Draft", Admitted = {editorUserId}})
+local copy = Draft:Open()
+copy:Create(Crate, {[Tint] = Color3.new(1, 0, 0)})
+```
+
+Roblox has no per-player workspace, so this is the only way to keep a scene out
+of sight. An opened copy and its objects go only to the players its scene
+admits, whatever each type's `Replicate` says, because a player who isn't
+admitted has no part to attach the data to. Players who aren't admitted aren't
+told an opened copy exists.
+
+Each client draws into a folder of its own, built where the server builds one
+for a copy it loads. Reparent the folder to put the copy somewhere else:
+
+```lua
+Prism.Scenes:OnCopyAdded(function(copyId, sceneId, folder)
+    if folder then
+        folder.Parent = player.PlayerGui   -- a scene made of interfaces
+    end
+end)
+```
+
+`folder` is nil for a loaded copy, whose parts belong to the server.
+`Scenes:GetFolder(copyId)` answers the same question later, and
+`OnCopyRemoved` fires when a copy goes. Objects a client drew carry
+`Drawn = true`. Their templates have to replicate, so keep them in
+ReplicatedStorage.
+
 ### Scenes the client owns
 
 A client can own a scene outright — a prefab preview, a sandbox, a room built

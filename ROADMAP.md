@@ -231,7 +231,7 @@ it while that one is unmerged, and every branch is on the remote.
        object goes whole or not at all and the client never builds a partial
        one. Anything but the two strings is kept to the admitted.
 
-5. [ ] **`Open` and client rendering** — the copy's mode has to ride on
+5. [x] **`Open` and client rendering** — `feat/open`. The copy's mode has to ride on
        `Scenes.InstanceAdded`, or a client cannot tell "the server built no
        instance" from "the reference did not survive the trip" and will draw a
        second part for every object on a slow join. Wants the client side "a

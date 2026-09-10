@@ -39,7 +39,15 @@ export type SceneInstance = {
     -- workspace.__prism.__scene_N when it was told nothing. Parent it into a
     -- Model of your own to pivot a whole copy, into PlayerGui for a scene made
     -- of interfaces, anywhere a Folder can go.
-    Folder: Folder,
+    --
+    -- Nil for a copy the server opened: it builds no parts, so there is nothing
+    -- for a folder of its to hold. Each client drawing the copy keeps its own.
+    Folder: Folder?,
+
+    -- True for a copy the server opened rather than loaded. The server owns
+    -- its data exactly as it owns a loaded copy's, but clones no templates;
+    -- every admitted client draws the copy itself.
+    Opened: boolean,
 
     Objects: {[ObjectTypes.RuntimeId]: ObjectTypes.Object},
 
@@ -112,6 +120,12 @@ export type ServerScene = Scene & {
     -- whoever is connected: dropping an entry when its player left would leave
     -- a private scene with an empty list, and an empty list means public.
     Admitted: {[number]: true},
+
+    -- A live copy the server holds the data of and builds no parts for. Every
+    -- admitted client draws it, and nobody else is told it exists: Roblox has
+    -- no per-player workspace, so a part in the world is a part for everybody,
+    -- and this is the only way to keep a scene out of sight.
+    Open: (self: ServerScene) -> SceneInstance?,
 
     Admit: (self: ServerScene, Who: Player | number) -> (),
     Evict: (self: ServerScene, Who: Player | number) -> (),

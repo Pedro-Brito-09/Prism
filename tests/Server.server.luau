@@ -1384,6 +1384,29 @@ T:Test("a copy goes wherever it is told, and takes its objects with it", functio
     Elsewhere:Destroy()
 end)
 
+T:Test("an opened copy holds its objects and builds none of them", function()
+    const Scene = Scenes.new({Name = "TestOpened"})
+    const Copy = Scene:Open()
+
+    T:Ok(Copy and Copy.Opened, "opened")
+    T:Eq(Copy.Folder, nil, "with no folder on the server")
+
+    const Obj = Copy:Create(CrateId, {[TitleId] = "Opened"})
+    T:Eq(Obj.Instance, nil, "and no part: each admitted client draws its own")
+    T:Eq(Obj:Get(TitleId), "Opened", "while the data is the server's as ever")
+    T:Eq(Objects.ReachOf(Obj), "Admitted", "and kept for the admitted, whatever its type says")
+
+    Copy:Commit()
+    Copy:Unload()
+
+    const Loaded = Scene:Load()
+    T:Eq(#Loaded:GetObjects(), 1, "the same pack loads either way")
+    T:Ok(Loaded:GetObjects()[1].Instance, "and loading builds the part")
+    T:Eq(Objects.ReachOf(Loaded:GetObjects()[1]), "Everyone", "and follows its type again")
+
+    Scene:Destroy()
+end)
+
 -- User ids 1 and 2 stand in for people who are not here. Nobody running this
 -- suite is either of them.
 T:Test("a scene that has admitted nobody is public", function()
@@ -2076,9 +2099,16 @@ const AdmittedCopy = AdmittedScene:Load()
 AdmittedCopy:Create(BareId, {[TitleId] = "FixtureAdmittedScenery"})
 AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmittedPrivate"})
 
+-- A copy the server opened rather than loaded, holding an object whose template
+-- replicates. The server builds no part for it; the test player, admitted as
+-- they arrive, draws one.
+const OpenedScene = Scenes.new({Name = "FixtureOpened", Admitted = {1}})
+OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
+
 const function AssignBuilder(Plr: Player)
     Permissions:Assign(Plr, "TestBuilder")
     AdmittedScene:Admit(Plr)
+    OpenedScene:Admit(Plr)
 end
 
 for _, Plr in Players:GetPlayers() do

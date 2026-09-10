@@ -51,6 +51,62 @@ const Registered: {[SceneIdentifier]: SceneRegistry} = {}
 -- an object arriving needs it before this module could hand it over.
 const Known: {[SceneInstanceId]: SceneInstanceId} = {}
 
+-- The folder this client draws each opened copy into. A loaded copy has none:
+-- its parts are the server's, in the server's folder.
+const Folders: {[SceneInstanceId]: Folder} = {}
+
+-- Plain listener lists, the way Properties and Selection keep theirs.
+const CopyAdded: {(Copy: SceneInstanceId, Scene: SceneIdentifier, Folder: Folder?) -> ()} = {}
+const CopyRemoved: {(Copy: SceneInstanceId, Scene: SceneIdentifier) -> ()} = {}
+
+const function Watch(List: {any}, Callback: any, What: string): () -> ()
+    if typeof(Callback) ~= "function" then
+        Logger:Error(`Invalid callback. Tried watching {What} with a {typeof(Callback)}.`)
+    end
+
+    table.insert(List, Callback)
+
+    local Disconnected = false
+    return function()
+        if Disconnected then
+            return
+        end
+
+        Disconnected = true
+
+        const Position = table.find(List, Callback)
+        if Position then
+            table.remove(List, Position)
+        end
+    end
+end
+
+const function Notify(List: {any}, ...: any)
+    for _, Callback in table.clone(List) do
+        task.spawn(Callback, ...)
+    end
+end
+
+-- A copy of one of the server's scenes appearing here. Folder is where this
+-- client draws the copy when the server opened it, and nil when the server
+-- loaded it and the parts are its own. Reparent the folder to put the copy
+-- somewhere else -- into PlayerGui, for a scene made of interfaces -- and
+-- everything drawn in it goes along. Copies already here when this connects
+-- are not replayed to it.
+function Scenes:OnCopyAdded(Callback: (Copy: SceneInstanceId, Scene: SceneIdentifier, Folder: Folder?) -> ()): () -> ()
+    return Watch(CopyAdded, Callback, "copies appearing")
+end
+
+function Scenes:OnCopyRemoved(Callback: (Copy: SceneInstanceId, Scene: SceneIdentifier) -> ()): () -> ()
+    return Watch(CopyRemoved, Callback, "copies going")
+end
+
+-- The folder this client draws an opened copy into, or nil for a copy the
+-- server loaded.
+function Scenes:GetFolder(Copy: SceneInstanceId): Folder?
+    return Folders[Copy]
+end
+
 function Scenes:GetRegistered(): {[SceneIdentifier]: SceneRegistry}
     return Registered
 end
@@ -113,25 +169,50 @@ Network.RegistriesReplayed:Connect(function(Payloads: {SceneRegistry})
     end
 end)
 
-const function AddInstance(Instance_: SceneInstanceId, Scene: SceneIdentifier)
+const function AddInstance(Instance_: SceneInstanceId, Scene: SceneIdentifier, Opened: boolean)
     Known[Instance_] = Instance_
-    Objects.TrackInstance(Instance_, Scene)
+
+    -- An opened copy has no parts on the server, so this client draws it, into
+    -- a folder of its own built where the server builds one for a copy it
+    -- loads. Built before the copy is filed, because its objects are drawn
+    -- into it the moment they arrive.
+    local Folder = Folders[Instance_]
+    if Opened and not Folder then
+        Folder = World.Copy(Scene, Instance_, nil)
+        Folders[Instance_] = Folder
+    end
+
+    Objects.TrackInstance(Instance_, Scene, if Opened then Folder else nil)
+    Notify(CopyAdded, Instance_, Scene, if Opened then Folder else nil)
 end
 
 Network.InstanceAdded:Connect(AddInstance)
 
-Network.InstancesReplayed:Connect(function(Instances: {SceneInstanceId}, Scenes_: {SceneIdentifier})
+Network.InstancesReplayed:Connect(function(Instances: {SceneInstanceId}, Scenes_: {SceneIdentifier}, Opened: {boolean})
     for Index, Instance_ in Instances do
-        AddInstance(Instance_, Scenes_[Index])
+        AddInstance(Instance_, Scenes_[Index], Opened[Index] == true)
     end
 end)
 
 -- One packet for a whole copy going away. Its objects are already gone on the
 -- server and no ObjectRemoved is coming for any of them, so the client tears
--- down what it holds itself.
+-- down what it holds itself -- and, for a copy it was drawing, the folder it
+-- drew into.
 Network.InstanceRemoved:Connect(function(Instance_: SceneInstanceId)
+    const Scene = Objects:GetInstanceScene(Instance_)
+
     Known[Instance_] = nil
     Objects.DropInstance(Instance_)
+
+    const Folder = Folders[Instance_]
+    if Folder then
+        Folders[Instance_] = nil
+        World.DropCopy(Scene or 0, Folder)
+    end
+
+    if Scene then
+        Notify(CopyRemoved, Instance_, Scene)
+    end
 end)
 
 --=============================================================================
@@ -212,6 +293,7 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
 
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
+    Instance_.Opened = false
 
     -- The same tree the server's copies default into, built locally. A local
     -- scene's ids count down from the top of the space while the server's count

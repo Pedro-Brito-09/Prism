@@ -98,6 +98,11 @@ export type Object = {
     -- edit it just made can still be refused.
     Local: boolean?,
 
+    -- Client side only. True when this client built the object's instance
+    -- itself because the server opened the copy holding it rather than loading
+    -- it. The instance is this client's, then, and goes when the object does.
+    Drawn: boolean?,
+
     Properties: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
 
     -- Property name -> id, so a lookup by name costs what a lookup by id does.

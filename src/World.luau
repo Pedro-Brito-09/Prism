@@ -33,6 +33,13 @@ World.RootName = ROOT_NAME
 
 local Root: Instance? = nil
 
+-- Scene folders this side built, by scene. Kept by reference rather than found
+-- by name: a client builds folders of its own for the copies it draws, and the
+-- server may have replicated one by the same name for its own copies of that
+-- scene. Found by name, a client could file its drawing into the server's
+-- folder -- and then, emptying it, destroy the server's folder on its own side.
+const Built: {[number]: Instance} = {}
+
 const function SceneName(Scene: number): string
     return `__scene_{Scene}`
 end
@@ -78,29 +85,59 @@ end
 
 World.GetRoot = GetRoot
 
+-- Built as the server starts rather than on first use, so it is there to
+-- replicate before any client goes looking. A server whose copies are all
+-- opened rather than loaded never parents anything here itself, and its
+-- clients -- who draw those copies -- would otherwise wait for a root that
+-- nothing was ever going to make.
+if IS_SERVER then
+    GetRoot()
+end
+
 -- Where a copy goes when its loader named no parent of its own. Built on the
 -- way down, and shared by every copy of that scene that also named none.
 const function DefaultParent(Scene: number): Instance
-    const RootFolder = GetRoot()
-
-    const Existing = RootFolder:FindFirstChild(SceneName(Scene))
-    if Existing then
+    const Existing = Built[Scene]
+    if Existing and Existing.Parent then
         return Existing
     end
 
     const Folder = Instance.new("Folder")
     Folder.Name = SceneName(Scene)
-    Folder.Parent = RootFolder
+    Folder.Parent = GetRoot()
+    Built[Scene] = Folder
     return Folder
 end
 
 -- The folder a copy's objects are parented into. Named for the copy rather than
 -- the scene, because a scene loaded five times is five copies and they cannot
 -- share one -- the same reason objects are filed by copy everywhere else.
+--
+-- Never yields. A client whose root has not replicated yet gets its folder back
+-- unparented and parented once the root arrives: the caller is often a network
+-- handler, and a handler that waited here would let the next packet -- the
+-- copy's objects -- be handled before the copy it belongs to was set up. What
+-- is drawn into the folder meanwhile appears with it. A folder the caller has
+-- placed somewhere of its own by then is left where it was put.
 function World.Copy(Scene: number, Copy: number, Parent: Instance?): Folder
     const Folder = Instance.new("Folder")
     Folder.Name = CopyName(Copy)
-    Folder.Parent = Parent or DefaultParent(Scene)
+
+    if Parent then
+        Folder.Parent = Parent
+    elseif IS_SERVER or (Root and Root.Parent) or workspace:FindFirstChild(ROOT_NAME) then
+        Folder.Parent = DefaultParent(Scene)
+    else
+        task.spawn(function()
+            const Resolved = DefaultParent(Scene)
+            if Folder.Parent == nil then
+                pcall(function()
+                    Folder.Parent = Resolved
+                end)
+            end
+        end)
+    end
+
     return Folder
 end
 
@@ -112,14 +149,10 @@ function World.DropCopy(Scene: number, Folder: Instance?)
         Folder:Destroy()
     end
 
-    const RootFolder = Root
-    if not RootFolder or not RootFolder.Parent then
-        return
-    end
-
-    const SceneFolder = RootFolder:FindFirstChild(SceneName(Scene))
+    const SceneFolder = Built[Scene]
     if SceneFolder and #SceneFolder:GetChildren() == 0 then
         SceneFolder:Destroy()
+        Built[Scene] = nil
     end
 end
 

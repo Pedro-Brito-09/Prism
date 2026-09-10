@@ -296,6 +296,54 @@ T:Test("eviction takes the name and what is kept for the admitted", function()
 end)
 
 --=============================================================================
+-- Opened copies
+--=============================================================================
+
+T:Describe("Opened copies")
+
+T:Test("an opened copy is drawn here, from the replicated template", function()
+    if not ShownId or not TitleId then
+        T:Ok(false, "no shown registry")
+        return
+    end
+
+    const Obj = T:Eventually(function()
+        return FindLiveObject(ShownId, TitleId, "FixtureOpenedObject")
+    end, 5, "the object arrived")
+
+    if not Obj then
+        return
+    end
+
+    T:Ok(Obj.Drawn, "marked as drawn by this client")
+    T:Ok(Obj.Instance, "with a part built here")
+
+    if Obj.Instance then
+        T:Eq(Obj.Instance.Parent, Scenes:GetFolder(Obj.InstanceId), "in the folder this client keeps for the copy")
+        T:Eq(Obj.Instance:GetAttribute(FIXTURE_PROPERTY), "FixtureOpenedObject", "driven by the links that came with the registry")
+        T:Eq(Objects:FromInstance(Obj.Instance), Obj, "and mapped back from the part")
+    end
+end)
+
+T:Test("a loaded copy is the server's to draw", function()
+    if not Editable then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    T:Eq(Scenes:GetFolder(Editable.InstanceId), nil, "so this client keeps no folder for it")
+    T:Ok(not Editable.Drawn, "and drew nothing")
+end)
+
+T:Test("watching copies hands back a disconnect", function()
+    const Disconnect = Scenes:OnCopyAdded(function() end)
+    T:Ok(type(Disconnect) == "function", "a function")
+    Disconnect()
+    Disconnect()
+    T:Ok(true, "safe to call twice")
+end)
+
+--=============================================================================
 -- Permissions
 --=============================================================================
 
