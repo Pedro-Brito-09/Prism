@@ -793,6 +793,70 @@ T:Test("get and set work by id and by name", function()
     Obj:Destroy()
 end)
 
+T:Test("OnChange watches by id and by name", function()
+    const Obj = Objects.new(CrateId)
+
+    local ById: any = nil
+    local ByName: any = nil
+
+    const StopId = Obj:OnChange(HealthId, function(Value)
+        ById = Value
+    end)
+
+    const StopName = Obj:OnChange("TestTitle", function(Value)
+        ByName = Value
+    end)
+
+    Obj:Set(HealthId, 42)
+    Obj:Set("TestTitle", "Watched")
+    task.wait()
+
+    T:Eq(ById, 42, "id listener fired")
+    T:Eq(ByName, "Watched", "name listener fired")
+
+    StopId()
+    StopName()
+
+    Obj:Set(HealthId, 7)
+    task.wait()
+    T:Eq(ById, 42, "disconnected listener stays quiet")
+
+    Obj:Destroy()
+end)
+
+T:Test("watching what the object does not carry still returns a disconnect", function()
+    const Obj = Objects.new(CrateId)
+
+    -- Neither of these may throw, here or when released: a caller that stores
+    -- the disconnect and calls it later cannot be asked to check first.
+    const Unknown = Obj:OnChange("NotAProperty", function() end)
+    T:Eq(typeof(Unknown), "function", "unknown name answers a disconnect")
+    Unknown()
+
+    Obj:Destroy()
+
+    const Destroyed = Obj:OnChange(TitleId, function() end)
+    T:Eq(typeof(Destroyed), "function", "destroyed object answers a disconnect")
+    Destroyed()
+end)
+
+T:Test("GetProperty resolves the same reference Get and Set take", function()
+    const Obj = Objects.new(CrateId)
+
+    T:Eq(Obj:GetProperty(TitleId), Obj.Properties[TitleId], "by id")
+    T:Eq(Obj:GetProperty("TestTitle"), Obj.Properties[TitleId], "by name")
+    T:Eq(Obj.Names["TestTitle"], TitleId, "name map points at the id")
+
+    T:Eq(Obj:GetProperty(99999), nil, "unknown id")
+    T:Eq(Obj:GetProperty("NotAProperty"), nil, "unknown name")
+
+    -- What Get and Set do not expose.
+    T:Eq(Obj:GetProperty("TestHealth").Constraints.MaxValue, 100, "reaches the constraints")
+
+    Obj:Destroy()
+    T:Eq(Obj:GetProperty(TitleId), nil, "destroyed answers nil")
+end)
+
 T:Test("links mirror properties onto the instance", function()
     const Obj = Objects.new(CrateId)
     T:Ok(Obj.Links, "links built")
@@ -1073,7 +1137,7 @@ Players.PlayerAdded:Connect(AssignBuilder)
 -- A client writes this marker while its Permissions.OnChange listener is
 -- attached. The server briefly changes the role, then restores the builder so
 -- the remaining accepted-edit and destroy tests can proceed deterministically.
-EditableFixture.Properties[TitleId]:OnChange(function(Value)
+EditableFixture:OnChange(TitleId, function(Value)
     if Value ~= "PermissionPulse" then
         return
     end

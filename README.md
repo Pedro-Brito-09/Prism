@@ -54,13 +54,47 @@ A link mirrors a property onto the instance. `Type = "Property"` writes a real
 instance property (the types must match), `Type = "Attribute"` writes an
 attribute. `Descendant` targets a child instead of the root.
 
+`Set`, `Get`, `OnChange` and `GetProperty` all take either the property id or
+its name, and a name costs the same as an id to resolve.
+
 Watch a single property without paying for a signal on every property:
 
 ```lua
-local disconnect = enemy.Properties[Health]:OnChange(function(value)
+local disconnect = enemy:OnChange(Health, function(value)
     print("health is now", value)
 end)
+
+disconnect()
 ```
+
+Watching a property the object does not carry warns and hands back a disconnect
+that does nothing, so the caller never has to guard the release.
+
+`GetProperty` returns the property instance itself, for what `Get` and `Set` do
+not cover:
+
+```lua
+enemy:GetProperty("Health").Constraints.MaxValue
+```
+
+## Selection
+
+Client side, and purely local: the server never hears about it. Entries are
+pruned on read, so an object destroyed by someone else drops out on its own.
+
+```lua
+Prism.Selection:Set({objectA, objectB})
+Prism.Selection:Add(runtimeId)
+Prism.Selection:Contains(objectA)
+
+local disconnect = Prism.Selection:OnChange(function(selected)
+    panel:Render(selected)
+end)
+```
+
+`Get` returns the selected objects in the order they were added, which is the
+order an editor reads as "the active one is last". `Query(fn)` filters that
+list.
 
 ## Permissions
 
