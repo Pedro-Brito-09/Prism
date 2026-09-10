@@ -30,6 +30,7 @@ const World = require("../World")
 const Network = require("./Network")
 const Handles = require("../Handles")
 const Logger = require("../Logger")
+const Listeners = require("../Listeners")
 const Types = require("./Types")
 
 export type SceneIdentifier = Types.SceneIdentifier
@@ -59,33 +60,8 @@ const Folders: {[SceneInstanceId]: Folder} = {}
 const CopyAdded: {(Copy: SceneInstanceId, Scene: SceneIdentifier, Folder: Folder?) -> ()} = {}
 const CopyRemoved: {(Copy: SceneInstanceId, Scene: SceneIdentifier) -> ()} = {}
 
-const function Watch(List: {any}, Callback: any, What: string): () -> ()
-    if typeof(Callback) ~= "function" then
-        Logger:Error(`Invalid callback. Tried watching {What} with a {typeof(Callback)}.`)
-    end
-
-    table.insert(List, Callback)
-
-    local Disconnected = false
-    return function()
-        if Disconnected then
-            return
-        end
-
-        Disconnected = true
-
-        const Position = table.find(List, Callback)
-        if Position then
-            table.remove(List, Position)
-        end
-    end
-end
-
-const function Notify(List: {any}, ...: any)
-    for _, Callback in table.clone(List) do
-        task.spawn(Callback, ...)
-    end
-end
+const Watch = Listeners.Watch
+const Notify = Listeners.Notify
 
 -- A copy of one of the server's scenes appearing here. Folder is where this
 -- client draws the copy when the server opened it, and nil when the server

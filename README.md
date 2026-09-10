@@ -72,6 +72,18 @@ counts as `"Admitted"`, with a warning.
 It's refused while any object of the type is live, and it releases the
 properties the type was holding. Like property ids, the id is never reused.
 
+On the client, `Objects:OnAdded` and `Objects:OnRemoved` fire for every object
+that appears or goes: replicated ones, ones in scenes the client owns, and ones
+it draws for an opened copy. An added object is already filed, so `Objects:Get`
+finds it. A removed one is already torn down and reports `Destroyed`, but still
+carries its ids. Both return a disconnect function.
+
+```lua
+local stop = Prism.Objects:OnAdded(function(object)
+    outliner:Add(object)
+end)
+```
+
 Every object carries two ids: `RuntimeId`, which names this live copy of it, and
 `PersistentId`, which is saved with it and outlives a reload. See Scenes.
 

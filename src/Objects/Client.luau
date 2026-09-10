@@ -8,6 +8,7 @@ const Network = require("./Network")
 const Shared = require("./Shared")
 const Handles = require("../Handles")
 const Logger = require("../Logger")
+const Listeners = require("../Listeners")
 const Types = require("./Types")
 
 export type ObjectIdentifier = Types.ObjectIdentifier
@@ -44,6 +45,25 @@ const InstanceScene: {[Types.SceneInstanceId]: Types.SceneIdentifier} = {}
 -- The folder this client draws each opened copy into. A copy with no entry
 -- here is one the server loaded, whose parts are the server's.
 const DrawInto: {[Types.SceneInstanceId]: Folder} = {}
+
+-- Every object appearing here and going, whichever way it came: replicated
+-- from the server, built in a scene this client owns, or drawn for a copy the
+-- server opened. UI used to poll GetWorkspace to notice any of it.
+const Added: {(Obj: Object) -> ()} = {}
+const Removed: {(Obj: Object) -> ()} = {}
+
+-- Fired once the object is filed everywhere it will be, so a listener can look
+-- it up by runtime id or through its copy straight away.
+function Objects:OnAdded(Callback: (Obj: Object) -> ()): () -> ()
+    return Listeners.Watch(Added, Callback, "objects appearing")
+end
+
+-- Fired after teardown, so the object handed over already reports Destroyed
+-- and is gone from the workspace. It still carries its ids, which is what a
+-- listener needs to drop whatever it kept for it.
+function Objects:OnRemoved(Callback: (Obj: Object) -> ()): () -> ()
+    return Listeners.Watch(Removed, Callback, "objects going")
+end
 
 const function Index(Obj: Object)
     local Held = ByInstance[Obj.InstanceId]
@@ -243,6 +263,8 @@ const function Teardown(Obj: Object)
     Obj.GetProperty = Shared.Destroyed.GetProperty
     Obj.OnChange = Shared.Destroyed.OnChange
     Obj.Destroy = Shared.Destroyed.Destroy
+
+    Listeners.Notify(Removed, Obj)
 end
 
 --=============================================================================
@@ -414,6 +436,7 @@ const function Construct(
     Live.Objects[RuntimeId] = Obj
     Live.ByLocal[Local] = Obj
 
+    Listeners.Notify(Added, Obj)
     return Obj :: any
 end
 
@@ -646,6 +669,7 @@ const function AddObject(
     Obj.Destroy = __destroy
 
     File(Obj, Registry.Properties)
+    Listeners.Notify(Added, Obj)
 end
 
 -- GetTagged first: parts that replicated before this module loaded never fire

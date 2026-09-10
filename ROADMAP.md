@@ -10,9 +10,6 @@ reads right, never that it was run with a player in it.
 
 ## Queued
 
-- [ ] **Object added / removed signals on the client.** `AddObject` and
-      `Teardown` are internal, so UI has to poll `GetWorkspace()` to notice
-      anything appearing. Copies have theirs now: `Scenes:OnCopyAdded`.
 - [ ] **Per object locks and presence.** Two clients dragging the same object
       fight each other, and the optimistic-set rollback makes the loser's screen
       jump. Needs to know who has what selected.
@@ -36,6 +33,13 @@ reads right, never that it was run with a player in it.
       object can come back under the id it had.
 
 ## Done
+
+- [x] **Object added / removed signals on the client.** `Objects:OnAdded` and
+      `OnRemoved`, for every object however it arrived: replicated, built in a
+      scene the client owns, or drawn for an opened copy. Added fires once the
+      object is filed; removed fires after teardown, with the object still
+      carrying its ids. UI no longer polls `GetWorkspace()`. The listener
+      helpers moved out of `Scenes/Client` into `Listeners`, which both use.
 
 - [x] **A pushed scene belongs to its author, and templates warn where they
       matter.** `Push` registers the scene admitting only the player who
