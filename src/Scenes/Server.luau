@@ -14,6 +14,7 @@
 -- Objects therefore live on the copy, not on the scene. Asking a scene loaded
 -- twice for "the object with local id 4" has no answer; asking a copy does.
 
+const Permissions = require("../Permissions/Server")
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
 const Registry = require("./Registry")
@@ -292,6 +293,94 @@ end
 -- to know which scene it belongs to first.
 function Scenes:GetInstance(Identifier: ObjectTypes.SceneInstanceId): SceneInstance?
     return Registry.Instances[Identifier]
+end
+
+--=============================================================================
+-- Commits from a client
+--=============================================================================
+
+-- What one commit may carry. The byte cap is what actually bounds the work --
+-- decoding walks the buffer and does nothing else until it is through -- and
+-- the object cap is what stops a well formed pack of a hundred thousand
+-- objects becoming a scene nobody asked for. The name cap is only there so a
+-- registry key cannot be a novel.
+const MAX_COMMIT_BYTES = 524288
+const MAX_COMMIT_OBJECTS = 4096
+const MAX_NAME_LENGTH = 64
+
+-- A client handing over a scene it built locally. Refusals are silent and say
+-- nothing but false, like every other client facing handler here: a refusal
+-- that logs is a refusal a client can spam to fill the server's output.
+Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (boolean, SceneIdentifier)
+    -- One action for the packet rather than one per object in it. A transaction
+    -- charges per operation because every operation reaches into the world as
+    -- it stands; this arrives whole, and what bounds it is its size, which is
+    -- known before a byte of it is read.
+    if not Permissions:Consume(Plr) then
+        return false, 0
+    end
+
+    if buffer.len(Data) > MAX_COMMIT_BYTES then
+        return false, 0
+    end
+
+    if #Name == 0 or #Name > MAX_NAME_LENGTH then
+        return false, 0
+    end
+
+    -- Names are how a scene is asked for, so the first one to take a name keeps
+    -- it. Refused here as well as in Scenes.new so the pack is not decoded for
+    -- a commit that cannot land anyway.
+    if Registry.ByName[Name] then
+        return false, 0
+    end
+
+    const Ok, _, Decompressed = pcall(function()
+        return Compressor:DecompressScene(Data)
+    end)
+
+    if not Ok or not Decompressed then
+        return false, 0
+    end
+
+    const Packed = Decompressed :: {any}
+    if #Packed > MAX_COMMIT_OBJECTS then
+        return false, 0
+    end
+
+    -- Every object type in the pack, checked once each rather than once per
+    -- object, and the whole commit refused if any one of them is denied. A
+    -- scene arriving with half its objects dropped is not the scene that was
+    -- sent, and the client would have no way to tell.
+    const Seen: {[number]: true} = {}
+    local Highest = 0
+
+    for _, Object in Packed do
+        if not Objects:GetRegistry(Object.Parent) then
+            return false, 0
+        end
+
+        if not Seen[Object.Parent] then
+            Seen[Object.Parent] = true
+
+            if not Permissions:Can(Plr, "Create", Object.Parent) then
+                return false, 0
+            end
+        end
+
+        Highest = math.max(Highest, Object.LocalId)
+    end
+
+    -- Re-encoded rather than kept as it arrived, so the pack the server holds
+    -- is the one the server wrote. Its LastId is the highest id actually in it
+    -- rather than whatever the client claimed -- a pack declaring an id space
+    -- already spent would otherwise give the scene room for nothing.
+    const Scene = Scenes.fromBuffer({Name = Name}, Compressor:CompressScene(Highest, Packed))
+    if not Scene then
+        return false, 0
+    end
+
+    return true, Scene.Id
 end
 
 -- The scene an object lands in when the caller names none, so Objects.new keeps

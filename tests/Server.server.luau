@@ -1695,6 +1695,214 @@ T:Test("a transaction is charged one action per operation", function()
 end)
 
 --=============================================================================
+-- Scene commits from a client
+--=============================================================================
+
+T:Describe("Scene commits")
+
+-- The handler is a plain function on the manifest entry, so it can be called
+-- with a stand-in for a Player exactly as the permission tests do -- there is
+-- no client in a server-only run to invoke it for real.
+const Commit = Networking:Get("Scenes.Commit").OnInvoke
+
+const function Packed(LastId: number, Entries: {{Parent: number, LocalId: number, Properties: {[number]: any}}}): buffer
+    const Objects_ = {}
+    for Index, Entry in Entries do
+        Objects_[Index] = {
+            __type = "DecompressedObject",
+            LocalId = Entry.LocalId,
+            Parent = Entry.Parent,
+            Properties = Entry.Properties,
+        }
+    end
+
+    return Compressor:CompressScene(LastId, Objects_ :: any)
+end
+
+T:Test("a pack a client built becomes a scene of its own", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBulk")
+
+    const Accepted, Identifier = Commit(Ghost, "PushedRoom", Packed(1, {
+        {Parent = BareId, LocalId = 1, Properties = {[TitleId] = "Pushed"}},
+    }))
+
+    Permissions:SetDefault(nil)
+
+    T:Ok(Accepted, "accepted")
+    T:Ok(Identifier and Identifier > 0, "answered with an id")
+
+    const Scene = Scenes:Get("PushedRoom")
+    T:Ok(Scene, "registered under the name it asked for")
+
+    if not Scene then
+        return
+    end
+
+    T:Eq(Scene.Id, Identifier, "the id it answered with")
+    T:Eq(#Scene:GetInstances(), 0, "registered, not loaded")
+
+    const Copy = Scene:Load()
+    const Restored = Copy:Find(1)
+
+    T:Ok(Restored, "the object came across")
+    T:Eq(Restored:Get(TitleId), "Pushed", "with its value")
+    T:Eq(Restored.Scene, Scene.Id, "stamped with the server's scene id")
+
+    -- The pack claimed a last id of 1 and held exactly one object, so the next
+    -- one is 2 either way. What this checks is that the scene reads a pack the
+    -- server wrote rather than the client's bytes: see the next test.
+    const Fresh = Copy:Create(BareId)
+    T:Eq(Fresh.LocalId, 2, "the counter continues from what the pack held")
+
+    Copy:Unload()
+end)
+
+T:Test("the id space a pack claims is not taken on trust", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBulk")
+
+    -- One object, and a last id near the top of the space. Kept as it arrived,
+    -- the scene would have room for one more object ever.
+    const Accepted = Commit(Ghost, "ClaimedRoom", Packed(Handles.MAX_LOCAL - 1, {
+        {Parent = BareId, LocalId = 1, Properties = {}},
+    }))
+
+    Permissions:SetDefault(nil)
+    T:Ok(Accepted, "accepted")
+
+    const Scene = Scenes:Get("ClaimedRoom")
+    if not Scene then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Scene:Load()
+    T:Eq(Copy:Create(BareId).LocalId, 2, "the counter was rewritten to what the pack actually held")
+    Copy:Unload()
+end)
+
+T:Test("a type the role may not create refuses the whole pack", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBulk") -- blacklists TestCrate
+
+    const Accepted = Commit(Ghost, "BlacklistedRoom", Packed(2, {
+        {Parent = BareId, LocalId = 1, Properties = {}},
+        {Parent = CrateId, LocalId = 2, Properties = {}},
+    }))
+
+    Permissions:SetDefault(nil)
+
+    T:Ok(not Accepted, "refused")
+    T:Eq(Scenes:Get("BlacklistedRoom"), nil, "and registered nothing")
+end)
+
+T:Test("a role without the create verb cannot commit at all", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestViewer")
+
+    const Accepted = Commit(Ghost, "ViewerRoom", Packed(1, {
+        {Parent = BareId, LocalId = 1, Properties = {}},
+    }))
+
+    Permissions:SetDefault(nil)
+
+    T:Ok(not Accepted, "refused")
+    T:Eq(Scenes:Get("ViewerRoom"), nil, "and registered nothing")
+end)
+
+T:Test("an unregistered object type refuses the pack", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBulk")
+
+    const Accepted = Commit(Ghost, "UnknownRoom", Packed(1, {
+        {Parent = 99999, LocalId = 1, Properties = {}},
+    }))
+
+    Permissions:SetDefault(nil)
+
+    T:Ok(not Accepted, "refused")
+    T:Eq(Scenes:Get("UnknownRoom"), nil, "and registered nothing")
+end)
+
+T:Test("a name already taken is refused before the pack is read", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBulk")
+
+    const Accepted = Commit(Ghost, "PushedRoom", Packed(1, {
+        {Parent = BareId, LocalId = 1, Properties = {}},
+    }))
+
+    Permissions:SetDefault(nil)
+    T:Ok(not Accepted, "refused")
+end)
+
+T:Test("bytes that are not a pack are refused rather than thrown", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBulk")
+
+    const Accepted = Commit(Ghost, "GarbageRoom", buffer.fromstring("not a pack at all"))
+
+    Permissions:SetDefault(nil)
+
+    T:Ok(not Accepted, "refused")
+    T:Eq(Scenes:Get("GarbageRoom"), nil, "and registered nothing")
+end)
+
+T:Test("an empty name is refused", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBulk")
+
+    const Accepted = Commit(Ghost, "", Packed(1, {
+        {Parent = BareId, LocalId = 1, Properties = {}},
+    }))
+
+    Permissions:SetDefault(nil)
+    T:Ok(not Accepted, "refused")
+end)
+
+T:Test("a pack past the object cap is refused", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBulk")
+
+    const Entries = table.create(4097)
+    for Index = 1, 4097 do
+        Entries[Index] = {Parent = BareId, LocalId = Index, Properties = {}}
+    end
+
+    const Accepted = Commit(Ghost, "HugeRoom", Packed(4097, Entries))
+
+    Permissions:SetDefault(nil)
+
+    T:Ok(not Accepted, "refused")
+    T:Eq(Scenes:Get("HugeRoom"), nil, "and registered nothing")
+end)
+
+T:Test("a commit costs one action, not one per object", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBuilder") -- Rate = 5
+
+    const Pack = Packed(3, {
+        {Parent = BareId, LocalId = 1, Properties = {}},
+        {Parent = BareId, LocalId = 2, Properties = {}},
+        {Parent = BareId, LocalId = 3, Properties = {}},
+    })
+
+    local Allowed = 0
+    for Index = 1, 6 do
+        const Accepted = Commit(Ghost, `BudgetRoom{Index}`, Pack)
+        if Accepted then
+            Allowed += 1
+        end
+    end
+
+    Permissions:SetDefault(nil)
+
+    -- Five commits of three objects each, not one and two thirds.
+    T:Eq(Allowed, 5, "the budget counted packets")
+end)
+
+--=============================================================================
 -- Client integration fixtures
 --=============================================================================
 
