@@ -27,6 +27,7 @@ const Harness = require("./Harness")
 
 const Transactions = Prism.Transactions
 const Permissions = Prism.Permissions
+const Scenes = Prism.Scenes
 const Objects = Prism.Objects
 const Properties = Prism.Properties
 
@@ -426,6 +427,261 @@ T:Test("committing nothing succeeds without a round trip", function()
     const Applied, Created = Transactions.new():Commit()
     T:Ok(Applied, "succeeded")
     T:Eq(#Created, 0, "created nothing")
+end)
+
+--=============================================================================
+-- Scenes this client owns
+--=============================================================================
+
+T:Describe("Local scenes")
+
+-- The client never receives a registry's template, so a local scene is handed
+-- one here. A plain part built on the spot is enough: what matters is that a
+-- local object clones it, tags it and drives it exactly as a server side object
+-- drives the one it was given.
+const LocalTemplate = Instance.new("Part")
+LocalTemplate.Name = "PrismLocalTemplate"
+LocalTemplate.Anchored = true
+
+const LocalContainer = Instance.new("Folder")
+LocalContainer.Name = "PrismLocalContainer"
+LocalContainer.Parent = workspace
+
+T:Test("a type is localized with the half the wire could not carry", function()
+    if not BareId or not TitleId then
+        T:Ok(false, "no bare registry")
+        return
+    end
+
+    T:Ok(Objects:Localize(BareId, {
+        Instance = LocalTemplate,
+        Container = LocalContainer,
+        Links = {{Property = TitleId, Type = "Attribute", Name = FIXTURE_PROPERTY}},
+    }), "localized")
+
+    const Supplied = Objects:GetLocalized(BareId)
+    T:Ok(Supplied, "held for the type")
+
+    if Supplied then
+        T:Eq(Supplied.Instance, LocalTemplate, "template kept")
+        T:Ok(Supplied.Links and #Supplied.Links == 1, "link validated and kept")
+    end
+
+    T:Ok(not Objects:Localize(99999, {}), "an unregistered type is refused")
+end)
+
+T:Test("a local scene loads a copy and builds objects in it", function()
+    const Sandbox = Scenes.new({Name = "ClientSandbox"})
+    T:Ok(Sandbox, "registered")
+
+    if not Sandbox then
+        return
+    end
+
+    T:Eq(Scenes:GetLocal("ClientSandbox"), Sandbox, "reachable by name")
+    T:Eq(Scenes.new({Name = "ClientSandbox"}), nil, "a second scene cannot take the name")
+
+    const Copy = Sandbox:Load()
+    T:Ok(Copy, "loaded a copy")
+
+    const Obj = Copy:Create(BareId, {[TitleId] = "Local"})
+    T:Ok(Obj, "created")
+    T:Ok(Obj.Local, "marked as this client's own")
+    T:Eq(Obj:Get(TitleId), "Local", "initial value applied")
+    T:Eq(Obj.LocalId, 1, "first local id")
+    T:Eq(Obj.Scene, Sandbox.Id, "stamped with its scene")
+    T:Eq(Copy:Find(1), Obj, "the copy answers for it")
+    T:Eq(Objects:Get(Obj.RuntimeId), Obj, "and so does the workspace")
+
+    -- Local runtime ids count down from the top; the server's count up from
+    -- one, and this client is holding both kinds at once.
+    T:Ok(Obj.RuntimeId > 4000000000, "runtime id came from the local end of the space")
+
+    T:Ok(Obj.Instance, "cloned the template it was handed")
+
+    if Obj.Instance then
+        T:Eq(Obj.Instance.Parent, LocalContainer, "parented to the container")
+        T:Ok(Obj.Instance ~= LocalTemplate, "not the template itself")
+        T:Eq(Obj.Instance:GetAttribute(FIXTURE_PROPERTY), "Local", "the link drove the attribute")
+        T:Eq(Objects:FromInstance(Obj.Instance), Obj, "and maps back from the part")
+    end
+
+    Sandbox:Destroy()
+end)
+
+T:Test("an edit applies on the spot and nothing takes it back", function()
+    const Sandbox = Scenes.new({Name = "ClientEdits"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId, {[TitleId] = "Before"})
+
+    T:Ok(Obj:Set(TitleId, "After"), "accepted")
+    T:Eq(Obj:Get(TitleId), "After", "applied immediately")
+
+    if Obj.Instance then
+        T:Eq(Obj.Instance:GetAttribute(FIXTURE_PROPERTY), "After", "the link followed it")
+    end
+
+    -- A refused set on a replicated object rolls back within a round trip.
+    -- There is no round trip here, and this is what that means.
+    task.wait(1)
+    T:Eq(Obj:Get(TitleId), "After", "still what it was set to")
+
+    T:Ok(not Obj:Set(99999, "x"), "an unknown property is still refused")
+
+    Sandbox:Destroy()
+end)
+
+T:Test("a copy serialises and reads back under the same ids", function()
+    const Sandbox = Scenes.new({Name = "ClientRoundTrip"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const First = Copy:Create(BareId, {[TitleId] = "One"})
+    const Second = Copy:Create(BareId, {[TitleId] = "Two"})
+    const Persistent = Second.PersistentId
+
+    Copy:Commit()
+    Copy:Unload()
+
+    T:Eq(Objects:Get(First.RuntimeId), nil, "unloading took its objects")
+    T:Ok(First.Destroyed, "and tore them down")
+
+    const Reloaded = Sandbox:Load()
+    const Back = Reloaded:Find(2)
+
+    T:Ok(Back, "the second object came back")
+
+    if Back then
+        T:Eq(Back:Get(TitleId), "Two", "with its value")
+        T:Eq(Back.PersistentId, Persistent, "under the identity it was saved with")
+        T:Ok(Back.RuntimeId ~= Second.RuntimeId, "but a new live identity")
+    end
+
+    -- The counter rode along in the pack, so a fresh object cannot answer to a
+    -- name one of the restored ones already holds.
+    T:Eq(Reloaded:Create(BareId).LocalId, 3, "the counter continued")
+
+    Sandbox:Destroy()
+end)
+
+T:Test("loading twice gives two copies that do not touch each other", function()
+    const Sandbox = Scenes.new({Name = "ClientTwice"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    Copy:Create(BareId, {[TitleId] = "Original"})
+    Copy:Commit()
+    Copy:Unload()
+
+    const A = Sandbox:Load()
+    const B = Sandbox:Load()
+
+    T:Ok(A.Id ~= B.Id, "two copies")
+    T:Ok(A:Find(1) ~= B:Find(1), "each holds its own object")
+    T:Eq(A:Find(1).PersistentId, B:Find(1).PersistentId, "agreeing on what it is")
+    T:Eq(#Sandbox:GetInstances(), 2, "the scene knows about both")
+
+    A:Unload()
+    T:Ok(B:Find(1) and not B:Find(1).Destroyed, "unloading one leaves the other alone")
+
+    Sandbox:Destroy()
+    T:Eq(Scenes:GetLocal("ClientTwice"), nil, "destroying takes the scene with it")
+end)
+
+T:Test("destroying a local object takes its part with it", function()
+    const Sandbox = Scenes.new({Name = "ClientDestroy"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId)
+    const Part = Obj.Instance
+
+    T:Ok(Obj:Destroy(), "destroyed")
+    T:Ok(Obj.Destroyed, "marked")
+    T:Eq(Objects:Get(Obj.RuntimeId), nil, "out of the workspace")
+    T:Eq(Copy:Find(Obj.LocalId), nil, "out of the copy")
+
+    if Part then
+        T:Eq(Part.Parent, nil, "the part it owned went with it")
+    end
+
+    Sandbox:Destroy()
+end)
+
+T:Test("creating without a copy of your own is refused", function()
+    T:Throws(function()
+        Objects.new(BareId, nil, nil)
+    end, "no local copy named")
+end)
+
+T:Test("a local scene is handed to the server as a pack", function()
+    const Sandbox = Scenes.new({Name = "ClientPush"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    Copy:Create(BareId, {[TitleId] = "Handed over"})
+    Copy:Commit()
+
+    Window()
+
+    const Accepted, Identifier = Sandbox:Push("ClientPushedRoom")
+    T:Ok(Accepted, "the server took it")
+    T:Ok(Identifier and Identifier > 0, "and answered with its id")
+
+    -- It registers on the server, so its registry reaches every client -- this
+    -- one included, through the same broadcast anyone else receives.
+    T:Eventually(function()
+        return Scenes:Get("ClientPushedRoom")
+    end, 5, "the scene came back as one of the server's")
+
+    T:Ok(Scenes:GetLocal("ClientPush"), "and the local one is still local")
+    T:Ok(Copy:Find(1), "still holding its own objects")
+
+    Sandbox:Destroy()
+end)
+
+T:Test("a pack the server may not create is refused", function()
+    if not CrateId then
+        T:Ok(false, "no crate registry")
+        return
+    end
+
+    -- TestCrate is blacklisted for this role, and the client is never told its
+    -- template, so the object has no instance -- which does not matter: what
+    -- the server refuses is the type.
+    const Sandbox = Scenes.new({Name = "ClientRefused"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    Copy:Create(CrateId)
+    Copy:Commit()
+
+    Window()
+
+    const Accepted = Sandbox:Push("ClientRefusedRoom")
+    T:Ok(not Accepted, "refused")
+
+    Sandbox:Destroy()
 end)
 
 --=============================================================================

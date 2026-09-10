@@ -47,6 +47,20 @@ export type ObjectRegistry = {
     Links: {InstanceLinkRegistry}?,
 }
 
+-- The half of a registry that cannot cross the wire, handed to a client that
+-- owns scenes of its own.
+--
+-- A registry replicates as an id, a name and a property list. The template
+-- instance is deliberately left behind -- it is an asset sitting in
+-- ServerStorage, and shipping one per type to every client would be absurd --
+-- and so are the links, which only mean anything beside a template. A client
+-- building its own objects supplies both itself, once per object type.
+export type LocalRegistry = {
+    Instance: Instance?,
+    Container: Instance?,
+    Links: {InstanceLinkRegistry}?,
+}
+
 export type ObjectConfig = {
     CustomId: ObjectIdentifier?,
     Name: string,
@@ -75,6 +89,13 @@ export type Object = {
 
     Parent: ObjectIdentifier,
     Name: string,
+
+    -- Client side only. True when the object belongs to a scene this client
+    -- owns, which is what makes its edits apply on the spot: there is nobody to
+    -- ask and nothing to roll back to. An editor reads it to know whether an
+    -- edit it just made can still be refused.
+    Local: boolean?,
+
     Properties: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
 
     -- Property name -> id, so a lookup by name costs what a lookup by id does.
@@ -84,9 +105,9 @@ export type Object = {
 
     Instance: Instance?,
 
-    -- Called by Destroy to drop the object from the scene instance holding it.
-    -- A plain callback rather than a reference to the instance, because naming
-    -- that type here would put Objects and Scenes in a require cycle.
+    -- Called by Destroy to drop the object from the scene copy holding it. A
+    -- plain callback rather than a reference to the copy, because naming that
+    -- type here would put Objects and Scenes in a require cycle.
     Release: (() -> ())?,
 
     -- Keyed by property id, not an array: a link is looked up by the property

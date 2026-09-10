@@ -38,213 +38,6 @@ const Workspace: {[RuntimeId]: Object} = {}
 -- as the new one.
 const Ids = IdPool.new(nil, false)
 
--- ReflectionService is plugin security, so a live server cannot call it. Reading
--- the property is enough to learn both whether it exists and what type it is.
---
--- A member that exists but currently holds nil reports as unknown rather than
--- as the string "nil", which is truthy and used to sail past the caller's guard
--- and then fail the type comparison with a misleading message.
-const function GetInstancePropertyType(Inst: Instance, Name: string): string?
-    const Ok, Value = pcall(function()
-        return (Inst :: any)[Name]
-    end)
-
-    if not Ok or Value == nil then
-        return nil
-    end
-
-    return typeof(Value)
-end
-
--- Reading proves a member exists; only writing proves it can be set. Assigning
--- the value it already holds settles that without changing anything, so a link
--- to a read-only member like AbsoluteSize is refused at registration instead of
--- throwing inside Objects.new and then again from every change listener, where
--- the spawned thread swallows it.
-const function IsWritable(Inst: Instance, Name: string): boolean
-    const Ok, Current = pcall(function()
-        return (Inst :: any)[Name]
-    end)
-
-    if not Ok then
-        return false
-    end
-
-    return (pcall(function()
-        (Inst :: any)[Name] = Current
-    end))
-end
-
--- Roblox attributes hold only these. EnumItem is not among them, and neither is
--- the table a CustomEnum option is, so SetAttribute throws on both rather than
--- failing quietly. Property links have always been type checked; this is the
--- equivalent for attribute links, which were not checked at all.
-const ATTRIBUTE_TYPES: {[string]: true} = {
-    string = true,
-    boolean = true,
-    number = true,
-    UDim = true,
-    UDim2 = true,
-    BrickColor = true,
-    Color3 = true,
-    Vector2 = true,
-    Vector3 = true,
-    CFrame = true,
-    NumberSequence = true,
-    ColorSequence = true,
-    NumberRange = true,
-    Rect = true,
-    Font = true,
-}
-
--- Links are checked once, against the template, at registration. Every clone has
--- the same class and the same members, so the answer never differs between them
--- -- but these checks used to run inside Objects.new, which meant one malformed
--- link warned once for every object ever created from that registry.
-const function ValidateLinks(
-    Name: string,
-    Target: Instance?,
-    Links: {InstanceLinkRegistry}?,
-    PropertyIds: {PropertyTypes.PropertyIdentifier}
-): {InstanceLinkRegistry}?
-    if not Links or #Links == 0 then
-        return nil
-    end
-
-    if not Target then
-        Logger:Warn(`Object {Name} declares links but has no Instance for them to drive. Links dropped.`)
-        return nil
-    end
-
-    const Owned = {}
-    for _, Id in PropertyIds do
-        Owned[Id] = true
-    end
-
-    const Valid = {}
-    const Seen = {}
-
-    for _, Link in Links do
-        const Registry = Properties:GetRegistry(Link.Property)
-        if not Registry or not Owned[Link.Property] then
-            Logger:Warn(`Object {Name} links property {Link.Property}, which it does not carry. Link dropped.`)
-            continue
-        end
-
-        -- One link per property. The map holding them is keyed by property id,
-        -- so a second link overwrote the first, leaving the first's change
-        -- listener connected with nothing holding its disconnect -- still
-        -- writing to its target for the whole life of the object.
-        if Seen[Link.Property] then
-            Logger:Warn(`Object {Name} links property {Registry.Name} more than once. The duplicate is dropped.`)
-            continue
-        end
-
-        const Inst = if Link.Descendant
-            then Target:FindFirstChild(Link.Descendant, true)
-            else Target
-
-        if not Inst then
-            Logger:Warn(`Object {Name} links to a descendant named {Link.Descendant}, which {Target.Name} does not have. Link dropped.`)
-            continue
-        end
-
-        const Expected = PropertyTypes.Map[Registry.Type]
-
-        if Link.Type == "Property" then
-            const Actual = GetInstancePropertyType(Inst, Link.Name)
-            if not Actual then
-                Logger:Warn(`Object {Name} links to {Inst.ClassName}.{Link.Name}, which is not readable or holds nil. Link dropped.`)
-                continue
-            end
-
-            if Actual ~= Expected then
-                Logger:Warn(`Object {Name} links {Registry.Name} ({Expected}) to {Inst.ClassName}.{Link.Name} ({Actual}). Link dropped.`)
-                continue
-            end
-
-            if not IsWritable(Inst, Link.Name) then
-                Logger:Warn(`Object {Name} links to {Inst.ClassName}.{Link.Name}, which is read only. Link dropped.`)
-                continue
-            end
-        elseif Link.Type == "Attribute" then
-            if not ATTRIBUTE_TYPES[Expected] then
-                Logger:Warn(`Object {Name} links {Registry.Name} to an attribute, but a Roblox attribute cannot hold {Expected}. Link dropped.`)
-                continue
-            end
-        else
-            Logger:Warn(`Object {Name} has a link of type {Link.Type}, which is neither Property nor Attribute. Link dropped.`)
-            continue
-        end
-
-        Seen[Link.Property] = true
-        table.insert(Valid, Link)
-    end
-
-    return if #Valid > 0 then Valid else nil
-end
-
-const function GeneratePropertyMap(Props: {PropertyTypes.PropertyIdentifier}): {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>}
-    const Map = {}
-    for _, Identifier in Props do
-        Map[Identifier] = Properties.new(Identifier)
-    end
-
-    return Map
-end
-
--- Wiring only. ValidateLinks has already rejected anything that cannot work and
--- every clone shares the template's shape, so this no longer warns about link
--- shape -- it would repeat the same message once per object. The pcall stays
--- because the clone is not literally the instance that was validated.
-const function GenerateLinksMap(
-    Target: Instance?,
-    Links: {InstanceLinkRegistry}?,
-    Props: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>}
-): {[PropertyTypes.PropertyIdentifier]: InstanceLink}?
-    if not Links or not Target then
-        return nil
-    end
-
-    const Map = {}
-    local Count = 0
-
-    for _, Registry in Links do
-        const Link: InstanceLink = table.clone(Registry) :: any
-        const Prop = Props[Link.Property]
-        if not Prop then
-            continue
-        end
-
-        const Inst = if Link.Descendant
-            then Target:FindFirstChild(Link.Descendant, true)
-            else Target
-
-        if not Inst then
-            continue
-        end
-
-        const Apply = if Link.Type == "Attribute"
-            then function(Value: any)
-                Inst:SetAttribute(Link.Name, Value)
-            end
-            else function(Value: any)
-                (Inst :: any)[Link.Name] = Value
-            end
-
-        if Prop.Value ~= nil and not pcall(Apply, Prop.Value) then
-            Logger:Warn(`Failed to apply link {Link.Name} on {Inst.ClassName}. Link dropped.`)
-            continue
-        end
-
-        Link.Disconnect = Prop:OnChange(Apply)
-        Map[Link.Property] = Link
-        Count += 1
-    end
-
-    return if Count > 0 then Map else nil
-end
-
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -282,18 +75,8 @@ const function Teardown(self: Object, Announce: boolean)
 
     self.Destroyed = true
 
-    -- Links used to be torn down from an AncestryChanged handler on the linked
-    -- instance, which kept every instance alive in a strongly keyed pool and
-    -- never fired for objects destroyed directly. They belong to the object.
-    if self.Links then
-        for _, Link in self.Links do
-            if Link.Disconnect then
-                Link.Disconnect()
-            end
-        end
-
-        self.Links = nil
-    end
+    Shared.ReleaseLinks(self.Links)
+    self.Links = nil
 
     for _, Prop in self.Properties do
         Prop:Destroy()
@@ -376,7 +159,7 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
         Properties = Valid,
         Instance = Config.Instance,
         Container = Config.Container,
-        Links = ValidateLinks(Config.Name, Config.Instance, Config.Links, Valid),
+        Links = Shared.ValidateLinks(Config.Name, Config.Instance, Config.Links, Valid),
     }
 
     Registered[Identifier] = Obj
@@ -639,7 +422,7 @@ const function Construct(
         Inst = Clone
     end
 
-    const Props = GeneratePropertyMap(Ref.Properties)
+    const Props = Shared.BuildProperties(Ref.Properties)
     if InitialValues then
         for PropertyId, Value in InitialValues do
             const Prop = Props[PropertyId]
@@ -663,7 +446,7 @@ const function Construct(
     Obj.Instance = Inst
     -- Wired after the initial values land, so a link starts at the object's real
     -- value rather than the registry default and then being corrected.
-    Obj.Links = GenerateLinksMap(Inst, Ref.Links, Props)
+    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Props)
     Obj.Get = __getter
     Obj.Set = __setter
     Obj.GetProperty = Shared.GetProperty

@@ -97,4 +97,18 @@ export type Scene = {
     Destroy: (self: Scene) -> (),
 }
 
+-- A scene the client owns outright: a prefab preview, a local sandbox, a room
+-- being built before anyone else is shown it. The same document a server scene
+-- is -- copies, packs, persistent ids, all of it -- except that nothing in it
+-- replicates and nothing in it needs asking for. Its objects apply their own
+-- edits, because there is nobody to ask.
+--
+-- Push is the one thing a server scene has no equivalent of: it hands the
+-- committed pack to the server, which registers a scene of its own from it.
+-- What comes back is that scene's id, and it is a different document from this
+-- one -- pushing twice registers two.
+export type LocalScene = Scene & {
+    Push: (self: LocalScene, Name: string) -> (boolean, SceneIdentifier?),
+}
+
 return true

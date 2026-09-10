@@ -79,6 +79,17 @@ const Pending: {[any]: number} = setmetatable({}, {__mode = "k"}) :: any
 -- PropertyChanged.
 const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
 
+-- Runtime ids for objects this client made itself, counted down from the top
+-- while the server counts up from one. The two meet only if a single session
+-- mints four billion objects, and a local id never crosses the wire in any
+-- case: a local object is not replicated, and committing its scene sends a
+-- pack, which carries no runtime ids at all.
+const MAX_RUNTIME_ID = 4294967295
+local LocalRuntime = MAX_RUNTIME_ID
+
+-- What the wire could not carry, per object type. See Objects:Localize.
+const Localized: {[ObjectIdentifier]: Types.LocalRegistry} = {}
+
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -163,17 +174,42 @@ const function Teardown(Obj: Object)
 
     Obj.Destroyed = true
 
+    Shared.ReleaseLinks(Obj.Links)
+    Obj.Links = nil
+
     for _, Prop in Obj.Properties do
         Prop:Destroy()
     end
 
     if Obj.Instance then
         ByPart[Obj.Instance] = nil
+
+        -- A replicated object's part belongs to the server and goes when the
+        -- server takes it away. A local one was cloned here and is nobody
+        -- else's to remove.
+        if Obj.Local then
+            Obj.Instance:Destroy()
+        end
+
         Obj.Instance = nil
     end
 
     ByRuntimeId[Obj.RuntimeId] = nil
     Unindex(Obj)
+
+    -- Out of the scene copy before out of the workspace, so a copy walking its
+    -- own objects while they are torn down never sees one that is already gone
+    -- from the world but still listed as its own.
+    if Obj.Release then
+        Obj.Release()
+        Obj.Release = nil
+    end
+
+    -- Cleared here rather than by each caller. The two callers that come off
+    -- the wire did it themselves and a local Destroy did not, so an object this
+    -- client destroyed stayed answerable through Objects:Get for the rest of
+    -- the session -- destroyed, but still there to be found.
+    Workspace[Obj.RuntimeId] = nil
 
     -- Not table.clear: a stale reference should still be able to report its own
     -- handle and read Destroyed rather than turning into an empty table
@@ -183,6 +219,238 @@ const function Teardown(Obj: Object)
     Obj.GetProperty = Shared.Destroyed.GetProperty
     Obj.OnChange = Shared.Destroyed.OnChange
     Obj.Destroy = Shared.Destroyed.Destroy
+end
+
+--=============================================================================
+-- Scenes this client owns
+--=============================================================================
+
+-- A local object answers for itself. There is nobody to ask, nothing to roll
+-- back to and no broadcast coming to confirm it: for a scene the client owns,
+-- the client is the authority, which is the whole point of owning one.
+--
+-- Links still fire, because a link is a listener on the property rather than
+-- anything to do with the network.
+const function __local_setter(self: Object, Reference: Types.PropertyReference, Value: any?): boolean
+    const Prop = Shared.GetProperty(self, Reference)
+    if not Prop then
+        return false
+    end
+
+    return (Prop:Set(Value))
+end
+
+const function __local_destroy(self: Object): boolean
+    if self.Destroyed then
+        return false
+    end
+
+    Teardown(self)
+    return true
+end
+
+-- What every object here shares, filed into the tables the workspace is read
+-- through. Set and Destroy are the caller's: a replicated object asks the
+-- server for both, a local one does neither.
+const function File(Obj: any, Order: {PropertyTypes.PropertyIdentifier})
+    Obj.Names = Shared.BuildNameMap(Order, Obj.Properties)
+    Obj.Get = __getter
+    Obj.GetProperty = Shared.GetProperty
+    Obj.OnChange = Shared.OnChange
+
+    Workspace[Obj.RuntimeId] = Obj
+    Index(Obj)
+
+    if Obj.Instance then
+        ByPart[Obj.Instance] = Obj.RuntimeId
+        ByRuntimeId[Obj.RuntimeId] = Obj.Instance
+    end
+end
+
+-- The client's own constructor, and deliberately not the server's: no
+-- announcement, no permission pass, no round trip, because nothing outside this
+-- client has a claim on the object.
+--
+-- LocalId is the object's id within its scene. Creating mints the next one;
+-- restoring from a pack passes the id the object was saved under, which is what
+-- makes a reference survive a reload here exactly as it does on the server.
+const function Construct(
+    Reference: ObjectRegistry | ObjectIdentifier,
+    InitialValues: {[PropertyTypes.PropertyIdentifier]: any}?,
+    Live: any,
+    LocalId: number?
+): Object
+    const TypeOf = typeof(Reference)
+    local Ref: ObjectRegistry
+
+    if TypeOf == "number" then
+        Ref = Registered[Reference :: ObjectIdentifier]
+        if not Ref then
+            Logger:Error(`Invalid object reference. No object registered with id {Reference}.`)
+        end
+    elseif TypeOf == "table" then
+        Ref = Reference :: ObjectRegistry
+    else
+        Logger:Error(`Invalid object reference. Expected a registry or an id, got {TypeOf}.`)
+    end
+
+    if not Ref or not Ref.Id or not Registered[Ref.Id] then
+        Logger:Error("Invalid object reference. The registry it points at is not registered.")
+    end
+
+    -- A copy of a scene this client owns, and nothing else. A scene the server
+    -- owns is edited by asking it to, which is what a transaction is for; there
+    -- is no such thing as creating into one from here.
+    if not Live or not Live.ByLocal then
+        Logger:Error("Objects.new on the client needs a copy of a scene this client owns. Load one with Scenes.new, or edit a server scene through a transaction.")
+    end
+
+    const Owner = Live.Owner
+    local Local = LocalId
+
+    if Local then
+        if Live.ByLocal[Local] then
+            Logger:Error(`Scene {Owner.Name} already holds an object with local id {Local} in this copy.`)
+        end
+
+        Owner.LastId = math.max(Owner.LastId, Local)
+    else
+        if Owner.LastId >= Handles.MAX_LOCAL then
+            Logger:Error(`Scene {Owner.Name} has exhausted its object id space.`)
+        end
+
+        Owner.LastId += 1
+        Local = Owner.LastId
+    end
+
+    if LocalRuntime <= 0 then
+        Logger:Error("Local runtime id space exhausted.")
+    end
+
+    const RuntimeId = LocalRuntime
+    LocalRuntime -= 1
+
+    -- The template and the links the caller handed over for this type, because
+    -- neither crossed the wire. A type nobody localised still builds objects --
+    -- they simply have no instance, which is exactly what a server side object
+    -- registered without one does.
+    const Supplied = Localized[Ref.Id]
+    local Inst: Instance? = nil
+
+    if Supplied and Supplied.Instance then
+        const Clone = Supplied.Instance:Clone()
+        Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
+        CollectionService:AddTag(Clone, Shared.ObjectTag)
+
+        -- The copy's container wins over the scene's, and the scene's over the
+        -- type's, exactly as on the server: two copies of one room have to be
+        -- able to sit in two places.
+        const Container = Live.Container or Owner.Container or Supplied.Container
+        if Container then
+            Clone.Parent = Container
+        end
+
+        Inst = Clone
+    end
+
+    const Props = Shared.BuildProperties(Ref.Properties)
+    if InitialValues then
+        for PropertyId, Value in InitialValues do
+            const Prop = Props[PropertyId]
+            if Prop then
+                Prop:Set(Value)
+            end
+        end
+    end
+
+    const Obj = {}
+    Obj.RuntimeId = RuntimeId
+    Obj.PersistentId = Handles.Join(Live.Scene, Local :: number)
+    Obj.Scene = Live.Scene
+    Obj.LocalId = Local
+    Obj.InstanceId = Live.Id
+    Obj.Parent = Ref.Id
+    Obj.Name = Ref.Name
+    Obj.Local = true
+    Obj.Destroyed = false
+    Obj.Properties = Props
+    Obj.Instance = Inst
+    -- Wired after the initial values land, so a link starts at the object's own
+    -- value rather than at the registry default and then being corrected.
+    Obj.Links = Shared.BuildLinks(Inst, if Supplied then Supplied.Links else nil, Props)
+    Obj.Set = __local_setter
+    Obj.Destroy = __local_destroy
+
+    Obj.Release = function()
+        Live.Objects[RuntimeId] = nil
+
+        if Live.ByLocal[Local] == Obj then
+            Live.ByLocal[Local] = nil
+        end
+    end
+
+    File(Obj, Ref.Properties)
+    Live.Objects[RuntimeId] = Obj
+    Live.ByLocal[Local] = Obj
+
+    return Obj :: any
+end
+
+-- Creates an object in a copy of a scene this client owns. Target is that copy
+-- and is not optional: the implicit Default scene is the server's, and this
+-- side has no equivalent to fall back on.
+function Objects.new(
+    Reference: ObjectRegistry | ObjectIdentifier,
+    InitialValues: {[PropertyTypes.PropertyIdentifier]: any}?,
+    Target: any
+): Object
+    return Construct(Reference, InitialValues, Target, nil)
+end
+
+-- Rebuilds an object under the id it was saved with, for a local scene reading
+-- its own pack back.
+function Objects.restore(Target: any, Decompressed: any): Object?
+    if not Registered[Decompressed.Parent] then
+        Logger:Warn(`Failed to restore object. Object type {Decompressed.Parent} is not registered.`)
+        return nil
+    end
+
+    return Construct(Decompressed.Parent, Decompressed.Properties, Target, Decompressed.LocalId)
+end
+
+-- The half of a registry the wire cannot carry, handed over once per object
+-- type. Without it a local object of that type is built with no instance at
+-- all; with it, it clones and drives one exactly as a server side object does.
+function Objects:Localize(Reference: ObjectRegistry | ObjectIdentifier, Config: Types.LocalRegistry): boolean
+    const Identifier = if type(Reference) == "table"
+        then (Reference :: ObjectRegistry).Id
+        else Reference
+
+    const Registry = if type(Identifier) == "number" then Registered[Identifier] else nil
+    if not Registry or type(Identifier) ~= "number" then
+        Logger:Warn(`Cannot localize {tostring(Identifier)}: no object type is registered here with that id.`)
+        return false
+    end
+
+    if Config.Instance and not Config.Container then
+        Logger:Warn(`Localized {Registry.Name} has an Instance but no Container, so its clones are built unparented.`)
+    end
+
+    Localized[Identifier] = {
+        Instance = Config.Instance,
+        Container = Config.Container,
+
+        -- Checked here rather than per object, for the same reason the server
+        -- checks at registration: every clone shares the template's shape, so a
+        -- malformed link would otherwise warn once per object ever built.
+        Links = Shared.ValidateLinks(Registry.Name, Config.Instance, Config.Links, Registry.Properties),
+    }
+
+    return true
+end
+
+function Objects:GetLocalized(Identifier: ObjectIdentifier): Types.LocalRegistry?
+    return Localized[Identifier]
 end
 
 -- A tagged part has arrived: file it, and hand it to its object if that object
@@ -269,8 +537,7 @@ function Objects.DropInstance(Live: Types.SceneInstanceId)
         return
     end
 
-    for RuntimeId, Obj in table.clone(Held) do
-        Workspace[RuntimeId] = nil
+    for _, Obj in table.clone(Held) do
         Teardown(Obj)
     end
 
@@ -360,20 +627,10 @@ const function AddObject(
         Obj.Properties[PropId] = Prop
     end
 
-    Obj.Names = Shared.BuildNameMap(Registry.Properties, Obj.Properties)
-    Obj.Get = __getter
     Obj.Set = __setter
-    Obj.GetProperty = Shared.GetProperty
-    Obj.OnChange = Shared.OnChange
     Obj.Destroy = __destroy
 
-    Workspace[RuntimeId] = Obj
-    Index(Obj :: any)
-
-    if Resolved then
-        ByPart[Resolved] = RuntimeId
-        ByRuntimeId[RuntimeId] = Resolved
-    end
+    File(Obj, Registry.Properties)
 end
 
 -- GetTagged first: parts that replicated before this module loaded never fire
@@ -425,7 +682,6 @@ const function RemoveObject(RuntimeId: RuntimeId)
         return
     end
 
-    Workspace[RuntimeId] = nil
     Teardown(Obj)
 end
 

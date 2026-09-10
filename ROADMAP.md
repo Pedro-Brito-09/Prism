@@ -8,17 +8,6 @@ work and left unrun on purpose — the framework gets played through in one pass
 once it is structurally finished, so a ticked item means the work landed and
 reads right, never that it was run with a player in it.
 
-## In design
-
-- [ ] **Client owned scenes.** A scene whose objects the server never sees — a
-      prefab preview, a local sandbox. Needs `Objects.new` on the client and a
-      local authority path: apply on the spot, no invoke, no rollback. The
-      client never receives a registry's template instance, so a local scene has
-      to be handed one explicitly. Its natural finish — committing a local scene
-      to the server — is a transaction full of create operations, which now
-      exist; what it needs from them is a way past the per-operation budget, or
-      a role allowed to spend it.
-
 ## Queued
 
 - [ ] **Unregistering does not reach the client.** `Properties:Unregister` drops
@@ -52,6 +41,28 @@ reads right, never that it was run with a player in it.
       object can come back under the id it had.
 
 ## Done
+
+- [x] **Client owned scenes.** A scene whose objects the server never sees — a
+      prefab preview, a sandbox, a room built before anyone else is shown it.
+      The same document a server scene is, except that nothing in it replicates,
+      so its objects apply their own edits: there is nobody to ask and nothing
+      to roll back to. `Objects:Localize` hands over the half of a registry the
+      wire cannot carry — the template and its links — once per object type, and
+      the link machinery moved to `Objects/Shared` so a local object drives its
+      instance through the same code a server one does. Local scene, copy and
+      runtime ids count down from the top of each id space while the server's
+      count up, so the two never collide, and no scene id is written into a pack
+      in any case.
+
+      It finishes by handing a scene over rather than by pushing operations:
+      `Push` sends the committed pack in one packet and the server registers a
+      scene of its own from it, refusing it unless it may create every object
+      type in it, and re-encoding it so the pack it keeps is the one it wrote.
+      It registers and does not load — putting a room in the world is the
+      server's call. A commit costs one action and is bounded by size, where a
+      transaction charges per operation: a transaction's operations each reach
+      into the world as it stands, while a commit arrives whole and what bounds
+      it is known before a byte of it is read.
 
 - [x] **Transactions.** One channel carrying a list of operations — create, set,
       destroy — planned and applied as a unit, so a multi-object edit is one

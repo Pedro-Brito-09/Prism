@@ -188,6 +188,24 @@ const Channels: {Channel} = {
         Name = "Objects.ObjectsRemoved",
         Args = {Codecs.Array(Codecs.u32)}, -- RuntimeIds
     },
+
+    {
+        -- A client handing over a scene it built locally: a name to register it
+        -- under and the pack itself, which is the same format a server side
+        -- scene is saved as. One packet for a whole document, and the reason it
+        -- is not a transaction full of creates: a transaction spends one action
+        -- per operation because each one touches the world as it stands, while
+        -- this arrives whole and its cost is known from its size before a byte
+        -- of it is read.
+        --
+        -- Answers with the id the server registered it under, or zero if it
+        -- refused. The scene is registered, never loaded: putting a room in the
+        -- world is the server's call, and the client asked for a document to be
+        -- stored rather than spawned.
+        Name = "Scenes.Commit",
+        Args = {Codecs.String, Codecs.Buffer}, -- Name, Compressor:CompressScene
+        Returns = {Codecs.Bool, Codecs.Varint}, -- accepted, SceneId
+    },
 }
 
 const ById: {Channel} = Channels

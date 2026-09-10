@@ -181,6 +181,66 @@ a joining player receives. One packet per object would put a five thousand
 object scene into the remote queue in a single frame, which is the flood the
 join replay exists to avoid.
 
+### Scenes the client owns
+
+A client can own a scene outright — a prefab preview, a sandbox, a room built
+before anyone else sees it. It is the same document a server scene is, with one
+difference: nothing in it replicates, so its objects apply their own edits
+instead of asking for them. There is nobody to ask and nothing to roll back to.
+
+```lua
+Prism.Objects:Localize(Crate, {
+    Instance = ReplicatedStorage.CrateTemplate,
+    Container = workspace.Preview,
+    Links = {{Property = Tint, Type = "Property", Name = "Color"}},
+})
+
+local Sandbox = Prism.Scenes.new({Name = "Sandbox"})
+local preview = Sandbox:Load()
+
+local crate = preview:Create(Crate, {[Tint] = Color3.new(1, 0, 0)})
+crate:Set(Tint, Color3.new(0, 1, 0))   -- applied here, and that is the end of it
+preview:Commit()
+```
+
+`Localize` hands over the half of a registry the wire cannot carry. A registry
+replicates as an id, a name and a property list: the template instance is left
+behind deliberately — it is an asset sitting in ServerStorage, and shipping one
+per type to every client would be absurd — and so are its links, which mean
+nothing without a template. Supply them once per object type and local objects
+clone and drive an instance exactly as server side ones do.
+
+`Prism.Scenes.new` on the client returns a scene you own, with the same `Load`,
+`Create`, `Find`, `Commit`, `Serialize` and `Unload` a server scene has.
+`Scenes:Get` still means the server's scene of that name and `Scenes:GetLocal`
+means yours; local ids count down from the top of the id space while the
+server's count up, so the two never collide.
+
+Objects you own carry `Local = true`, which is how an editor tells an edit that
+has already happened from one that can still be refused.
+
+### Handing one to the server
+
+```lua
+preview:Commit()
+local ok, sceneId = Sandbox:Push("Room 4")
+```
+
+The pack crosses in one packet. The server refuses it unless it may create every
+object type in it, re-encodes it so the pack it keeps is the one it wrote, and
+registers it as a scene of its own — it does not load it. Putting a room in the
+world is the server's call; the client asked for a document to be stored, not
+spawned.
+
+`Push` sends what the scene says it is, so commit the copy you mean first. What
+comes back is a different document from the one you pushed: the local scene
+stays local, and pushing twice registers two scenes rather than updating one.
+
+A commit costs one action rather than one per object, bounded by size instead —
+512 KB and 4096 objects. A transaction charges per operation because each one
+reaches into the world as it stands; a commit arrives whole, and what bounds it
+is known before a byte of it is read.
+
 ## Transactions
 
 A list of operations — create, set, destroy — validated and applied as a unit.
