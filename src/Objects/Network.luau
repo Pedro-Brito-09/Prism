@@ -3,6 +3,7 @@ const Networking = require("../Networking")
 return {
     ObjectRegistered = Networking:Get("Objects.ObjectRegistered"),
     RegistriesReplayed = Networking:Get("Objects.RegistriesReplayed"),
+    ObjectUnregistered = Networking:Get("Objects.ObjectUnregistered"),
     ObjectsReplayed = Networking:Get("Objects.ObjectsReplayed"),
 
     ObjectAdded = Networking:Get("Objects.ObjectAdded"),

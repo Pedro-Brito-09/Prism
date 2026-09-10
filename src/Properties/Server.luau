@@ -48,6 +48,20 @@ end
 -- for a different property silently reinterprets every record still holding it.
 const Ids = IdPool.new(nil, false)
 
+-- How many things are built on each property: object types that carry it and
+-- databases whose metadata holds it. Counted here rather than asked of them,
+-- because Properties cannot require either without a cycle.
+const Holders: {[PropertyIdentifier]: number} = {}
+
+function Properties.Retain(Identifier: PropertyIdentifier)
+    Holders[Identifier] = (Holders[Identifier] or 0) + 1
+end
+
+function Properties.Unretain(Identifier: PropertyIdentifier)
+    const Count = (Holders[Identifier] or 0) - 1
+    Holders[Identifier] = if Count > 0 then Count else nil
+end
+
 function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     const Requested = if Config.CustomId ~= nil
         then IdPool.Normalize(Config.CustomId, "property")
@@ -88,13 +102,28 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     return Identifier
 end
 
+-- Refused while anything is built on the property. An object type carrying it
+-- would name a property nobody could build, on the server or on the client
+-- rebuilding one of its objects; a database would fail to read its own records.
+-- Unregister those first.
 function Properties:Unregister(Identifier: PropertyIdentifier): boolean
-    if not Registered[Identifier] then
+    const Registry = Registered[Identifier]
+    if not Registry then
+        return false
+    end
+
+    const Held = Holders[Identifier]
+    if Held then
+        Logger:Warn(`Cannot unregister property {Registry.Name}: {Held} object type(s) or database(s) are built on it.`)
         return false
     end
 
     Registered[Identifier] = nil
     Ids:Release(Identifier)
+
+    -- Told to every client, which used to keep serving the registry it had for
+    -- the rest of the session.
+    Network.PropertyUnregistered:FireAll(Identifier)
     return true
 end
 

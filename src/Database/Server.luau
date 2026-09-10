@@ -746,6 +746,12 @@ function Database.new<T>(Config: {
     const db = {}
     db.Key = Config.Key
     db.InitialMetadata = Config.InitialMetadata
+
+    -- Every record reads and writes these, so none of them may be unregistered
+    -- while the database stands.
+    for _, Template in Config.InitialMetadata do
+        Properties.Retain(Template.Parent)
+    end
     db.Expiration = Config.Expiration or DEFAULT_EXPIRATION
     db.ShardLimit = Config.ShardLimit or DEFAULT_SHARD_LIMIT
 

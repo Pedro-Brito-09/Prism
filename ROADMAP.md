@@ -10,11 +10,6 @@ reads right, never that it was run with a player in it.
 
 ## Queued
 
-- [ ] **Unregistering does not reach the client.** `Properties:Unregister` drops
-      a registry on the server and tells nobody, so every client keeps serving
-      the old one from its own copy. Scenes now announce it; properties predate
-      that and still do not. Object types have no unregister at all.
-
 - [ ] **A pushed scene belongs to nobody.** `Push` registers the scene public
       and grants the player who pushed it nothing on it, so its name reaches
       every player and its author cannot edit it until the game steps in.
@@ -51,6 +46,14 @@ reads right, never that it was run with a player in it.
       object can come back under the id it had.
 
 ## Done
+
+- [x] **Unregistering reaches the client.** `Properties:Unregister` used to
+      drop a registry on the server and tell nobody; object types had no
+      unregister at all. Both now announce it on a channel of their own, and
+      both are refused while something is built on them: a property while an
+      object type or a database holds it, counted in Properties because it
+      cannot require either, and an object type while any object of it is
+      live. Neither id is handed out again.
 
 - [x] **Permissions, per scene and by user id.** Rights split in two. Global
       rights — the action budget, `CanPush`, global capabilities — are about the

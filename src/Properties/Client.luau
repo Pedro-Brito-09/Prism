@@ -53,4 +53,10 @@ Network.RegistriesReplayed:Connect(function(Payloads: {any})
     end
 end)
 
+-- Gone on the server, which refuses while anything is built on it. Nothing
+-- replicated here carries it, so dropping the registry is all there is to do.
+Network.PropertyUnregistered:Connect(function(Identifier: PropertyIdentifier)
+    Registered[Identifier] = nil
+end)
+
 return Properties

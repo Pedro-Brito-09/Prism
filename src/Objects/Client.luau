@@ -642,6 +642,13 @@ Network.RegistriesReplayed:Connect(function(Registries: {ObjectRegistry})
     end
 end)
 
+-- Gone on the server, which refuses while any object of it is live there.
+-- Objects of it in scenes this client owns keep what they were built from;
+-- nothing new can be made of it.
+Network.ObjectUnregistered:Connect(function(Identifier: ObjectIdentifier)
+    Registered[Identifier] = nil
+end)
+
 Network.ObjectAdded:Connect(AddObject)
 
 -- The instance list carries false where an object has no instance: a nil entry

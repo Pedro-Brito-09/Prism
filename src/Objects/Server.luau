@@ -210,9 +210,45 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
         Replicate = Replicate,
     }
 
+    -- Its properties cannot be unregistered from under it while it stands.
+    for _, PropId in Valid do
+        Properties.Retain(PropId)
+    end
+
     Registered[Identifier] = Obj
     Network.ObjectRegistered:FireAll(ToRegistryPayload(Obj))
     return Identifier
+end
+
+-- Refused while any object of the type is live: each was built from this
+-- registry and names it as its Parent, and a client rebuilding one would find
+-- nothing to build it from. Destroy them, or unload what holds them, first.
+--
+-- The id is never handed out again. Packs name it, and a later type under the
+-- same id would decode every saved object of this one as the new one. A pack
+-- that still names it restores its other objects and warns about these.
+function Objects:Unregister(Identifier: ObjectIdentifier): boolean
+    const Registry = Registered[Identifier]
+    if not Registry then
+        return false
+    end
+
+    for _, Obj in Workspace do
+        if Obj.Parent == Identifier and not Obj.Destroyed then
+            Logger:Warn(`Cannot unregister object type {Registry.Name}: objects of it are still live.`)
+            return false
+        end
+    end
+
+    Registered[Identifier] = nil
+    Ids:Release(Identifier)
+
+    for _, PropId in Registry.Properties do
+        Properties.Unretain(PropId)
+    end
+
+    Network.ObjectUnregistered:FireAll(Identifier)
+    return true
 end
 
 -- Entries per packet, matching the join replay: one packet per object is what
