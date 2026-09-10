@@ -8,6 +8,232 @@ work and left unrun on purpose — the framework gets played through in one pass
 once it is structurally finished, so a ticked item means the work landed and
 reads right, never that it was run with a player in it.
 
+## In design
+
+- [ ] **Admission, and where a copy lives.** Everything about a scene reaches
+      everyone today, because every packet announcing one goes out with
+      FireAll. That is fine for a game with one level and wrong for a place
+      several people build in at once: two parties editing two levels in one
+      server can each see the other's, and a player who only wants to play sees
+      both.
+
+      A scene admits players by name — `Scene:Admit`, taking a user id as
+      readily as a Player, with `Evict` beside it — and **a scene that has
+      admitted nobody is public**, which is what every scene that exists today
+      already is. The list belongs to the scene and outlives whoever is
+      connected: dropping an admission when its player disconnects would leave
+      a private level with an empty list, and an empty list means public, so a
+      room would let itself out.
+
+      A player is told nothing about a scene they are not admitted to — not its
+      contents, not its name, not that it exists. Admission is what moves data:
+      being admitted means a targeted replay of that scene's copies, being
+      evicted means a bulk removal, both of which the scene and transaction
+      work already built.
+
+      *Two ways to load one.* `Scene:Load()` builds the objects' instances on
+      the server, so the parts replicate to everyone whether or not they are
+      admitted — a level being played while it is built. `Scene:Open()` builds
+      none: the server owns the copy and its data exactly as before, but clones
+      no templates, and each admitted client draws the copy itself. That is the
+      only way to keep a scene out of sight, because Roblox has no per-player
+      workspace: a part in the world is a part for everybody.
+
+      Clients render; they do not load. If every admitted client read the pack
+      itself they would each mint their own ids, and two people would be
+      editing two unrelated copies that happen to look alike. One copy, on the
+      server, drawn in several places.
+
+      *What a client needs to draw one.* The template and the links, which are
+      stripped from a registry payload today. They stop being stripped: an
+      instance reference resolves on a client exactly when that instance
+      replicates to them, so a template in ReplicatedStorage arrives and one in
+      ServerStorage arrives as nil — which registration warns about rather than
+      leaving to be discovered at runtime. Links are plain data, and
+      ValidateLinks already runs on both sides. That deletes Objects:Localize
+      entirely, and with it the only awkward step in client owned scenes.
+
+      *Where the instances go.* Not a Container field on three different
+      configs. A copy owns one folder, every object's instance is parented into
+      the folder of the copy holding it, and `Load` says where that folder goes.
+      Named nothing, it lands in a tree the framework keeps for the purpose:
+
+          workspace.__prism.__scene_{SceneId}.__copy_{CopyId}
+
+      keyed by the copy rather than the scene, because a scene loaded five
+      times is five copies and they cannot share one.
+
+      A Folder rather than a Model, and that is the point: a folder parents
+      anywhere, so a scene made of ScreenGuis loads into PlayerGui, a scene of
+      atmospheres into Lighting, and a scene you want to move as a unit into a
+      Model of your own that you pivot. It is what lets this be a level editor
+      framework for any kind of instance rather than for geometry, and it means
+      Prism never needs a table mapping classes to the services they belong in
+      -- the kind of table that is never finished.
+
+      Unloading a copy destroys its folder and what is in it. A default scene
+      folder goes with the last of its copies; a parent the caller supplied is
+      the caller's and is left alone. A client rendering a copy builds its own
+      folder the same way, which is also what keeps two open sessions apart --
+      and a client editing interfaces hands PlayerGui to Load and never touches
+      the workspace at all. Local scenes cannot collide with the server's
+      there, because their ids count down from the top of the space while the
+      server's count up.
+
+      There is no "no scene" case to handle: since scenes landed, every object
+      belongs to a copy, including one created with no scene named, which lands
+      in the implicit Default.
+
+- [ ] **`Replicate` on an object type.** Whether an object's *data* reaches a
+      client, as against its instance, which ordinary replication delivers on
+      its own when the server built it. Most objects are scenery: someone
+      playing needs the part and never the property table, while a spinning
+      part needs its speed on the client for the script driving it. One field
+      on the registry — everyone, or only the admitted — defaulting to
+      everyone, so nothing changes until it is used and forgetting it costs
+      bandwidth rather than breaking code.
+
+      It only means anything for a copy the server built. In an opened copy a
+      player who is not admitted has no part to attach anything to, so sending
+      them data would buy nothing.
+
+      One thing necessarily leaks, and it is the interaction between this and
+      admission: an object that replicates to everyone still belongs to a copy,
+      and its arrival says that copy exists, because the client has nowhere
+      else to file it and cannot otherwise work out the object's persistent
+      identity. A copy id and a scene id, and nothing else.
+
+      The win is the join. The replay walks every live object and ships it in
+      chunks, so a five thousand object level costs every joining player five
+      thousand compressed objects, nearly all of them scenery nobody will ever
+      ask about. After this, a player pays for the objects with client code
+      behind them and the people editing pay for the rest.
+
+      One invariant has to change with it: the client builds an object's
+      property table from the registry's full list and fills in defaults, and a
+      partially replicated object has to build only what the buffer actually
+      carried. Otherwise a withheld property sits there holding its default and
+      reads as real data, which is worse than not having it. The buffer already
+      names exactly what it holds.
+
+- [ ] **Permissions, scoped and session-lived.** A permission today is a role a
+      player is assigned, global to the server, held in memory and gone when
+      they leave. Two of those are wrong for an editor several people share.
+      The third turns out to be right, and deliberately so.
+
+      *Scope.* Rights over a level belong to that level. Two groups editing two
+      scenes in one server means "may edit" has to mean "may edit **this**
+      scene", or everyone present can touch everything. So permissions split:
+      **global** ones — the rate budget, whether you may register a scene at
+      all, capabilities that are about the session rather than a document — and
+      **per scene** ones, which is where the verbs and the object and property
+      restrictions live. Callers do not have to name the scene: every check
+      site already holds the object, an object knows its copy and a copy knows
+      its scene, so `Can` resolves it.
+
+      Rights are not admission. Admission decides what you receive, rights
+      decide what you may change, and holding rights on a scene you were never
+      admitted to is inert rather than clever. Keeping them apart is also what
+      keeps things out of here that look like they belong: a moderator who may
+      look into any level is a capability the game checks and an Admit it
+      calls, not a feature Prism has to carry.
+
+      *Roles stop being live.* A role becomes a template. Granting one clears
+      the player's set and copies its capabilities in; from then on the
+      player's own set is the whole truth, and capabilities are granted and
+      revoked one at a time. That removes the inheritance rules, the question
+      of whether a per-player entry may widen or only narrow, and the payload
+      cache keyed by role name. The price, taken knowingly: editing a role
+      later does not reach anyone already holding it.
+
+      *They stay session state.* Prism persists no rights at all, global or per
+      scene, which leaves the whole subsystem the same shape the rate budget
+      already has: granted while you are here, gone with the server. Who owns a
+      level and who they invited is a question every game answers differently —
+      group ranks, friends, a gamepass, a record in a service of its own — and
+      a store built in here would be bypassed by half of them while the game
+      keeps that record anyway to draw a menu. It is also the division the
+      framework already makes: the database holds metadata, a pack holds
+      contents, and saving a level's contents is somebody else's job.
+
+      Not saving them settles the prefab question too. A level published as a
+      model would otherwise carry its collaborator list wherever it was
+      inserted, and a pack that names people is no longer the portable thing the
+      format works so hard to keep it.
+
+      What that leaves to get right is that rights are granted at two moments:
+      when the scene loads, and again for whoever arrives afterwards. So a
+      grant takes a user id as well as a Player, and Prism binds it when that
+      player turns up. The game hands its collaborator list over once, at load,
+      out of the record it already keeps — rather than every game writing the
+      same PlayerAdded hook and one of them forgetting, which costs an owner
+      access to their own level the first time they rejoin. Rights drop when
+      their scene is destroyed and when their player leaves, as the rate budget
+      already does.
+
+      Capabilities are plain strings — `Publish`, `Invite` — and exist by
+      appearing in a role's grant list rather than by being registered, with a
+      warning the first time something asks for one that nothing grants. They
+      need no ids because nothing writes them into a pack. Prism's own three
+      verbs stay separate from them: it enforces those, and only answers for
+      the rest.
+
+      Object and property restrictions stay per kind, each with a whitelist and
+      a blacklist, a present whitelist being exhaustive and an absent one
+      meaning no constraint — the same thing those two words already mean in
+      enum constraints, and the direction that fails closed when a list is
+      built wrong. Splitting them by kind is also what makes
+      `[Tint] = {Crate, Barrel}` unambiguous: the field says which kind its
+      keys are, so nothing has to be done about object and property ids sharing
+      a number space.
+
+      The blacklist governs writing only. Nothing in it is a reason to withhold
+      data, which is what keeps replication out of the permission path: what a
+      client holds is decided by admission, and what it may change is decided
+      here.
+
+      Open: whether a scene loaded twice can carry different rights per copy.
+      Admission does not have the question — it is the scene's, so every copy
+      of it admits the same people.
+
+## In progress
+
+The three items above are being built in slices, one branch each off `main`.
+Nothing here is merged yet; the branches are on the remote.
+
+1. [x] **The world tree** — `feat/world-tree`. Container fields gone from the
+       object registry, the scene config and the copy. A copy owns a folder,
+       `Scene:Load(parent)` says where that folder goes, and `World.luau` keeps
+       `workspace.__prism.__scene_N.__copy_N` as the default for a copy that
+       names no parent. Docs and tests updated with it.
+
+2. [ ] **Registry payloads carry the template and links** — stop
+       `ToRegistryPayload` stripping `Instance` and `Links`. An instance
+       reference resolves on a client exactly when that instance replicates to
+       them, so a template in ReplicatedStorage arrives and one in
+       ServerStorage arrives as nil; warn about the latter at registration
+       rather than leaving it to be found at runtime. Deletes
+       `Objects:Localize`, `GetLocalized` and the `LocalRegistry` type, and the
+       client builds its instances from the replicated registry instead.
+
+3. [ ] **Admission** — `Scene:Admit` and `Evict`, taking a user id as readily
+       as a Player, with an empty list meaning public. Every FireAll about a
+       copy or its objects becomes a fire at that scene's admitted; the join
+       replay skips what it may not send; admitting is a targeted replay and
+       evicting a bulk removal.
+
+4. [ ] **`Replicate` on an object type**, which needs 3 to have somewhere to
+       make an exception to.
+
+5. [ ] **`Open` and client rendering** — the copy's mode has to ride on
+       `Scenes.InstanceAdded`, or a client cannot tell "the server built no
+       instance" from "the reference did not survive the trip" and will draw a
+       second part for every object on a slow join. Wants the client side "a
+       copy appeared" signal too: pull that out of Queued, since per-copy
+       placement, PlayerGui rendering and this all need the same handle.
+
+6. [ ] **Permissions** — last, and independent of the rest.
+
 ## Queued
 
 - [ ] **Unregistering does not reach the client.** `Properties:Unregister` drops
