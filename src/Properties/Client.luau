@@ -28,6 +28,13 @@ function Properties.new(Reference: PropertyRegistry<any> | PropertyIdentifier): 
     return Shared.new(Registered, Reference)
 end
 
+-- Some properties as a panel lays them out, from the Display that came with
+-- each registry. Usually an object type's list:
+-- Properties:Layout(Objects:GetRegistry(object.Parent).Properties).
+function Properties:Layout(Ids: {PropertyIdentifier}, IncludeHidden: boolean?): {Types.Section}
+    return Shared.Layout(Registered, Ids, IncludeHidden)
+end
+
 -- The server sends a CustomEnum constraint as the enum's name, because the enum
 -- table carries methods and a remote cannot serialize a function. Resolve it
 -- back into the local registry so IsValid can compare against it.

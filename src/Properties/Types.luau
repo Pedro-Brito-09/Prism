@@ -82,12 +82,38 @@ end
 export type ValueFor<T> = GetFromMap<PropertyValues, T>
 export type ConstraintsFor<T> = GetFromMap<PropertyConstraints, T>
 
+-- How a property presents itself in an editor: enough for a property panel to
+-- be generated from the registry rather than written per property. Presentation
+-- only. ReadOnly greys a field out; it does not stop a write, which is what a
+-- property blacklist in Permissions is for.
+export type DisplayConfig = {
+    Category: string?,
+    Order: number?,
+    Description: string?,
+    Hidden: boolean?,
+    ReadOnly: boolean?,
+}
+
+-- The same, with every default filled in at registration.
+export type Display = {
+    -- "General" when left out.
+    Category: string,
+
+    -- Lower comes first; ties keep the order the object type lists them in.
+    Order: number,
+
+    Description: string?,
+    Hidden: boolean,
+    ReadOnly: boolean,
+}
+
 export type PropertyRegistry<T = PropertyType> = {
     Id: PropertyIdentifier,
     Name: string,
     Type: T,
     Constraints: ConstraintsFor<T>,
-    DefaultValue: ValueFor<T>
+    DefaultValue: ValueFor<T>,
+    Display: Display,
 }
 
 export type PropertyConfig<T = PropertyType> = {
@@ -96,6 +122,13 @@ export type PropertyConfig<T = PropertyType> = {
     Type: T,
     Constraints: ConstraintsFor<T>?,
     DefaultValue: ValueFor<T>,
+    Display: DisplayConfig?,
+}
+
+-- One category of a laid out panel, its properties in display order.
+export type Section = {
+    Category: string,
+    Properties: {PropertyRegistry<any>},
 }
 
 export type Property<T = PropertyType> = {

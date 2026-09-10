@@ -485,6 +485,62 @@ end)
 
 T:Describe("Properties")
 
+-- Registered at load like the rest, so the client receives them too and checks
+-- the metadata came across.
+const SpeedId = Properties:Register({
+    Name = "TestSpeed",
+    Type = "Number",
+    DefaultValue = 1,
+    Display = {Category = "Motion", Order = 2, Description = "Studs a second"},
+}) :: number
+
+const SpinId = Properties:Register({
+    Name = "TestSpin",
+    Type = "Number",
+    DefaultValue = 0,
+    Display = {Category = "Motion", Order = 1},
+}) :: number
+
+const SecretId = Properties:Register({
+    Name = "TestSecret",
+    Type = "Text",
+    DefaultValue = "",
+    Display = {Hidden = true},
+}) :: number
+
+const PlainId = Properties:Register({
+    Name = "TestPlain",
+    Type = "Bool",
+    DefaultValue = false,
+    Display = {Order = "first" :: any},
+}) :: number
+
+T:Test("display metadata is filled in at registration", function()
+    const Display = Properties:GetRegistry(PlainId).Display
+
+    T:Eq(Display.Category, "General", "a category by default")
+    T:Eq(Display.Order, 0, "a malformed order falls back")
+    T:Eq(Display.Hidden, false, "nothing hidden unless it says so")
+    T:Eq(Display.ReadOnly, false, "nor read only")
+
+    T:Eq(Properties:GetRegistry(SpeedId).Display.Description, "Studs a second", "what was given is kept")
+    T:Eq(Properties:GetRegistryPayload(SpeedId).Display.Category, "Motion", "and goes out with the registry")
+end)
+
+T:Test("a panel is laid out from the metadata", function()
+    const Layout = Properties:Layout({SpeedId, SecretId, PlainId, SpinId})
+
+    T:Eq(#Layout, 2, "two categories, the hidden property left out")
+    T:Eq(Layout[1].Category, "General", "the category holding the lowest order comes first")
+    T:Eq(Layout[2].Category, "Motion", "then the next")
+    T:Eq(Layout[2].Properties[1].Id, SpinId, "within one, lowest order first")
+    T:Eq(Layout[2].Properties[2].Id, SpeedId, "then the next")
+
+    T:Eq(#Properties:Layout({SecretId}), 0, "hidden on its own is nothing")
+    T:Eq(#Properties:Layout({SecretId}, true), 1, "unless hidden ones are asked for")
+    T:Eq(#Properties:Layout({99999}), 0, "an id nothing is registered under is skipped")
+end)
+
 const TitleId = Properties:Register({
     Name = "TestTitle",
     Type = "Text",
