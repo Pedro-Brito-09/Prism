@@ -8,6 +8,93 @@ work and left unrun on purpose — the framework gets played through in one pass
 once it is structurally finished, so a ticked item means the work landed and
 reads right, never that it was run with a player in it.
 
+## In design
+
+- [ ] **Permissions, scoped and stored.** A permission today is a role a player
+      is assigned, global to the server, held in memory and gone when they
+      leave. An editor several people share needs three things it does not
+      have.
+
+      *Scope.* Rights over a level belong to that level. Two groups editing two
+      scenes in one server means "may edit" has to mean "may edit **this**
+      scene", or everyone present can touch everything. So permissions split:
+      **global** ones — the rate budget, whether you may register a scene at
+      all, capabilities that are about the session rather than a document — and
+      **per scene** ones, which is where the verbs and the object and property
+      restrictions live. Callers do not have to name the scene: every check
+      site already holds the object, an object knows its copy and a copy knows
+      its scene, so `Can` resolves it.
+
+      This subsumes the audience idea rather than sitting beside it. A scene's
+      audience is the set of players holding any right on it, so admitting
+      someone is granting them one, and there is no second list to keep in
+      step. What replicates to whom follows from that: a copy's objects go to
+      its audience, and to nobody else unless the object type says otherwise.
+
+      *Roles stop being live.* A role becomes a template. Granting one clears
+      the player's set and copies its capabilities in; from then on the
+      player's own set is the whole truth, and capabilities are granted and
+      revoked one at a time. That removes the inheritance rules, the question
+      of whether a per-player entry may widen or only narrow, and the payload
+      cache keyed by role name. The price, taken knowingly: editing a role
+      later does not reach anyone already holding it.
+
+      *They persist.* Global sets get their own key. A scene's sets are saved
+      with the scene but **not inside its pack** — a pack carries only local
+      ids precisely so it can be loaded under any scene, and writing user ids
+      into it would make a copied prefab arrive carrying someone else's
+      collaborators. A record keyed by scene, saved alongside, keeps the pack
+      portable. Both are plain data over ids that are never recycled, so
+      storing them is safe by the same rule that makes saved objects safe.
+
+      Capabilities are plain strings — `Publish`, `Invite` — and exist by
+      appearing in a role's grant list rather than by being registered, with a
+      warning the first time something asks for one that nothing grants. They
+      need no ids because nothing writes them into a pack. Prism's own three
+      verbs stay separate from them: it enforces those, and only answers for
+      the rest.
+
+      Object and property restrictions stay per kind, each with a whitelist and
+      a blacklist, a present whitelist being exhaustive and an absent one
+      meaning no constraint — the same thing those two words already mean in
+      enum constraints, and the direction that fails closed when a list is
+      built wrong. Splitting them by kind is also what makes
+      `[Tint] = {Crate, Barrel}` unambiguous: the field says which kind its
+      keys are, so nothing has to be done about object and property ids sharing
+      a number space.
+
+      The blacklist governs writing only. Nothing in it is a reason to withhold
+      data, which is what keeps replication out of the permission path: what a
+      client holds is decided by the scene it has rights on, and what it may
+      change is decided here.
+
+      Open: whether a scene loaded twice can carry different rights per copy,
+      and what a joining player is told about scenes it has no rights on --
+      probably that they exist, since an object type marked for everyone has to
+      be filable against a copy the client has heard of.
+
+- [ ] **`Replicate` on an object type.** Whether an object's *data* reaches a
+      client, as against its instance, which ordinary replication delivers on
+      its own. Most objects are scenery: someone playing needs the part and
+      never the property table, while a spinning part needs its speed on the
+      client for the script driving it. One field on the registry — everyone,
+      or only those with rights to the scene — defaulting to everyone, so
+      nothing changes until it is used, and forgetting it costs bandwidth
+      rather than breaking code.
+
+      The win is the join. The replay walks every live object and ships it in
+      chunks, so a five thousand object level costs every joining player five
+      thousand compressed objects, nearly all of them scenery nobody will ever
+      ask about. With this, a player pays for the handful of objects with
+      client code behind them and the editing party pays for the rest.
+
+      One invariant has to change with it: the client builds an object's
+      property table from the registry's full list and fills in defaults, and a
+      partially replicated object has to build only what the buffer actually
+      carried. Otherwise a withheld property sits there holding its default and
+      reads as real data, which is worse than not having it. The buffer already
+      names exactly what it holds.
+
 ## Queued
 
 - [ ] **Unregistering does not reach the client.** `Properties:Unregister` drops
