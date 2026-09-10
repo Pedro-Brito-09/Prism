@@ -198,9 +198,9 @@ reads right, never that it was run with a player in it.
 
 ## In progress
 
-The three items above are being built in slices, one branch each. The world
-tree is merged; each later slice branches off the one before it while that one
-is unmerged, and all of them are on the remote.
+The three items above are being built in slices, one branch each. Slices 1 to
+3 are merged into `main`; a slice branches off `main`, or off the slice before
+it while that one is unmerged, and every branch is on the remote.
 
 1. [x] **The world tree** — `feat/world-tree`. Container fields gone from the
        object registry, the scene config and the copy. A copy owns a folder,
@@ -224,8 +224,12 @@ is unmerged, and all of them are on the remote.
        replay skips what it may not send; admitting is a targeted replay and
        evicting a bulk removal.
 
-4. [ ] **`Replicate` on an object type**, which needs 3 to have somewhere to
-       make an exception to.
+4. [x] **`Replicate` on an object type** — `feat/replicate`. `"Everyone"` or
+       `"Admitted"`, defaulting to everyone as designed, so a private scene
+       built with `Load` still sends every player its copies and the objects of
+       every type left at the default. Per type rather than per property, so an
+       object goes whole or not at all and the client never builds a partial
+       one. Anything but the two strings is kept to the admitted.
 
 5. [ ] **`Open` and client rendering** — the copy's mode has to ride on
        `Scenes.InstanceAdded`, or a client cannot tell "the server built no

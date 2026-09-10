@@ -17,6 +17,7 @@ const PRISM = ReplicatedStorage:WaitForChild("Prism").src
 const CRATE_OBJECT = "TestCrate"
 const BARE_OBJECT = "TestBare"
 const SHOWN_OBJECT = "TestShown"
+const PRIVATE_OBJECT = "TestPrivate"
 const FIXTURE_PROPERTY = "TestTitle"
 const DENIED_MARKER = "FixtureDenied"
 const EDITABLE_MARKER = "FixtureEditable"
@@ -101,6 +102,10 @@ end)
 
 const ShownId = WaitFor("shown registry", function()
     return FindObjectType(SHOWN_OBJECT)
+end)
+
+const PrivateId = WaitFor("private registry", function()
+    return FindObjectType(PRIVATE_OBJECT)
 end)
 
 const Denied = if CrateId and TitleId
@@ -213,7 +218,7 @@ end)
 
 T:Describe("Admission")
 
-T:Test("a scene you were not admitted to is never mentioned", function()
+T:Test("a scene you were not admitted to sends only what replicates to everyone", function()
     -- The admitted one first, so this does not pass merely because nothing has
     -- arrived yet.
     T:Eventually(function()
@@ -222,32 +227,52 @@ T:Test("a scene you were not admitted to is never mentioned", function()
 
     T:Eq(Scenes:Get("FixtureHidden"), nil, "not its name")
 
-    if BareId and TitleId then
-        T:Eq(FindLiveObject(BareId, TitleId, "FixtureHiddenObject"), nil, "not its object")
+    if not BareId or not PrivateId or not TitleId then
+        T:Ok(false, "no registries")
+        return
     end
+
+    const Scenery = T:Eventually(function()
+        return FindLiveObject(BareId, TitleId, "FixtureHiddenScenery")
+    end, 5, "its scenery")
+
+    if Scenery then
+        T:Eq(Scenes:GetInstanceScene(Scenery.InstanceId), Scenery.Scene, "filed under a copy it was told of")
+        T:Eq(Scenes:GetById(Scenery.Scene), nil, "belonging to a scene it was not told the name of")
+    end
+
+    T:Eq(FindLiveObject(PrivateId, TitleId, "FixtureHiddenPrivate"), nil, "not what is kept for the admitted")
 end)
 
-T:Test("a scene you were admitted to arrives with its copy and objects", function()
+T:Test("a scene you were admitted to arrives whole", function()
     const Admitted = Scenes:Get("FixtureAdmitted")
     T:Ok(Admitted, "its registry")
 
-    if not Admitted or not BareId or not TitleId then
+    if not Admitted or not BareId or not PrivateId or not TitleId then
         return
     end
 
     T:Eq(#Scenes:GetInstances(Admitted.Id), 1, "its copy")
+
     T:Eventually(function()
-        return FindLiveObject(BareId, TitleId, "FixtureAdmittedObject")
-    end, 5, "its object")
+        return FindLiveObject(BareId, TitleId, "FixtureAdmittedScenery")
+    end, 5, "its scenery")
+
+    T:Eventually(function()
+        return FindLiveObject(PrivateId, TitleId, "FixtureAdmittedPrivate")
+    end, 5, "and what is kept for the admitted")
 end)
 
-T:Test("eviction takes the scene and everything in it", function()
+T:Test("eviction takes the name and what is kept for the admitted", function()
     const Admitted = Scenes:Get("FixtureAdmitted")
-    const Obj = if BareId and TitleId
-        then FindLiveObject(BareId, TitleId, "FixtureAdmittedObject")
+    const Scenery = if BareId and TitleId
+        then FindLiveObject(BareId, TitleId, "FixtureAdmittedScenery")
+        else nil
+    const Private = if PrivateId and TitleId
+        then FindLiveObject(PrivateId, TitleId, "FixtureAdmittedPrivate")
         else nil
 
-    if not Admitted or not Obj or not Editable or not TitleId then
+    if not Admitted or not Scenery or not Private or not Editable or not TitleId then
         T:Ok(false, "no admitted fixture")
         return
     end
@@ -258,10 +283,14 @@ T:Test("eviction takes the scene and everything in it", function()
 
     T:Eventually(function()
         return Scenes:Get("FixtureAdmitted") == nil
-    end, 5, "the scene went")
+    end, 5, "the name went")
 
-    T:Ok(Obj.Destroyed, "its object with it")
-    T:Eq(#Scenes:GetInstances(Admitted.Id), 0, "and its copy")
+    T:Eventually(function()
+        return Private.Destroyed
+    end, 5, "the private object went")
+
+    T:Ok(not Scenery.Destroyed, "the scenery stayed, because every player is owed it")
+    T:Eq(#Scenes:GetInstances(Admitted.Id), 1, "and so did its copy")
 
     Editable:Set(TitleId, EDITABLE_MARKER)
 end)

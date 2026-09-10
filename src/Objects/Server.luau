@@ -41,6 +41,14 @@ const Workspace: {[RuntimeId]: Object} = {}
 -- as the new one.
 const Ids = IdPool.new(nil, false)
 
+-- Whether an object's data goes to every player or only to the ones its scene
+-- admits. A type that is somehow not registered answers Admitted, which sends
+-- nothing to anybody not already owed everything.
+const function ReachOf(Obj: Object): Types.Reach
+    const Registry = Registered[Obj.Parent]
+    return if Registry then Registry.Replicate else "Admitted"
+end
+
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -64,7 +72,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     if Changed then
         const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
         if Compressed then
-            Audience.Fire(Network.PropertyChanged, self.Scene, self.RuntimeId, Prop.Parent, Compressed)
+            Audience.Fire(Network.PropertyChanged, self.Scene, ReachOf(self), self.RuntimeId, Prop.Parent, Compressed)
         end
     end
 
@@ -104,7 +112,7 @@ const function Teardown(self: Object, Announce: boolean)
         -- A scene unloading announces itself once, by name, instead of once per
         -- object it held.
         if Announce then
-            Audience.Fire(Network.ObjectRemoved, self.Scene, self.RuntimeId)
+            Audience.Fire(Network.ObjectRemoved, self.Scene, ReachOf(self), self.RuntimeId)
         end
     end
 
@@ -131,6 +139,7 @@ const function ToRegistryPayload(Registry: ObjectRegistry)
         Properties = Registry.Properties,
         Instance = Registry.Instance,
         Links = Registry.Links,
+        Replicate = Registry.Replicate,
     }
 end
 
@@ -170,12 +179,25 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
         Logger:Warn(`Object {Config.Name}'s template {Config.Instance:GetFullName()} does not replicate, so clients receive this type without it and cannot build its instances themselves. Put it in ReplicatedStorage if a client will draw or own copies of it.`)
     end
 
+    -- Everyone unless told otherwise, so a type registered before this field
+    -- existed behaves exactly as it did. A value that is neither is kept to the
+    -- admitted: a typo meant to keep something back should keep it back rather
+    -- than send it to every player.
+    local Replicate: Types.Reach = "Everyone"
+    if Config.Replicate == "Admitted" then
+        Replicate = "Admitted"
+    elseif Config.Replicate ~= nil and Config.Replicate ~= "Everyone" then
+        Logger:Warn(`Object {Config.Name} has Replicate = {tostring(Config.Replicate)}, which is neither "Everyone" nor "Admitted". Kept to the admitted.`)
+        Replicate = "Admitted"
+    end
+
     const Obj: ObjectRegistry = {
         Id = Identifier,
         Name = Config.Name,
         Properties = Valid,
         Instance = Config.Instance,
         Links = Shared.ValidateLinks(Config.Name, Config.Instance, Config.Links, Valid),
+        Replicate = Replicate,
     }
 
     Registered[Identifier] = Obj
@@ -187,26 +209,35 @@ end
 -- made a large workspace flood the remote queue in a single frame.
 const ANNOUNCE_CHUNK = 50
 
--- Splits a batch by the scene each entry belongs to. Every scene has its own
--- audience, and one transaction is free to touch several.
-const function GroupByScene<T>(List: {T}, SceneOf: (T) -> Types.SceneIdentifier): {[Types.SceneIdentifier]: {T}}
-    const Groups: {[Types.SceneIdentifier]: {T}} = {}
+-- Splits a batch by the scene each entry's object belongs to and by how far
+-- that object reaches. A scene has an audience per reach, and one transaction
+-- is free to touch several scenes.
+const function Group<T>(List: {T}, ObjectOf: (T) -> Object): {[Types.SceneIdentifier]: {[string]: {T}}}
+    const Groups: {[Types.SceneIdentifier]: {[string]: {T}}} = {}
     for _, Entry in List do
-        const Scene = SceneOf(Entry)
-        local Group = Groups[Scene]
-        if not Group then
-            Group = {}
-            Groups[Scene] = Group
+        const Obj = ObjectOf(Entry)
+
+        local ByReach = Groups[Obj.Scene]
+        if not ByReach then
+            ByReach = {}
+            Groups[Obj.Scene] = ByReach
         end
 
-        table.insert(Group, Entry)
+        const Reach = ReachOf(Obj)
+        local Entries = ByReach[Reach]
+        if not Entries then
+            Entries = {}
+            ByReach[Reach] = Entries
+        end
+
+        table.insert(Entries, Entry)
     end
 
     return Groups
 end
 
-const function SceneOf(Obj: Object): Types.SceneIdentifier
-    return Obj.Scene
+const function Itself(Obj: Object): Object
+    return Obj
 end
 
 -- The chunked path every batch of whole objects goes down: a scene loading, a
@@ -267,16 +298,19 @@ end
 -- scene while this is still sending was handed these objects by that telling,
 -- and sending them here as well would send them twice.
 function Objects.AnnounceAll(List: {Object})
-    for Scene, Group in GroupByScene(List, SceneOf) do
-        const Hearing = Audience.Hearing(Scene)
-        if next(Hearing) == nil then
-            continue
-        end
+    for Scene, ByReach in Group(List, Itself) do
+        for Key, Entries in ByReach do
+            const Reach = Key :: Types.Reach
+            const Hearing = Audience.Hearing(Scene, Reach)
+            if next(Hearing) == nil then
+                continue
+            end
 
-        SendObjects(Group, function(RuntimeIds, InstanceIds, Buffers, Instances): boolean
-            Audience.FireHearing(Network.ObjectsReplayed, Scene, Hearing, RuntimeIds, InstanceIds, Buffers, Instances)
-            return true
-        end)
+            SendObjects(Entries, function(RuntimeIds, InstanceIds, Buffers, Instances): boolean
+                Audience.FireHearing(Network.ObjectsReplayed, Scene, Reach, Hearing, RuntimeIds, InstanceIds, Buffers, Instances)
+                return true
+            end)
+        end
     end
 end
 
@@ -292,6 +326,22 @@ function Objects.Stream(Plr: Player, List: {Object}, Keep: (Object) -> boolean)
         return true
     end, Keep)
 end
+
+-- The reverse of Stream: one player losing objects they were sent, a chunk at a
+-- time, for as long as Going says the loss still stands.
+function Objects.Unsend(Plr: Player, RuntimeIds: {RuntimeId}, Going: () -> boolean)
+    for Start = 1, #RuntimeIds, ANNOUNCE_CHUNK do
+        if not Plr.Parent or not Going() then
+            return
+        end
+
+        const Stop = math.min(Start + ANNOUNCE_CHUNK - 1, #RuntimeIds)
+        Network.ObjectsRemoved:Fire(Plr, table.move(RuntimeIds, Start, Stop, 1, {}))
+        task.wait()
+    end
+end
+
+Objects.ReachOf = ReachOf
 
 -- Destroys everything a scene instance holds without a packet per object. The
 -- caller sends one naming the instance instead.
@@ -309,46 +359,50 @@ end
 -- up; answering it with one packet per operation on the way down would put the
 -- flood back where it was taken out.
 --
--- Each change names its object's scene, because that is who hears about it.
-function Objects.AnnounceChanged(Changes: {{RuntimeId: RuntimeId, Scene: Types.SceneIdentifier, Property: PropertyTypes.PropertyIdentifier, Value: buffer}})
-    for Scene, Group in GroupByScene(Changes, function(Change): Types.SceneIdentifier
-        return Change.Scene
+-- Each change carries its object, because the object's scene and type are who
+-- hears about it.
+function Objects.AnnounceChanged(Changes: {{Object: Object, Property: PropertyTypes.PropertyIdentifier, Value: buffer}})
+    for Scene, ByReach in Group(Changes, function(Change): Object
+        return Change.Object
     end) do
-        const Hearing = Audience.Hearing(Scene)
-        if next(Hearing) == nil then
-            continue
-        end
-
-        local RuntimeIds = {}
-        local PropertyIds = {}
-        local Values = {}
-        local Count = 0
-
-        const function Flush()
-            if Count == 0 then
-                return
+        for Key, Entries in ByReach do
+            const Reach = Key :: Types.Reach
+            const Hearing = Audience.Hearing(Scene, Reach)
+            if next(Hearing) == nil then
+                continue
             end
 
-            Audience.FireHearing(Network.PropertiesChanged, Scene, Hearing, RuntimeIds, PropertyIds, Values)
-            RuntimeIds = {}
-            PropertyIds = {}
-            Values = {}
-            Count = 0
-        end
+            local RuntimeIds = {}
+            local PropertyIds = {}
+            local Values = {}
+            local Count = 0
 
-        for _, Change in Group do
-            Count += 1
-            RuntimeIds[Count] = Change.RuntimeId
-            PropertyIds[Count] = Change.Property
-            Values[Count] = Change.Value
+            const function Flush()
+                if Count == 0 then
+                    return
+                end
 
-            if Count >= ANNOUNCE_CHUNK then
-                Flush()
-                task.wait()
+                Audience.FireHearing(Network.PropertiesChanged, Scene, Reach, Hearing, RuntimeIds, PropertyIds, Values)
+                RuntimeIds = {}
+                PropertyIds = {}
+                Values = {}
+                Count = 0
             end
-        end
 
-        Flush()
+            for _, Change in Entries do
+                Count += 1
+                RuntimeIds[Count] = Change.Object.RuntimeId
+                PropertyIds[Count] = Change.Property
+                Values[Count] = Change.Value
+
+                if Count >= ANNOUNCE_CHUNK then
+                    Flush()
+                    task.wait()
+                end
+            end
+
+            Flush()
+        end
     end
 end
 
@@ -359,36 +413,39 @@ end
 -- Handed the objects rather than their ids: they are already torn down, and
 -- the scene each belonged to is the only way left to know who to tell.
 function Objects.AnnounceRemoved(Removed: {Object})
-    for Scene, Group in GroupByScene(Removed, SceneOf) do
-        const Hearing = Audience.Hearing(Scene)
-        if next(Hearing) == nil then
-            continue
-        end
-
-        local Chunk = {}
-        local Count = 0
-
-        const function Flush()
-            if Count == 0 then
-                return
+    for Scene, ByReach in Group(Removed, Itself) do
+        for Key, Entries in ByReach do
+            const Reach = Key :: Types.Reach
+            const Hearing = Audience.Hearing(Scene, Reach)
+            if next(Hearing) == nil then
+                continue
             end
 
-            Audience.FireHearing(Network.ObjectsRemoved, Scene, Hearing, Chunk)
-            Chunk = {}
-            Count = 0
-        end
+            local Chunk = {}
+            local Count = 0
 
-        for _, Obj in Group do
-            Count += 1
-            Chunk[Count] = Obj.RuntimeId
+            const function Flush()
+                if Count == 0 then
+                    return
+                end
 
-            if Count >= ANNOUNCE_CHUNK then
-                Flush()
-                task.wait()
+                Audience.FireHearing(Network.ObjectsRemoved, Scene, Reach, Hearing, Chunk)
+                Chunk = {}
+                Count = 0
             end
-        end
 
-        Flush()
+            for _, Obj in Entries do
+                Count += 1
+                Chunk[Count] = Obj.RuntimeId
+
+                if Count >= ANNOUNCE_CHUNK then
+                    Flush()
+                    task.wait()
+                end
+            end
+
+            Flush()
+        end
     end
 end
 
@@ -571,7 +628,7 @@ const function Construct(
     -- A scene being loaded announces nothing here: its objects go out together
     -- through the chunked replay path instead of one packet each.
     if Announce then
-        Audience.Fire(Network.ObjectAdded, Instance_.Scene, RuntimeId, Instance_.Id, Compressor:CompressObject(Obj :: any), Inst)
+        Audience.Fire(Network.ObjectAdded, Instance_.Scene, Ref.Replicate, RuntimeId, Instance_.Id, Compressor:CompressObject(Obj :: any), Inst)
     end
 
     return Obj :: any
