@@ -804,6 +804,48 @@ T:Test("destroying a local object takes its part with it", function()
     Sandbox:Destroy()
 end)
 
+T:Test("objects appearing and going are announced", function()
+    const Sandbox = Scenes.new({Name = "ClientSignals"})
+    if not Sandbox or not BareId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    local Added: any = nil
+    local Removed: any = nil
+
+    const StopAdded = Objects:OnAdded(function(Obj)
+        Added = Obj
+    end)
+
+    const StopRemoved = Objects:OnRemoved(function(Obj)
+        Removed = Obj
+    end)
+
+    const Obj = Copy:Create(BareId)
+    T:Eventually(function()
+        return Added == Obj
+    end, 2, "added fired with the object")
+    T:Eq(Objects:Get(Obj.RuntimeId), Obj, "already filed when told")
+
+    Obj:Destroy()
+    T:Eventually(function()
+        return Removed == Obj
+    end, 2, "removed fired with it")
+    T:Ok(Removed and Removed.Destroyed, "already torn down when told")
+
+    StopAdded()
+    StopRemoved()
+    StopAdded()
+
+    const Later = Copy:Create(BareId)
+    task.wait(0.2)
+    T:Ok(Added ~= Later, "a disconnected listener hears nothing more")
+
+    Sandbox:Destroy()
+end)
+
 T:Test("creating without a copy of your own is refused", function()
     T:Throws(function()
         Objects.new(BareId, nil, nil)
