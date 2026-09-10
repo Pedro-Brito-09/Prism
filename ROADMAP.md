@@ -31,6 +31,13 @@ reads right, never that it was run with a player in it.
       step. What replicates to whom follows from that: a copy's objects go to
       its audience, and to nobody else unless the object type says otherwise.
 
+      So a grant is a replication event rather than bookkeeping. Rights
+      arriving means a targeted replay of that copy to that player, and rights
+      going away means a bulk removal, both of which the scene and transaction
+      work already built. That is also what keeps things out of here that look
+      like they belong: a moderator who may look into any level is a capability
+      the game checks and a grant it makes, not a feature Prism has to carry.
+
       *Roles stop being live.* A role becomes a template. Granting one clears
       the player's set and copies its capabilities in; from then on the
       player's own set is the whole truth, and capabilities are granted and
@@ -86,24 +93,6 @@ reads right, never that it was run with a player in it.
       data, which is what keeps replication out of the permission path: what a
       client holds is decided by the scene it has rights on, and what it may
       change is decided here.
-
-      *Moderation.* One more right Prism enforces itself, beside the three
-      verbs: whether you may admit yourself. Someone holding it is not handed
-      every scene at once — that is the flood the rest of this avoids, and a
-      dozen levels drawn in one place is unreadable anyway — but may enter one
-      when they choose and leave it again. Entering is a grant they make to
-      themselves rather than a way around the check, and everything follows
-      from that: they are in the audience, so live edits reach them; their own
-      verbs decide what they may touch, so a look-only moderator is one without
-      CanEdit; the copy carries its own container, so two observed scenes draw
-      in two places; and because it is a grant, the fact that they are in there
-      is visible rather than a hole in the data.
-
-      A boolean beside the verbs rather than a string in a grant list, since
-      this is one Prism acts on. Entering costs a targeted replay of the copy
-      and leaving a bulk removal, both of which the scene and transaction work
-      already built, and it spends an action from the budget the way a commit
-      does.
 
       Open: whether a scene loaded twice can carry different rights per copy,
       and what a joining player is told about scenes it has no rights on --
