@@ -196,6 +196,44 @@ reads right, never that it was run with a player in it.
       Admission does not have the question — it is the scene's, so every copy
       of it admits the same people.
 
+## In progress
+
+The three items above are being built in slices, one branch each off `main`.
+Nothing here is merged yet; the branches are on the remote.
+
+1. [x] **The world tree** — `feat/world-tree`. Container fields gone from the
+       object registry, the scene config and the copy. A copy owns a folder,
+       `Scene:Load(parent)` says where that folder goes, and `World.luau` keeps
+       `workspace.__prism.__scene_N.__copy_N` as the default for a copy that
+       names no parent. Docs and tests updated with it.
+
+2. [ ] **Registry payloads carry the template and links** — stop
+       `ToRegistryPayload` stripping `Instance` and `Links`. An instance
+       reference resolves on a client exactly when that instance replicates to
+       them, so a template in ReplicatedStorage arrives and one in
+       ServerStorage arrives as nil; warn about the latter at registration
+       rather than leaving it to be found at runtime. Deletes
+       `Objects:Localize`, `GetLocalized` and the `LocalRegistry` type, and the
+       client builds its instances from the replicated registry instead.
+
+3. [ ] **Admission** — `Scene:Admit` and `Evict`, taking a user id as readily
+       as a Player, with an empty list meaning public. Every FireAll about a
+       copy or its objects becomes a fire at that scene's admitted; the join
+       replay skips what it may not send; admitting is a targeted replay and
+       evicting a bulk removal.
+
+4. [ ] **`Replicate` on an object type**, which needs 3 to have somewhere to
+       make an exception to.
+
+5. [ ] **`Open` and client rendering** — the copy's mode has to ride on
+       `Scenes.InstanceAdded`, or a client cannot tell "the server built no
+       instance" from "the reference did not survive the trip" and will draw a
+       second part for every object on a slow join. Wants the client side "a
+       copy appeared" signal too: pull that out of Queued, since per-copy
+       placement, PlayerGui rendering and this all need the same handle.
+
+6. [ ] **Permissions** — last, and independent of the rest.
+
 ## Queued
 
 - [ ] **Unregistering does not reach the client.** `Properties:Unregister` drops
