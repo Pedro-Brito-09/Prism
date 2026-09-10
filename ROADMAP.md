@@ -10,16 +10,6 @@ reads right, never that it was run with a player in it.
 
 ## Queued
 
-- [ ] **A pushed scene belongs to nobody.** `Push` registers the scene public
-      and grants the player who pushed it nothing on it, so its name reaches
-      every player and its author cannot edit it until the game steps in.
-      Admitting the pusher and granting them a role is the likely default.
-
-- [ ] **The template warning is loud for server-only games.** Registration
-      warns for every type whose template sits in ServerStorage, which is
-      legitimate when no client ever draws it. Warning when a type is first
-      opened, or an opt-out per type, would say it only where it matters.
-
 - [ ] **Object added / removed signals on the client.** `AddObject` and
       `Teardown` are internal, so UI has to poll `GetWorkspace()` to notice
       anything appearing. Copies have theirs now: `Scenes:OnCopyAdded`.
@@ -46,6 +36,16 @@ reads right, never that it was run with a player in it.
       object can come back under the id it had.
 
 ## Done
+
+- [x] **A pushed scene belongs to its author, and templates warn where they
+      matter.** `Push` registers the scene admitting only the player who
+      pushed it, and `Scenes:SetPushRole` grants them a role on it; it used
+      to register public, with the author holding nothing. The warning about
+      a template in ServerStorage moved from registration, where it fired for
+      every such type in games whose clients never build anything, to the
+      client, once per type, the first time it tries to build one and cannot
+      see the template. The registry says whether it has one, so a client
+      can tell "none" from "not here".
 
 - [x] **Unregistering reaches the client.** `Properties:Unregister` used to
       drop a registry on the server and tell nobody; object types had no

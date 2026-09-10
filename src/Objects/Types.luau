@@ -59,6 +59,10 @@ export type ObjectRegistry = {
     -- The part is another matter: one the server built replicates to everybody
     -- whatever this says.
     Replicate: Reach,
+
+    -- Client side only: whether the server's registry has a template, which
+    -- tells a nil Instance above apart from one that did not replicate here.
+    HasTemplate: boolean?,
 }
 
 export type ObjectConfig = {

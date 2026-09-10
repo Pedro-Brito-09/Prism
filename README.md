@@ -57,8 +57,8 @@ A registry replicates whole, template and links included, so a client can build
 the same objects the server does. The template travels as a reference and
 resolves only on a client it replicates to: keep it in ReplicatedStorage if a
 client will ever build these objects itself, or in ServerStorage if only the
-server will. Registration warns about the second case, because clients then
-receive the type without its template.
+server will. A client that needs a template it can't see warns once for that
+type, the first time it tries to build one.
 
 `Replicate` says who is sent an object's data: `"Everyone"`, the default, or
 `"Admitted"`, meaning only the players its scene admits. Scenery that no client
@@ -350,11 +350,16 @@ preview:Commit()
 local ok, sceneId = Sandbox:Push("Room 4")
 ```
 
-The pack crosses in one packet. The server refuses it unless it may create every
-object type in it, re-encodes it so the pack it keeps is the one it wrote, and
-registers it as a scene of its own — it does not load it. Putting a room in the
-world is the server's call; the client asked for a document to be stored, not
-spawned.
+The pack crosses in one packet. The server refuses it unless the player holds
+the global `CanPush` right and every object type in it is registered. It
+re-encodes the pack so the one it keeps is the one it wrote, and registers it as
+a scene of its own without loading it. Putting a room in the world is the
+server's call; the client asked for a document to be stored, not spawned.
+
+A pushed scene admits only the player who pushed it, because it was built where
+nobody else could see it. `Scenes:SetPushRole(role)` also grants them that role
+on it. With no push role set, they hold no rights there until the game grants
+some.
 
 `Push` sends what the scene says it is, so commit the copy you mean first. What
 comes back is a different document from the one you pushed: the local scene

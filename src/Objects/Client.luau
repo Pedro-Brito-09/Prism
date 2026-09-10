@@ -91,6 +91,29 @@ const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
 const MAX_RUNTIME_ID = 4294967295
 local LocalRuntime = MAX_RUNTIME_ID
 
+-- Types already warned about, so a template that cannot be seen here is said
+-- once rather than once per object.
+const WarnedTemplate: {[ObjectIdentifier]: true} = {}
+
+-- The template to build a type's instances from here, for an object in a scene
+-- this client owns or in a copy it draws. Warned about the first time it is
+-- missing for a type that has one -- the moment it matters, and on the side it
+-- matters to. Registration used to guess from where the template sat, which
+-- warned for every type in ServerStorage, including every type in a game whose
+-- clients never build anything.
+const function TemplateOf(Registry: ObjectRegistry): Instance?
+    if Registry.Instance then
+        return Registry.Instance
+    end
+
+    if Registry.HasTemplate and not WarnedTemplate[Registry.Id] then
+        WarnedTemplate[Registry.Id] = true
+        Logger:Warn(`Object {Registry.Name} has a template that does not replicate to this client, so its objects are built here with no instance. Put the template in ReplicatedStorage.`)
+    end
+
+    return nil
+end
+
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -336,9 +359,10 @@ const function Construct(
     -- simply have no instance, which is exactly what a server side object
     -- registered without one does.
     local Inst: Instance? = nil
+    const Template = TemplateOf(Ref)
 
-    if Ref.Instance then
-        const Clone = Ref.Instance:Clone()
+    if Template then
+        const Clone = Template:Clone()
         Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
         CollectionService:AddTag(Clone, Shared.ObjectTag)
 
@@ -565,8 +589,9 @@ const function AddObject(
     local Resolved: Instance? = nil
 
     if Into then
-        if Registry.Instance then
-            const Clone = Registry.Instance:Clone()
+        const Template = TemplateOf(Registry)
+        if Template then
+            const Clone = Template:Clone()
             Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
             CollectionService:AddTag(Clone, Shared.ObjectTag)
             Clone.Parent = Into
