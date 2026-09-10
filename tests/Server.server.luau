@@ -2023,6 +2023,9 @@ T:Test("a pack a client built becomes a scene of its own", function()
 
     T:Eq(Scene.Id, Identifier, "the id it answered with")
     T:Eq(#Scene:GetInstances(), 0, "registered, not loaded")
+    T:Ok(not Scene:IsPublic(), "private")
+    T:Ok(Scene:Admits(-5000), "to the player who pushed it")
+    T:Eq(Scene:GetRights(-5000), nil, "who holds nothing on it with no push role set")
 
     const Copy = Scene:Load()
     const Restored = Copy:Find(1)
@@ -2038,6 +2041,29 @@ T:Test("a pack a client built becomes a scene of its own", function()
     T:Eq(Fresh.LocalId, 2, "the counter continues from what the pack held")
 
     Copy:Unload()
+end)
+
+T:Test("a push role is granted to whoever pushes", function()
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
+    Scenes:SetPushRole("TestBulk")
+
+    const Accepted, Identifier = Commit(Ghost, "RoleRoom", Packed(1, {
+        {Parent = BareId, LocalId = 1, Properties = {}},
+    }))
+
+    Scenes:SetPushRole(nil)
+    Permissions:Revoke(Ghost)
+
+    T:Ok(Accepted, "accepted")
+
+    const Scene = Scenes:GetById(Identifier)
+    const Rights = if Scene then Scene:GetRights(-5000) else nil
+    T:Ok(Rights, "the pusher holds rights on it")
+
+    if Rights then
+        T:Eq(Rights.Role, "TestBulk", "from the push role")
+    end
 end)
 
 T:Test("the id space a pack claims is not taken on trust", function()
@@ -2213,6 +2239,9 @@ OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
 -- unregister marker, by which point it has seen them arrive.
 const DoomedProperty = Properties:Register({Name = "FixtureDoomedProperty", Type = "Text", DefaultValue = ""}) :: number
 const DoomedType = Objects:Register({Name = "FixtureDoomedType", Properties = {DoomedProperty}}) :: number
+
+-- What the client holds on a scene it pushes, which its push test checks for.
+Scenes:SetPushRole("TestBuilder")
 
 -- Global rights for the budget and pushing, and rights on the default scene,
 -- which is where every editable fixture above lives.

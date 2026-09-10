@@ -613,6 +613,20 @@ const MAX_COMMIT_BYTES = 524288
 const MAX_COMMIT_OBJECTS = 4096
 const MAX_NAME_LENGTH = 64
 
+-- The role a player is granted on a scene they push, or nil for none. A pushed
+-- scene admits only its author either way: it was built where nobody else could
+-- see it, and registering it should not change that.
+local PushRole: string? = nil
+
+function Scenes:SetPushRole(Role: string?)
+    if Role and not Permissions:GetRegistered()[Role] then
+        Logger:Warn(`Cannot grant unregistered role {Role} on pushed scenes.`)
+        return
+    end
+
+    PushRole = Role
+end
+
 -- A client handing over a scene it built locally. Refusals are silent and say
 -- nothing but false, like every other client facing handler here: a refusal
 -- that logs is a refusal a client can spam to fill the server's output.
@@ -679,7 +693,13 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
     -- is the one the server wrote. Its LastId is the highest id actually in it
     -- rather than whatever the client claimed -- a pack declaring an id space
     -- already spent would otherwise give the scene room for nothing.
-    const Scene = Scenes.fromBuffer({Name = Name}, Compressor:CompressScene(Highest, Packed))
+    -- Private to its author from the packet that registers it, and theirs to
+    -- edit if the game has said what a pusher holds.
+    const Scene = Scenes.fromBuffer({
+        Name = Name,
+        Admitted = {Plr.UserId},
+        Rights = if PushRole then {[Plr.UserId] = PushRole} else nil,
+    }, Compressor:CompressScene(Highest, Packed))
     if not Scene then
         return false, 0
     end

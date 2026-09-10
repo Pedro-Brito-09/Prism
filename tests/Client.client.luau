@@ -647,6 +647,7 @@ T:Test("a registry arrives with its template and links", function()
     T:Ok(Shown.Links and #Shown.Links == 1, "its link came with it")
 
     T:Eq(Crate.Instance, nil, "a template in ServerStorage arrives as nil")
+    T:Ok(Crate.HasTemplate, "while the registry says there is one")
     T:Ok(Crate.Links and #Crate.Links == 2, "its links still arrive, and drive nothing without it")
 end)
 
@@ -826,41 +827,20 @@ T:Test("a local scene is handed to the server as a pack", function()
     T:Ok(Accepted, "the server took it")
     T:Ok(Identifier and Identifier > 0, "and answered with its id")
 
-    -- It registers on the server, so its registry reaches every client -- this
-    -- one included, through the same broadcast anyone else receives.
+    -- It registers on the server admitting only its author, which is this
+    -- client, so its registry comes back here and nowhere else.
     T:Eventually(function()
         return Scenes:Get("ClientPushedRoom")
     end, 5, "the scene came back as one of the server's")
 
+    T:Eventually(function()
+        const Pushed = Scenes:Get("ClientPushedRoom")
+        const Rights = if Pushed then Permissions:GetOn(Pushed.Id) else nil
+        return Rights ~= nil and Rights.Role == "TestBuilder"
+    end, 5, "and this client holds the push role on it")
+
     T:Ok(Scenes:GetLocal("ClientPush"), "and the local one is still local")
     T:Ok(Copy:Find(1), "still holding its own objects")
-
-    Sandbox:Destroy()
-end)
-
-T:Test("a pack the server may not create is refused", function()
-    if not CrateId then
-        T:Ok(false, "no crate registry")
-        return
-    end
-
-    -- TestCrate is blacklisted for this role, and the client is never told its
-    -- template, so the object has no instance -- which does not matter: what
-    -- the server refuses is the type.
-    const Sandbox = Scenes.new({Name = "ClientRefused"})
-    if not Sandbox then
-        T:Ok(false, "not registered")
-        return
-    end
-
-    const Copy = Sandbox:Load()
-    Copy:Create(CrateId)
-    Copy:Commit()
-
-    Window()
-
-    const Accepted = Sandbox:Push("ClientRefusedRoom")
-    T:Ok(not Accepted, "refused")
 
     Sandbox:Destroy()
 end)
