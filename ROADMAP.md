@@ -238,7 +238,13 @@ it while that one is unmerged, and every branch is on the remote.
        copy appeared" signal too: pull that out of Queued, since per-copy
        placement, PlayerGui rendering and this all need the same handle.
 
-6. [ ] **Permissions** — last, and independent of the rest.
+6. [x] **Permissions** — `feat/permissions`. Rights are per scene, every
+       copy of a scene sharing them, which settles the open question below.
+       Every grant is keyed by user id, so it holds again when its player
+       rejoins; scene rights go with their scene, global ones with the
+       server. No grant on a scene means nothing there. The budget is the
+       exception: anyone ungranted gets the default of 60. Pushing a scene is
+       a global right and no longer checks the pack's types against a role.
 
 ## Queued
 

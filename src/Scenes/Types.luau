@@ -1,5 +1,6 @@
 --!strict
 const ObjectTypes = require("../Objects/Types")
+const PermissionTypes = require("../Permissions/Types")
 const Handles = require("../Handles")
 
 export type SceneIdentifier = Handles.SceneIdentifier
@@ -14,6 +15,12 @@ export type SceneConfig = {
     -- never have been public: registering it has already told everyone present
     -- its name.
     Admitted: {Player | number}?,
+
+    -- Server only. Rights over the scene from the moment it exists: Player or
+    -- user id to the name of the role to grant. The collaborator list a game
+    -- already keeps, handed over once, so an owner holds their rights the
+    -- moment they arrive rather than after a PlayerAdded hook remembers them.
+    Rights: {[any]: string}?,
 }
 
 export type SceneRegistry = {
@@ -134,6 +141,18 @@ export type ServerScene = Scene & {
     Admits: (self: ServerScene, Who: Player | number) -> boolean,
     GetAdmitted: (self: ServerScene) -> {number},
     IsPublic: (self: ServerScene) -> boolean,
+
+    -- Rights over this scene, by user id. Not admission: admission decides
+    -- what a player is sent, and these decide what they may change. Session
+    -- state that goes with the scene; nothing writes them into a pack.
+    Rights: {[number]: PermissionTypes.SceneRights},
+
+    -- Clears what the player held here and copies the role's scene half in.
+    Grant: (self: ServerScene, Who: Player | number, Role: string) -> boolean,
+    Revoke: (self: ServerScene, Who: Player | number) -> (),
+    GrantCapability: (self: ServerScene, Who: Player | number, Capability: string) -> (),
+    RevokeCapability: (self: ServerScene, Who: Player | number, Capability: string) -> (),
+    GetRights: (self: ServerScene, Who: Player | number) -> PermissionTypes.SceneRights?,
 }
 
 -- A scene the client owns outright: a prefab preview, a local sandbox, a room

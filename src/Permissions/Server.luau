@@ -1,174 +1,368 @@
 --!strict
--- Server side authorization for the object remotes.
+-- Server side authorization.
 --
 -- Before this existed, Objects.SetProperty and Objects.Destroy accepted the
 -- calling Player and ignored it, and runtime ids are sequential from 1, so any
 -- client could walk the whole workspace and edit or delete all of it.
+--
+-- Rights come in two kinds. Global rights are about the session rather than any
+-- document: the action budget, whether a client may push a scene of its own,
+-- and whatever capabilities a game hangs off them. Scene rights are about one
+-- scene: Prism's three verbs, the object and property lists they reach, and the
+-- scene's own capabilities. "May edit" has to mean "may edit this scene", or
+-- two groups building two levels in one server can each touch the other's.
+-- Nobody holds anything on a scene until it is granted to them.
+--
+-- A role is a template, not a live link. Granting one clears what the player
+-- held and copies the role in, and from then on the player's own set is the
+-- whole truth. Editing a role later would not reach anyone who already holds
+-- it: the price, taken knowingly, of having no inheritance rules to get wrong.
+--
+-- Every grant is keyed by user id -- a Player is only a way of naming theirs --
+-- so a grant can name someone who is not here yet and still holds when they
+-- come back. Nothing is saved. Scene rights last as long as their scene and
+-- global rights as long as the server; who owns a level is the game's own
+-- record, and the game hands it over when the scene is made.
 
 const Players = game:GetService("Players")
 
+const SceneRegistry = require("../Scenes/Registry")
 const Network = require("./Network")
+const Shared = require("./Shared")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
 export type Action = Types.Action
 export type ObjectType = Types.ObjectType
-export type PermissionConfig = Types.PermissionConfig
-export type Permission = Types.Permission
-export type PermissionPayload = Types.PermissionPayload
+export type Target = Types.Target
+export type RoleConfig = Types.RoleConfig
+export type Role = Types.Role
+export type SceneRights = Types.SceneRights
+export type GlobalRights = Types.GlobalRights
 
-const DEFAULT_RATE = 60
 const RATE_WINDOW = 1
 
 const Permissions = {}
-const Registered: {[string]: Permission} = {}
-const Payloads: {[string]: PermissionPayload} = {}
-const Assigned: {[Player]: string} = {}
-const Budget: {[Player]: {Count: number, Window: number}} = {}
+const Roles: {[string]: Role} = {}
 
--- Built once per role rather than per send, and with Blacklist flattened to a
--- sequential array so it survives remote serialization.
-const function ToPayload(Perm: Permission): PermissionPayload
-    const List = {}
-    for ObjectType in Perm.Blacklist do
-        table.insert(List, ObjectType)
+-- By user id, for the life of the server.
+const Global: {[number]: GlobalRights} = {}
+
+-- Spending is not a right, it is what a connection has done lately, so it is
+-- keyed by the connection and goes with it.
+const Budget: {[any]: {Count: number, Window: number}} = {}
+
+-- Every capability something grants, so asking for one nothing grants can say
+-- so -- once -- instead of quietly answering false forever.
+const Known: {[string]: true} = {}
+const Warned: {[string]: true} = {}
+
+-- What a player with no global grant holds.
+const Default: GlobalRights = Shared.GlobalRights(nil, nil)
+
+-- A Player, a user id, or anything carrying a numeric UserId, which is what the
+-- test suite passes for a player who is not connected.
+const function UserIdOf(Who: any): number?
+    if typeof(Who) == "Instance" and Who:IsA("Player") then
+        return (Who :: Player).UserId
     end
 
-    table.sort(List)
+    if type(Who) == "number" and Who % 1 == 0 then
+        return Who
+    end
 
-    return {
-        Name = Perm.Name,
-        Level = Perm.Level,
-        CanCreate = Perm.CanCreate,
-        CanEdit = Perm.CanEdit,
-        CanDestroy = Perm.CanDestroy,
-        Rate = Perm.Rate,
-        Blacklist = List,
-    }
+    if type(Who) == "table" and type(Who.UserId) == "number" then
+        return Who.UserId
+    end
+
+    return nil
 end
 
--- Unassigned players get this. It denies everything, so forgetting to call
--- Assign fails closed instead of handing out edit rights.
-const Fallback: Permission = {
-    Name = "None",
-    Level = 0,
-    CanCreate = false,
-    CanEdit = false,
-    CanDestroy = false,
-    Rate = 0,
-    Blacklist = {},
-}
+-- A scene or its id, as the live scene. Nil once it has been destroyed.
+const function SceneOf(Scene: any): any
+    const Identifier = if type(Scene) == "table" then Scene.Id else Scene
+    return SceneRegistry.ById[Identifier]
+end
 
-local DefaultName: string? = nil
+const function Learn(Capabilities: {[string]: true})
+    for Name in Capabilities do
+        Known[Name] = true
+    end
+end
 
-function Permissions:Register(Name: string, Config: PermissionConfig): Permission?
-    if Registered[Name] then
-        Logger:Warn(`Permission {Name} is already registered.`)
+--=============================================================================
+-- Telling the client
+--=============================================================================
+
+const function SendGlobal(UserId: number)
+    const Plr = Players:GetPlayerByUserId(UserId)
+    if Plr then
+        Network.Assigned:Fire(Plr, Shared.EncodeGlobal(Global[UserId] or Default))
+    end
+end
+
+-- Nil rights say the player holds nothing on the scene any more.
+const function SendScene(Scene: any, UserId: number)
+    const Plr = Players:GetPlayerByUserId(UserId)
+    if not Plr then
         return
     end
 
-    const Blacklist: {[ObjectType]: true} = {}
-    if Config.Blacklist then
-        for _, ObjectType in Config.Blacklist do
-            Blacklist[ObjectType] = true
-        end
+    const Rights = Scene.Rights[UserId]
+    Network.SceneAssigned:Fire(Plr, Scene.Id, if Rights then Shared.EncodeScene(Rights) else nil)
+end
+
+--=============================================================================
+-- Roles
+--=============================================================================
+
+function Permissions:Register(Name: string, Config: RoleConfig): Role?
+    if Roles[Name] then
+        Logger:Warn(`Role {Name} is already registered.`)
+        return nil
     end
 
-    const Perm: Permission = {
+    const Role: Role = {
         Name = Name,
-        Level = Config.Level,
-        CanCreate = Config.CanCreate == true,
-        CanEdit = Config.CanEdit == true,
-        CanDestroy = Config.CanDestroy == true,
-        Rate = Config.Rate or DEFAULT_RATE,
-        Blacklist = Blacklist,
+        Global = Shared.GlobalRights(Config.Global, Name),
+        Scene = Shared.SceneRights(Config.Scene, Name),
     }
 
-    Registered[Name] = Perm
-    return Perm
+    Learn(Role.Global.Capabilities)
+    Learn(Role.Scene.Capabilities)
+
+    Roles[Name] = Role
+    return Role
 end
 
--- The role handed to players who have not been assigned one. Leave it unset to
--- deny everything by default.
-function Permissions:SetDefault(Name: string?)
-    if Name and not Registered[Name] then
-        Logger:Error(`Cannot default to unregistered permission {Name}.`)
-    end
-
-    DefaultName = Name
-
-    for _, Plr in Players:GetPlayers() do
-        if not Assigned[Plr] then
-            Network.Assigned:Fire(Plr, Permissions:GetPayload(Plr))
-        end
-    end
+function Permissions:GetRegistered(): {[string]: Role}
+    return Roles
 end
 
-function Permissions:Assign(Plr: Player, Name: string?): boolean
-    if Name and not Registered[Name] then
-        Logger:Warn(`Cannot assign unregistered permission {Name}.`)
+const function Resolve(Who: any, RoleName: string?): (number?, Role?)
+    const UserId = UserIdOf(Who)
+    if not UserId then
+        Logger:Warn(`Rights are granted to a Player or a user id, not a {typeof(Who)}.`)
+        return nil, nil
+    end
+
+    if RoleName == nil then
+        return UserId, nil
+    end
+
+    const Role = Roles[RoleName]
+    if not Role then
+        Logger:Warn(`Cannot grant unregistered role {RoleName}.`)
+        return nil, nil
+    end
+
+    return UserId, Role
+end
+
+--=============================================================================
+-- Global rights
+--=============================================================================
+
+-- Clears what the player held globally and copies the role's global half in.
+function Permissions:Grant(Who: Player | number, RoleName: string): boolean
+    const UserId, Role = Resolve(Who, RoleName)
+    if not UserId or not Role then
         return false
     end
 
-    Assigned[Plr] = Name
-    Network.Assigned:Fire(Plr, Permissions:GetPayload(Plr))
+    Global[UserId] = Shared.CopyGlobal(Role.Global)
+    SendGlobal(UserId)
     return true
 end
 
-function Permissions:Get(Plr: Player): Permission
-    const Name = Assigned[Plr] or DefaultName
-    return if Name then Registered[Name] or Fallback else Fallback
-end
-
-function Permissions:GetPayload(Plr: Player): PermissionPayload
-    const Perm = Permissions:Get(Plr)
-    local Payload = Payloads[Perm.Name]
-
-    if not Payload then
-        Payload = ToPayload(Perm)
-        Payloads[Perm.Name] = Payload
+-- Back to what a player with no global grant holds.
+function Permissions:Revoke(Who: Player | number)
+    const UserId = Resolve(Who, nil)
+    if not UserId then
+        return
     end
 
-    return Payload
+    Global[UserId] = nil
+    SendGlobal(UserId)
 end
 
-function Permissions:GetRegistered(): {[string]: Permission}
-    return Registered
+function Permissions:GrantCapability(Who: Player | number, Capability: string)
+    const UserId = Resolve(Who, nil)
+    if not UserId then
+        return
+    end
+
+    local Rights = Global[UserId]
+    if not Rights then
+        Rights = Shared.CopyGlobal(Default)
+        Global[UserId] = Rights
+    end
+
+    Rights.Capabilities[Capability] = true
+    Known[Capability] = true
+    SendGlobal(UserId)
 end
 
--- Verb plus blacklist. ObjectType is the registry id of the object being acted
--- on, and is optional for actions that do not target one yet.
-function Permissions:Can(Plr: Player, Action: Action, ObjectType: ObjectType?): boolean
-    const Perm = Permissions:Get(Plr)
+function Permissions:RevokeCapability(Who: Player | number, Capability: string)
+    const UserId = Resolve(Who, nil)
+    const Rights = if UserId then Global[UserId] else nil
+    if not UserId or not Rights then
+        return
+    end
 
-    -- Resolved rather than chained, so an action string that matches none of
-    -- the three denies. The chained form fell through to the allow path, and
-    -- the union type only catches that when the verb is a literal.
-    local Allowed: boolean
-    if Action == "Create" then
-        Allowed = Perm.CanCreate
-    elseif Action == "Edit" then
-        Allowed = Perm.CanEdit
-    elseif Action == "Destroy" then
-        Allowed = Perm.CanDestroy
-    else
+    Rights.Capabilities[Capability] = nil
+    SendGlobal(UserId)
+end
+
+function Permissions:Get(Who: Player | number): GlobalRights
+    const UserId = UserIdOf(Who)
+    return if UserId then Global[UserId] or Default else Default
+end
+
+function Permissions:CanPush(Plr: Player): boolean
+    return Permissions:Get(Plr).CanPush
+end
+
+--=============================================================================
+-- Scene rights
+--=============================================================================
+
+-- Clears what the player held on the scene and copies the role's scene half
+-- in. Scene:Grant is this.
+function Permissions:GrantOn(Scene: any, Who: Player | number, RoleName: string): boolean
+    const Owner = SceneOf(Scene)
+    if not Owner then
+        Logger:Warn(`Cannot grant rights on a scene that does not exist.`)
+        return false
+    end
+
+    const UserId, Role = Resolve(Who, RoleName)
+    if not UserId or not Role then
+        return false
+    end
+
+    Owner.Rights[UserId] = Shared.CopyScene(Role.Scene)
+    SendScene(Owner, UserId)
+    return true
+end
+
+function Permissions:RevokeOn(Scene: any, Who: Player | number)
+    const Owner = SceneOf(Scene)
+    const UserId = Resolve(Who, nil)
+    if not Owner or not UserId or not Owner.Rights[UserId] then
+        return
+    end
+
+    Owner.Rights[UserId] = nil
+    SendScene(Owner, UserId)
+end
+
+-- On its own, without a role. A player who held nothing on the scene holds the
+-- capability and no verbs.
+function Permissions:GrantCapabilityOn(Scene: any, Who: Player | number, Capability: string)
+    const Owner = SceneOf(Scene)
+    const UserId = Resolve(Who, nil)
+    if not Owner or not UserId then
+        return
+    end
+
+    local Rights = Owner.Rights[UserId]
+    if not Rights then
+        Rights = Shared.SceneRights(nil, nil)
+        Owner.Rights[UserId] = Rights
+    end
+
+    Rights.Capabilities[Capability] = true
+    Known[Capability] = true
+    SendScene(Owner, UserId)
+end
+
+function Permissions:RevokeCapabilityOn(Scene: any, Who: Player | number, Capability: string)
+    const Owner = SceneOf(Scene)
+    const UserId = Resolve(Who, nil)
+    const Rights = if Owner and UserId then Owner.Rights[UserId] else nil
+    if not Rights or not UserId then
+        return
+    end
+
+    Rights.Capabilities[Capability] = nil
+    SendScene(Owner, UserId)
+end
+
+function Permissions:GetOn(Scene: any, Who: Player | number): SceneRights?
+    const Owner = SceneOf(Scene)
+    const UserId = UserIdOf(Who)
+    return if Owner and UserId then Owner.Rights[UserId] else nil
+end
+
+-- The wire form of one player's rights on one scene, as the client receives it.
+function Permissions:GetPayloadOn(Scene: any, Who: Player | number): Types.SceneRightsPayload?
+    const Rights = Permissions:GetOn(Scene, Who)
+    return if Rights then Shared.EncodeScene(Rights) else nil
+end
+
+-- A scene going away takes its rights with it. Called by the scene as it is
+-- destroyed, while it can still be found, so everyone present who held rights
+-- on it is told they hold none.
+function Permissions.DropScene(Scene: any)
+    for UserId in table.clone(Scene.Rights) do
+        Scene.Rights[UserId] = nil
+        SendScene(Scene, UserId)
+    end
+end
+
+--=============================================================================
+-- Checks
+--=============================================================================
+
+-- Whether a player may do something to an object. Target is the object -- it
+-- carries its scene and its type -- or, for a create, a table naming the scene
+-- and the type it would make. Property is the one being written, for an edit
+-- or a create's initial value.
+function Permissions:Can(Plr: Player, Action: Action, Target: Target, Property: number?): boolean
+    if Action ~= "Create" and Action ~= "Edit" and Action ~= "Destroy" then
         Logger:Warn(`Unknown permission action {Action}. Denying.`)
         return false
     end
 
-    if not Allowed then
+    const UserId = UserIdOf(Plr)
+    const Owner = SceneRegistry.ById[Target.Scene]
+    if not UserId or not Owner then
         return false
     end
 
-    if ObjectType and Perm.Blacklist[ObjectType] then
+    const Rights = Owner.Rights[UserId]
+    if not Rights then
         return false
     end
 
-    return true
+    return Shared.Allows(Rights, Action, Target.Parent, Property)
 end
 
--- Sliding one second window, budgeted per role so a trusted role is not held to
--- the same ceiling as an untrusted one.
+-- Whether a player holds a capability: globally with no scene named, or on
+-- that scene. Prism answers for capabilities and enforces none of them.
+function Permissions:Has(Plr: Player, Capability: string, Scene: number?): boolean
+    if not Known[Capability] and not Warned[Capability] then
+        Warned[Capability] = true
+        Logger:Warn(`Nothing grants the capability {Capability}, so asking for it answers false until a role or a grant names it.`)
+    end
+
+    const UserId = UserIdOf(Plr)
+    if not UserId then
+        return false
+    end
+
+    if Scene == nil then
+        return (Global[UserId] or Default).Capabilities[Capability] == true
+    end
+
+    const Owner = SceneRegistry.ById[Scene]
+    const Rights = if Owner then Owner.Rights[UserId] else nil
+    return Rights ~= nil and Rights.Capabilities[Capability] == true
+end
+
+-- Sliding one second window, budgeted by the player's global rights so a
+-- trusted player is not held to the same ceiling as an untrusted one.
 --
 -- Cost is what the request asks the server to do, not how many packets it
 -- arrived in. A transaction charges one per operation: charging per call would
@@ -200,22 +394,24 @@ function Permissions:Consume(Plr: Player, Cost: number?): boolean
     return Entry.Count <= Rate
 end
 
--- What the remote handlers call: one gate covering rate limit, verb and
--- blacklist.
-function Permissions:Check(Plr: Player, Action: Action, ObjectType: ObjectType?): boolean
-    return Permissions:Consume(Plr) and Permissions:Can(Plr, Action, ObjectType)
-end
-
 -- Called by Replication once the client has announced it is listening, rather
--- than on PlayerAdded. Firing at join meant the payload went out before the
--- client had finished requiring Prism and connecting its handlers, leaving it
--- stuck on the deny-everything fallback.
+-- than on PlayerAdded. Firing at join meant the rights went out before the
+-- client had finished requiring Prism and connecting its handlers. Global
+-- rights, then the player's rights on every scene that has granted them any.
 function Permissions:SendTo(Plr: Player)
-    Network.Assigned:Fire(Plr, Permissions:GetPayload(Plr))
+    Network.Assigned:Fire(Plr, Shared.EncodeGlobal(Permissions:Get(Plr)))
+
+    for _, Scene in SceneRegistry.ById do
+        const Rights = Scene.Rights[Plr.UserId]
+        if Rights then
+            Network.SceneAssigned:Fire(Plr, Scene.Id, Shared.EncodeScene(Rights))
+        end
+    end
 end
 
+-- The budget goes with the connection. Rights do not: they are keyed by user
+-- id and hold again when the player comes back.
 Players.PlayerRemoving:Connect(function(Plr: Player)
-    Assigned[Plr] = nil
     Budget[Plr] = nil
 end)
 

@@ -98,10 +98,6 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 return Refuse(Plr, `object type {Operation.Object} is not registered.`)
             end
 
-            if Plr and not Permissions:Can(Plr, "Create", Operation.Object) then
-                return Refuse(Plr, `not allowed to create {Registry.Name}.`)
-            end
-
             -- Zero is "wherever Objects.new would have put it", which is the
             -- implicit default scene. Anything else has to name a copy that is
             -- actually live: a scene loaded twice has two, and guessing between
@@ -114,10 +110,22 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 end
             end
 
+            -- What the create is checked against: the scene it lands in and
+            -- the type it makes, which is what an object carries once it
+            -- exists.
+            const Target = {
+                Scene = if Live then Live.Scene else Scenes:GetDefault().Id,
+                Parent = Operation.Object,
+            }
+
             -- A copy of a scene the player was never admitted to is one they
             -- have not been told exists, and is refused as if it were not live.
-            if Plr and not Audience.Sees(Plr, if Live then Live.Scene else Scenes:GetDefault().Id) then
+            if Plr and not Audience.Sees(Plr, Target.Scene) then
                 return Refuse(Plr, `scene copy {Operation.Instance} is not live.`)
+            end
+
+            if Plr and not Permissions:Can(Plr, "Create", Target) then
+                return Refuse(Plr, `not allowed to create {Registry.Name}.`)
             end
 
             const Carried: {[PropertyTypes.PropertyIdentifier]: true} = {}
@@ -148,6 +156,12 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                     return Refuse(Plr, `{PropertyRegistry.Name} cannot hold the value the create carried.`)
                 end
 
+                -- An initial value is a write, so the property lists get their
+                -- say over it exactly as they do over an edit.
+                if Plr and not Permissions:Can(Plr, "Create", Target, PropertyId) then
+                    return Refuse(Plr, `not allowed to write {PropertyRegistry.Name}.`)
+                end
+
                 Initial[PropertyId] = Value
             end
 
@@ -164,7 +178,7 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 return Refuse(Plr, `object {Operation.Target} is not here.`)
             end
 
-            if Plr and not Permissions:Can(Plr, "Edit", Obj.Parent) then
+            if Plr and not Permissions:Can(Plr, "Edit", Obj, Operation.Property) then
                 return Refuse(Plr, `not allowed to edit {Obj.Name}.`)
             end
 
@@ -195,7 +209,7 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 return Refuse(Plr, `object {Operation.Target} is not here.`)
             end
 
-            if Plr and not Permissions:Can(Plr, "Destroy", Obj.Parent) then
+            if Plr and not Permissions:Can(Plr, "Destroy", Obj) then
                 return Refuse(Plr, `not allowed to destroy {Obj.Name}.`)
             end
 

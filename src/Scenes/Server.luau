@@ -366,6 +366,10 @@ const function __destroy(self: Scene)
     -- a scene that has already stopped existing.
     __unload(self)
 
+    -- Its rights go with it, told to whoever held them while the scene can
+    -- still be found.
+    Permissions.DropScene(self)
+
     Registry.ById[self.Id] = nil
     Registry.ByName[self.Name] = nil
     self.Data = nil
@@ -431,6 +435,28 @@ const function __is_public(self: Scene): boolean
     return next(self.Admitted) == nil
 end
 
+-- Rights live in Permissions, which keeps them on the scene; these are the
+-- scene's own handles on them.
+const function __grant(self: Scene, Who: Player | number, Role: string): boolean
+    return Permissions:GrantOn(self, Who, Role)
+end
+
+const function __revoke(self: Scene, Who: Player | number)
+    Permissions:RevokeOn(self, Who)
+end
+
+const function __grant_capability(self: Scene, Who: Player | number, Capability: string)
+    Permissions:GrantCapabilityOn(self, Who, Capability)
+end
+
+const function __revoke_capability(self: Scene, Who: Player | number, Capability: string)
+    Permissions:RevokeCapabilityOn(self, Who, Capability)
+end
+
+const function __get_rights(self: Scene, Who: Player | number): any
+    return Permissions:GetOn(self, Who)
+end
+
 -- Names have to be unique as well as ids. A name is how a caller asks for a
 -- scene back, and two scenes answering to "Lobby" means one of them is
 -- unreachable and which one depends on registration order.
@@ -469,6 +495,8 @@ function Scenes.new(Config: SceneConfig): Scene?
         end
     end
 
+    Scene.Rights = {}
+
     Scene.Load = __load
     Scene.Open = __open
     Scene.Unload = __unload
@@ -480,12 +508,22 @@ function Scenes.new(Config: SceneConfig): Scene?
     Scene.Admits = __admits
     Scene.GetAdmitted = __get_admitted
     Scene.IsPublic = __is_public
+    Scene.Grant = __grant
+    Scene.Revoke = __revoke
+    Scene.GrantCapability = __grant_capability
+    Scene.RevokeCapability = __revoke_capability
+    Scene.GetRights = __get_rights
 
     Registry.ById[Identifier] = Scene
     Registry.ByName[Config.Name] = Scene
 
     -- Told to whoever it admits, which for a scene with no list is everyone.
     Reconcile(Scene :: any)
+
+    for Who, Role in Config.Rights or {} do
+        Permissions:GrantOn(Scene, Who, Role)
+    end
+
     return Scene :: any
 end
 
@@ -587,6 +625,14 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
         return false, 0
     end
 
+    -- A global right rather than a check against the pack's types. The scene
+    -- does not exist yet, so there are no rights over it to consult, and
+    -- registering a scene at all is exactly the kind of thing that is about the
+    -- session rather than a document.
+    if not Permissions:CanPush(Plr) then
+        return false, 0
+    end
+
     if buffer.len(Data) > MAX_COMMIT_BYTES then
         return false, 0
     end
@@ -615,24 +661,15 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
         return false, 0
     end
 
-    -- Every object type in the pack, checked once each rather than once per
-    -- object, and the whole commit refused if any one of them is denied. A
-    -- scene arriving with half its objects dropped is not the scene that was
-    -- sent, and the client would have no way to tell.
-    const Seen: {[number]: true} = {}
+    -- Every object type in the pack has to be one the server knows, and the
+    -- whole commit is refused if any is not. A scene arriving with half its
+    -- objects dropped is not the scene that was sent, and the client would
+    -- have no way to tell.
     local Highest = 0
 
     for _, Object in Packed do
         if not Objects:GetRegistry(Object.Parent) then
             return false, 0
-        end
-
-        if not Seen[Object.Parent] then
-            Seen[Object.Parent] = true
-
-            if not Permissions:Can(Plr, "Create", Object.Parent) then
-                return false, 0
-            end
         end
 
         Highest = math.max(Highest, Object.LocalId)
