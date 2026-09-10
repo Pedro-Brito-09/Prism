@@ -11,21 +11,20 @@
 -- and a registry of any size can overflow it and silently drop entries.
 --
 -- Order matters and is why this lives in one place rather than as a handler
--- inside each module: property registries have to land before object registries,
--- which have to land before the objects that reference them. Scene registries go
--- first of all, because an object's handle names the scene holding it and one
--- arriving for a scene the client has never heard of cannot be filed.
+-- inside each module: property registries have to land before object
+-- registries, which have to land before any object. Types go first of all
+-- because they are nobody's secret -- every player receives every one -- while
+-- scenes are revealed only to the players they admit, and a scene's objects
+-- need their types on arrival.
 
 const Players = game:GetService("Players")
 
 const PropertiesNetwork = require("./Properties/Network")
 const ObjectsNetwork = require("./Objects/Network")
-const ScenesNetwork = require("./Scenes/Network")
 const Scenes = require("./Scenes/Server")
 const Permissions = require("./Permissions/Server")
 const Properties = require("./Properties/Server")
 const Networking = require("./Networking")
-const Compressor = require("./Compressor")
 const Objects = require("./Objects/Server")
 
 const Ready = Networking:Get("Prism.Ready")
@@ -62,36 +61,6 @@ const function SendChunks<T>(Plr: Player, Send: ({T}) -> (), Items: {T}): boolea
 end
 
 function Replication.Replay(Plr: Player)
-    const SceneRegistries = {}
-    for Identifier in Scenes:GetRegistered() do
-        table.insert(SceneRegistries, Scenes:GetRegistryPayload(Identifier))
-    end
-
-    const SentScenes = SendChunks(Plr, function(Chunk)
-        ScenesNetwork.RegistriesReplayed:Fire(Plr, Chunk)
-    end, SceneRegistries)
-
-    if not SentScenes then
-        return
-    end
-
-    -- Which copies are live, before any object names one. Sent as two parallel
-    -- lists for the same reason the object replay is: a codec per element.
-    const LiveIds = {}
-    const LiveScenes = {}
-    for Index, Instance_ in Scenes:GetInstances() do
-        LiveIds[Index] = Instance_.Id
-        LiveScenes[Index] = Instance_.Scene
-    end
-
-    if #LiveIds > 0 then
-        if not Plr.Parent then
-            return
-        end
-
-        ScenesNetwork.InstancesReplayed:Fire(Plr, LiveIds, LiveScenes)
-    end
-
     const PropertyRegistries = {}
     for Identifier in Properties:GetRegistered() do
         table.insert(PropertyRegistries, Properties:GetRegistryPayload(Identifier))
@@ -118,56 +87,10 @@ function Replication.Replay(Plr: Player)
         return
     end
 
-    -- Three parallel lists, because that is what the channel takes. A missing
-    -- instance is false rather than nil so the lists stay the same length and
-    -- the indices keep lining up with the ids.
-    --
-    -- Compressed a chunk at a time rather than all at once, so the cost of
-    -- serializing a large workspace is spread across frames.
-    local RuntimeIds = {}
-    local InstanceIds = {}
-    local Buffers = {}
-    local Instances = {}
-    local Count = 0
-
-    const function Flush(): boolean
-        if Count == 0 then
-            return true
-        end
-
-        if not Plr.Parent then
-            return false
-        end
-
-        ObjectsNetwork.ObjectsReplayed:Fire(Plr, RuntimeIds, InstanceIds, Buffers, Instances)
-
-        RuntimeIds = {}
-        InstanceIds = {}
-        Buffers = {}
-        Instances = {}
-        Count = 0
-
-        task.wait()
-        return true
-    end
-
-    for _, Obj in Objects:GetWorkspace() do
-        if Obj.Destroyed then
-            continue
-        end
-
-        Count += 1
-        RuntimeIds[Count] = Obj.RuntimeId
-        InstanceIds[Count] = Obj.InstanceId
-        Buffers[Count] = Compressor:CompressObject(Obj :: any)
-        Instances[Count] = Obj.Instance or false
-
-        if Count >= CHUNK_SIZE and not Flush() then
-            return
-        end
-    end
-
-    Flush()
+    -- Every scene this player is admitted to, with its copies and objects, and
+    -- nothing about any other. From here on the player hears about scenes as
+    -- they change.
+    Scenes.Catchup(Plr)
 end
 
 -- Answering at all is the signal the client is waiting for, so this must be set

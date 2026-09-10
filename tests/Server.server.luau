@@ -1361,6 +1361,48 @@ T:Test("a copy goes wherever it is told, and takes its objects with it", functio
     Elsewhere:Destroy()
 end)
 
+-- User ids 1 and 2 stand in for people who are not here. Nobody running this
+-- suite is either of them.
+T:Test("a scene that has admitted nobody is public", function()
+    const Scene = Scenes.new({Name = "TestPublic"})
+
+    T:Ok(Scene:IsPublic(), "public by default")
+    T:Ok(Scene:Admits(1), "so it admits anyone")
+
+    Scene:Admit(1)
+    T:Ok(not Scene:IsPublic(), "one admission makes it private")
+    T:Ok(Scene:Admits(1), "to the one admitted")
+    T:Ok(not Scene:Admits(2), "and to nobody else")
+
+    Scene:Evict(1)
+    T:Ok(Scene:IsPublic(), "evicting the last makes it public again")
+
+    Scene:Destroy()
+end)
+
+T:Test("admission takes a player or a user id, and belongs to the scene", function()
+    const Scene = Scenes.new({Name = "TestAdmitted", Admitted = {1, 2}})
+    T:Eq(#Scene:GetAdmitted(), 2, "admitted as it was registered")
+
+    Scene:Admit(2)
+    T:Eq(#Scene:GetAdmitted(), 2, "admitting twice is admitting once")
+
+    Scene:Admit("somebody" :: any)
+    T:Eq(#Scene:GetAdmitted(), 2, "something that is neither admits nobody")
+
+    const Plr = Players:GetPlayers()[1]
+    if Plr then
+        Scene:Admit(Plr)
+        T:Ok(Scene:Admits(Plr.UserId), "a player is kept by user id")
+
+        Scene:Evict(Plr.UserId)
+        T:Ok(not Scene:Admits(Plr), "and evicted by it")
+        T:Ok(not Scene:IsPublic(), "leaving the rest of the list private")
+    end
+
+    Scene:Destroy()
+end)
+
 --=============================================================================
 -- Permissions
 --=============================================================================
@@ -1996,8 +2038,20 @@ EditableFixture:Set(TitleId, "FixtureEditable")
 const DestroyFixture = Objects.new(BareId)
 DestroyFixture:Set(TitleId, "FixtureDestroy")
 
+-- Two private scenes, each admitting only user id 1, which nobody running this
+-- is. The test player never gets into the first, and the client checks it hears
+-- nothing of it: not its name, not its copy, not its object. The player is
+-- admitted to the second as they arrive, and evicted from it when the client
+-- writes the evict marker on the editable fixture.
+const HiddenScene = Scenes.new({Name = "FixtureHidden", Admitted = {1}})
+HiddenScene:Load():Create(BareId, {[TitleId] = "FixtureHiddenObject"})
+
+const AdmittedScene = Scenes.new({Name = "FixtureAdmitted", Admitted = {1}})
+AdmittedScene:Load():Create(BareId, {[TitleId] = "FixtureAdmittedObject"})
+
 const function AssignBuilder(Plr: Player)
     Permissions:Assign(Plr, "TestBuilder")
+    AdmittedScene:Admit(Plr)
 end
 
 for _, Plr in Players:GetPlayers() do
@@ -2009,6 +2063,14 @@ Players.PlayerAdded:Connect(AssignBuilder)
 -- attached. The server briefly changes the role, then restores the builder so
 -- the remaining accepted-edit and destroy tests can proceed deterministically.
 EditableFixture:OnChange(TitleId, function(Value)
+    if Value == "EvictPulse" then
+        for _, Plr in Players:GetPlayers() do
+            AdmittedScene:Evict(Plr)
+        end
+
+        return
+    end
+
     if Value ~= "PermissionPulse" then
         return
     end

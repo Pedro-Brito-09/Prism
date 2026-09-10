@@ -21,6 +21,7 @@ const FIXTURE_PROPERTY = "TestTitle"
 const DENIED_MARKER = "FixtureDenied"
 const EDITABLE_MARKER = "FixtureEditable"
 const DESTROY_MARKER = "FixtureDestroy"
+const EVICT_MARKER = "EvictPulse"
 const TIMEOUT = 15
 
 const Prism = require(PRISM)
@@ -204,6 +205,65 @@ T:Test("an unrelated instance maps to nothing", function()
     Stray.Parent = workspace
     T:Eq(Objects:FromInstance(Stray), nil, "not an object")
     Stray:Destroy()
+end)
+
+--=============================================================================
+-- Admission
+--=============================================================================
+
+T:Describe("Admission")
+
+T:Test("a scene you were not admitted to is never mentioned", function()
+    -- The admitted one first, so this does not pass merely because nothing has
+    -- arrived yet.
+    T:Eventually(function()
+        return Scenes:Get("FixtureAdmitted")
+    end, 5, "the scene beside it arrived")
+
+    T:Eq(Scenes:Get("FixtureHidden"), nil, "not its name")
+
+    if BareId and TitleId then
+        T:Eq(FindLiveObject(BareId, TitleId, "FixtureHiddenObject"), nil, "not its object")
+    end
+end)
+
+T:Test("a scene you were admitted to arrives with its copy and objects", function()
+    const Admitted = Scenes:Get("FixtureAdmitted")
+    T:Ok(Admitted, "its registry")
+
+    if not Admitted or not BareId or not TitleId then
+        return
+    end
+
+    T:Eq(#Scenes:GetInstances(Admitted.Id), 1, "its copy")
+    T:Eventually(function()
+        return FindLiveObject(BareId, TitleId, "FixtureAdmittedObject")
+    end, 5, "its object")
+end)
+
+T:Test("eviction takes the scene and everything in it", function()
+    const Admitted = Scenes:Get("FixtureAdmitted")
+    const Obj = if BareId and TitleId
+        then FindLiveObject(BareId, TitleId, "FixtureAdmittedObject")
+        else nil
+
+    if not Admitted or not Obj or not Editable or not TitleId then
+        T:Ok(false, "no admitted fixture")
+        return
+    end
+
+    -- The server evicts this player when the editable fixture carries the
+    -- marker, the same way the permission pulse is asked for.
+    Editable:Set(TitleId, EVICT_MARKER)
+
+    T:Eventually(function()
+        return Scenes:Get("FixtureAdmitted") == nil
+    end, 5, "the scene went")
+
+    T:Ok(Obj.Destroyed, "its object with it")
+    T:Eq(#Scenes:GetInstances(Admitted.Id), 0, "and its copy")
+
+    Editable:Set(TitleId, EDITABLE_MARKER)
 end)
 
 --=============================================================================

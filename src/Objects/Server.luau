@@ -8,6 +8,7 @@ const Permissions = require("../Permissions/Server")
 const PropertyTypes = require("../Properties/Types")
 const Compressor = require("../Compressor")
 const SceneRegistry = require("../Scenes/Registry")
+const Audience = require("../Scenes/Audience")
 const Network = require("./Network")
 const Shared = require("./Shared")
 const Handles = require("../Handles")
@@ -63,7 +64,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     if Changed then
         const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
         if Compressed then
-            Network.PropertyChanged:FireAll(self.RuntimeId, Prop.Parent, Compressed)
+            Audience.Fire(Network.PropertyChanged, self.Scene, self.RuntimeId, Prop.Parent, Compressed)
         end
     end
 
@@ -103,7 +104,7 @@ const function Teardown(self: Object, Announce: boolean)
         -- A scene unloading announces itself once, by name, instead of once per
         -- object it held.
         if Announce then
-            Network.ObjectRemoved:FireAll(self.RuntimeId)
+            Audience.Fire(Network.ObjectRemoved, self.Scene, self.RuntimeId)
         end
     end
 
@@ -186,32 +187,60 @@ end
 -- made a large workspace flood the remote queue in a single frame.
 const ANNOUNCE_CHUNK = 50
 
--- Announces a batch of objects to everyone, down the same chunked path a
--- joining player receives. A scene loading uses this rather than letting each
--- object announce itself as it is built.
-function Objects.AnnounceAll(List: {Object})
+-- Splits a batch by the scene each entry belongs to. Every scene has its own
+-- audience, and one transaction is free to touch several.
+const function GroupByScene<T>(List: {T}, SceneOf: (T) -> Types.SceneIdentifier): {[Types.SceneIdentifier]: {T}}
+    const Groups: {[Types.SceneIdentifier]: {T}} = {}
+    for _, Entry in List do
+        const Scene = SceneOf(Entry)
+        local Group = Groups[Scene]
+        if not Group then
+            Group = {}
+            Groups[Scene] = Group
+        end
+
+        table.insert(Group, Entry)
+    end
+
+    return Groups
+end
+
+const function SceneOf(Obj: Object): Types.SceneIdentifier
+    return Obj.Scene
+end
+
+-- The chunked path every batch of whole objects goes down: a scene loading, a
+-- transaction's creates, a player being told about a scene. Send is handed one
+-- chunk at a time and answers whether to go on; Keep, where given, drops an
+-- object at the moment it would have been packed.
+const function SendObjects(
+    List: {Object},
+    Send: (RuntimeIds: {RuntimeId}, InstanceIds: {number}, Buffers: {buffer}, Instances: {any}) -> boolean,
+    Keep: ((Object) -> boolean)?
+)
     local RuntimeIds = {}
     local InstanceIds = {}
     local Buffers = {}
     local Instances = {}
     local Count = 0
 
-    const function Flush()
+    const function Flush(): boolean
         if Count == 0 then
-            return
+            return true
         end
 
-        Network.ObjectsReplayed:FireAll(RuntimeIds, InstanceIds, Buffers, Instances)
+        const Continue = Send(RuntimeIds, InstanceIds, Buffers, Instances)
         RuntimeIds = {}
         InstanceIds = {}
         Buffers = {}
         Instances = {}
         Count = 0
         task.wait()
+        return Continue
     end
 
     for _, Obj in List do
-        if Obj.Destroyed then
+        if Obj.Destroyed or (Keep and not Keep(Obj)) then
             continue
         end
 
@@ -221,12 +250,47 @@ function Objects.AnnounceAll(List: {Object})
         Buffers[Count] = Compressor:CompressObject(Obj :: any)
         Instances[Count] = Obj.Instance or false
 
-        if Count >= ANNOUNCE_CHUNK then
-            Flush()
+        if Count >= ANNOUNCE_CHUNK and not Flush() then
+            return
         end
     end
 
     Flush()
+end
+
+-- Announces a batch of objects to whoever has been told about the scene each
+-- belongs to, down the same chunked path a joining player receives. A scene
+-- loading uses this rather than letting each object announce itself as it is
+-- built.
+--
+-- The audience is taken once, before the first chunk. Someone told about the
+-- scene while this is still sending was handed these objects by that telling,
+-- and sending them here as well would send them twice.
+function Objects.AnnounceAll(List: {Object})
+    for Scene, Group in GroupByScene(List, SceneOf) do
+        const Hearing = Audience.Hearing(Scene)
+        if next(Hearing) == nil then
+            continue
+        end
+
+        SendObjects(Group, function(RuntimeIds, InstanceIds, Buffers, Instances): boolean
+            Audience.FireHearing(Network.ObjectsReplayed, Scene, Hearing, RuntimeIds, InstanceIds, Buffers, Instances)
+            return true
+        end)
+    end
+end
+
+-- One player's half of the same path, for a scene being revealed to them. Keep
+-- is asked per object, so a scene withdrawn part way stops being sent.
+function Objects.Stream(Plr: Player, List: {Object}, Keep: (Object) -> boolean)
+    SendObjects(List, function(RuntimeIds, InstanceIds, Buffers, Instances): boolean
+        if not Plr.Parent then
+            return false
+        end
+
+        Network.ObjectsReplayed:Fire(Plr, RuntimeIds, InstanceIds, Buffers, Instances)
+        return true
+    end, Keep)
 end
 
 -- Destroys everything a scene instance holds without a packet per object. The
@@ -244,67 +308,88 @@ end
 -- the same terms as the object replay. A transaction is one packet on the way
 -- up; answering it with one packet per operation on the way down would put the
 -- flood back where it was taken out.
-function Objects.AnnounceChanged(Changes: {{RuntimeId: RuntimeId, Property: PropertyTypes.PropertyIdentifier, Value: buffer}})
-    local RuntimeIds = {}
-    local PropertyIds = {}
-    local Values = {}
-    local Count = 0
-
-    const function Flush()
-        if Count == 0 then
-            return
+--
+-- Each change names its object's scene, because that is who hears about it.
+function Objects.AnnounceChanged(Changes: {{RuntimeId: RuntimeId, Scene: Types.SceneIdentifier, Property: PropertyTypes.PropertyIdentifier, Value: buffer}})
+    for Scene, Group in GroupByScene(Changes, function(Change): Types.SceneIdentifier
+        return Change.Scene
+    end) do
+        const Hearing = Audience.Hearing(Scene)
+        if next(Hearing) == nil then
+            continue
         end
 
-        Network.PropertiesChanged:FireAll(RuntimeIds, PropertyIds, Values)
-        RuntimeIds = {}
-        PropertyIds = {}
-        Values = {}
-        Count = 0
-    end
+        local RuntimeIds = {}
+        local PropertyIds = {}
+        local Values = {}
+        local Count = 0
 
-    for _, Change in Changes do
-        Count += 1
-        RuntimeIds[Count] = Change.RuntimeId
-        PropertyIds[Count] = Change.Property
-        Values[Count] = Change.Value
+        const function Flush()
+            if Count == 0 then
+                return
+            end
 
-        if Count >= ANNOUNCE_CHUNK then
-            Flush()
-            task.wait()
+            Audience.FireHearing(Network.PropertiesChanged, Scene, Hearing, RuntimeIds, PropertyIds, Values)
+            RuntimeIds = {}
+            PropertyIds = {}
+            Values = {}
+            Count = 0
         end
-    end
 
-    Flush()
+        for _, Change in Group do
+            Count += 1
+            RuntimeIds[Count] = Change.RuntimeId
+            PropertyIds[Count] = Change.Property
+            Values[Count] = Change.Value
+
+            if Count >= ANNOUNCE_CHUNK then
+                Flush()
+                task.wait()
+            end
+        end
+
+        Flush()
+    end
 end
 
 -- Objects going away together. A whole copy unloading is still one packet
 -- naming the copy rather than a list naming its objects -- this is for a
 -- transaction, which destroys some of a copy rather than all of it.
-function Objects.AnnounceRemoved(RuntimeIds: {RuntimeId})
-    local Chunk = {}
-    local Count = 0
-
-    const function Flush()
-        if Count == 0 then
-            return
+--
+-- Handed the objects rather than their ids: they are already torn down, and
+-- the scene each belonged to is the only way left to know who to tell.
+function Objects.AnnounceRemoved(Removed: {Object})
+    for Scene, Group in GroupByScene(Removed, SceneOf) do
+        const Hearing = Audience.Hearing(Scene)
+        if next(Hearing) == nil then
+            continue
         end
 
-        Network.ObjectsRemoved:FireAll(Chunk)
-        Chunk = {}
-        Count = 0
-    end
+        local Chunk = {}
+        local Count = 0
 
-    for _, Identifier in RuntimeIds do
-        Count += 1
-        Chunk[Count] = Identifier
+        const function Flush()
+            if Count == 0 then
+                return
+            end
 
-        if Count >= ANNOUNCE_CHUNK then
-            Flush()
-            task.wait()
+            Audience.FireHearing(Network.ObjectsRemoved, Scene, Hearing, Chunk)
+            Chunk = {}
+            Count = 0
         end
-    end
 
-    Flush()
+        for _, Obj in Group do
+            Count += 1
+            Chunk[Count] = Obj.RuntimeId
+
+            if Count >= ANNOUNCE_CHUNK then
+                Flush()
+                task.wait()
+            end
+        end
+
+        Flush()
+    end
 end
 
 -- Destroys one object without a packet naming it, for a caller that will send
@@ -486,7 +571,7 @@ const function Construct(
     -- A scene being loaded announces nothing here: its objects go out together
     -- through the chunked replay path instead of one packet each.
     if Announce then
-        Network.ObjectAdded:FireAll(RuntimeId, Instance_.Id, Compressor:CompressObject(Obj :: any), Inst)
+        Audience.Fire(Network.ObjectAdded, Instance_.Scene, RuntimeId, Instance_.Id, Compressor:CompressObject(Obj :: any), Inst)
     end
 
     return Obj :: any
@@ -601,6 +686,14 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, Prop
         return false
     end
 
+    -- A scene this player was never admitted to is one they have not been told
+    -- exists, so its objects are answered for exactly as missing ones are.
+    -- Holding rights over such a scene is inert rather than clever, and this is
+    -- what makes it so.
+    if not Audience.Sees(Plr, Obj.Scene) then
+        return false
+    end
+
     if not Permissions:Can(Plr, "Edit", Obj.Parent) then
         return false
     end
@@ -630,7 +723,7 @@ Network.Destroy.OnInvoke = function(Plr: Player, Identifier: RuntimeId): boolean
     end
 
     const Obj = Workspace[Identifier]
-    if not Obj or Obj.Destroyed then
+    if not Obj or Obj.Destroyed or not Audience.Sees(Plr, Obj.Scene) then
         return false
     end
 
