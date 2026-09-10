@@ -30,6 +30,7 @@ const Properties = if RunService:IsClient()
     else require("./Properties/Server")
 
 const PropertyTypes = require("./Properties/Types")
+const Handles = require("./Handles")
 const DatabaseTypes = require("./Database/Types")
 const ObjectTypes = require("./Objects/Types")
 const CustomEnum = require("./CustomEnum")
@@ -38,6 +39,12 @@ const Logger = require("./Logger")
 
 export type DecompressedObject = {
     __type: "DecompressedObject",
+
+    -- The object's id within its scene, not the whole persistent id: the scene
+    -- half is stamped on at load, which is what lets the same pack be loaded
+    -- under two different scenes without the two colliding.
+    LocalId: Handles.LocalId,
+
     Parent: ObjectTypes.ObjectIdentifier,
     Properties: {[PropertyTypes.PropertyIdentifier]: any},
 }
@@ -390,7 +397,13 @@ end
 -- Objects
 --=============================================================================
 
--- [/oh][varint version][varint registry id][varint count][properties...]
+-- [/oh][varint version][varint registry id][varint local id][varint count][properties...]
+--
+-- The local id is the object's identity within its scene and is what makes a
+-- saved reference outlive the save. The scene half is not written -- the scene
+-- knows which one it is, and leaving it out is what keeps a pack portable. The
+-- runtime id is not written either, and never is: it names a live copy, and a
+-- pack describes the thing rather than any copy of it.
 function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject): buffer
     local Size = 0
     local Count = 0
@@ -430,11 +443,20 @@ function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject)
         end
     end
 
-    const PrefixSize = Varint.Measure(FORMAT_VERSION) + Varint.Measure(Obj.Parent) + Varint.Measure(Count)
+    const LocalId = if IsDecompressed
+        then (Obj :: DecompressedObject).LocalId
+        else (Obj :: ObjectTypes.Object).LocalId
+
+    const PrefixSize = Varint.Measure(FORMAT_VERSION)
+        + Varint.Measure(Obj.Parent)
+        + Varint.Measure(LocalId)
+        + Varint.Measure(Count)
+
     const Prefix = buffer.create(PrefixSize)
 
     local At = Varint.Write(Prefix, 0, FORMAT_VERSION)
     At += Varint.Write(Prefix, At, Obj.Parent)
+    At += Varint.Write(Prefix, At, LocalId)
     Varint.Write(Prefix, At, Count)
 
     return Concat(OBJECT_HEADER, Prefix, Buffers, Size)
@@ -454,11 +476,15 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
     const Parent, ParentRead = Varint.Read(CompressedObj, Offset)
     Offset += ParentRead
 
+    const LocalId, LocalIdRead = Varint.Read(CompressedObj, Offset)
+    Offset += LocalIdRead
+
     const Count, CountRead = Varint.Read(CompressedObj, Offset)
     Offset += CountRead
 
     const Obj: DecompressedObject = {
         __type = "DecompressedObject",
+        LocalId = LocalId,
         Parent = Parent,
         Properties = {},
     }
@@ -633,6 +659,46 @@ function Compressor:DecompressMetadatas(CompressedMetadatas: buffer): (number, {
     end
 
     return LastId, Metadatas
+end
+
+--=============================================================================
+-- Scenes
+--=============================================================================
+
+-- [varint version][varint last id][pack of object buffers]
+--
+-- The same shape as a metadata pack, and for the same reason: LastId is what
+-- stops a scene reopening a local id after the object holding it is gone.
+-- Without it, unload and load would restart the counter and the second object
+-- ever created would answer to the name the first one was saved under.
+function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object | DecompressedObject}): buffer
+    const Compressed = table.create(#Objects)
+    for Index, Obj in Objects do
+        Compressed[Index] = Compressor:CompressObject(Obj)
+    end
+
+    const Packed = Compressor:PackBuffers(Compressed)
+    const PrefixSize = Varint.Measure(FORMAT_VERSION) + Varint.Measure(LastId)
+
+    const Result = buffer.create(PrefixSize + buffer.len(Packed))
+    const At = Varint.Write(Result, 0, FORMAT_VERSION)
+    Varint.Write(Result, At, LastId)
+    buffer.copy(Result, PrefixSize, Packed, 0)
+    return Result
+end
+
+function Compressor:DecompressScene(CompressedScene: buffer): (number, {DecompressedObject})
+    const Version, VersionRead = Varint.Read(CompressedScene, 0)
+    CheckVersion(Version, "Scene pack")
+
+    const LastId, LastIdRead = Varint.Read(CompressedScene, VersionRead)
+    const Objects = {}
+
+    for _, Compressed in Compressor:UnpackBuffers(CompressedScene, VersionRead + LastIdRead) do
+        table.insert(Objects, Compressor:DecompressObject(Compressed))
+    end
+
+    return LastId, Objects
 end
 
 return Compressor

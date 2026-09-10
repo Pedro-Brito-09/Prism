@@ -53,8 +53,8 @@ export type Cache = {
 }
 
 export type Page = {
-    Records: {Metadata},
-    HasMore: boolean,
+    read Records: {Metadata},
+    read HasMore: boolean,
 }
 
 export type ShardCache = {

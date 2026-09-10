@@ -1,8 +1,21 @@
 --!strict
 const PropertyTypes = require("../Properties/Types")
+const Handles = require("../Handles")
 
 export type ObjectIdentifier = number
+
+-- Names one live object for this session only, and the only identity that ever
+-- crosses the wire. Unique across the server while it exists; never saved.
 export type RuntimeId = number
+
+-- Names an object inside a pack, and survives the session. Deliberately not
+-- unique among live objects: instancing a scene twice gives every copy the ids
+-- its pack was written with. See Handles.
+export type PersistentId = Handles.PersistentId
+export type SceneIdentifier = Handles.SceneIdentifier
+
+-- One live copy of a scene, for this session only.
+export type SceneInstanceId = number
 
 -- Every lookup on an object takes either the property's id or its name.
 export type PropertyReference = PropertyTypes.PropertyIdentifier | string
@@ -45,7 +58,21 @@ export type ObjectConfig = {
 }
 
 export type Object = {
+    -- What to hold, look up and send. Two objects are the same object when
+    -- their runtime ids match.
     RuntimeId: RuntimeId,
+
+    -- What to write down. Scene and LocalId are the halves PersistentId is made
+    -- of, kept alongside so reading one does not mean unpacking it, and so a
+    -- printed persistent id -- a large opaque number -- can be made sense of.
+    PersistentId: PersistentId,
+    Scene: SceneIdentifier,
+    LocalId: number,
+
+    -- The live copy of the scene this object belongs to. Two objects can share
+    -- a persistent id and differ here; that is what instancing a scene means.
+    InstanceId: SceneInstanceId,
+
     Parent: ObjectIdentifier,
     Name: string,
     Properties: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
@@ -56,6 +83,12 @@ export type Object = {
     Destroyed: boolean,
 
     Instance: Instance?,
+
+    -- Called by Destroy to drop the object from the scene instance holding it.
+    -- A plain callback rather than a reference to the instance, because naming
+    -- that type here would put Objects and Scenes in a require cycle.
+    Release: (() -> ())?,
+
     -- Keyed by property id, not an array: a link is looked up by the property
     -- it mirrors.
     Links: {[PropertyTypes.PropertyIdentifier]: InstanceLink}?,

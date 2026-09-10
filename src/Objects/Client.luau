@@ -6,6 +6,7 @@ const PropertyTypes = require("../Properties/Types")
 const Compressor = require("../Compressor")
 const Network = require("./Network")
 const Shared = require("./Shared")
+const Handles = require("../Handles")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
@@ -18,7 +19,7 @@ const Objects = {}
 
 const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
 const Workspace: {[RuntimeId]: Object} = {}
-const ByInstance: {[Instance]: RuntimeId} = setmetatable({}, {__mode = "k"}) :: any
+const ByPart: {[Instance]: RuntimeId} = setmetatable({}, {__mode = "k"}) :: any
 
 -- The other direction, and the reason an object can find its instance at all
 -- when the reference sent beside it did not survive: a tagged part carries its
@@ -26,6 +27,41 @@ const ByInstance: {[Instance]: RuntimeId} = setmetatable({}, {__mode = "k"}) :: 
 -- afterwards. Weak valued, so a part that is destroyed or streamed out is not
 -- held here by this table alone.
 const ByRuntimeId: {[RuntimeId]: Instance} = setmetatable({}, {__mode = "v"}) :: any
+
+-- Objects grouped by the live scene copy holding them. A copy going away is one
+-- packet naming it, not an ObjectRemoved per object, so the client has to be
+-- able to answer for a whole copy without walking the workspace.
+--
+-- By copy and not by scene, because a scene can be live more than once and an
+-- editor showing two copies of one room has to keep them apart.
+const ByInstance: {[Types.SceneInstanceId]: {[RuntimeId]: Object}} = {}
+
+-- Which scene each live copy came from. Kept here rather than in Scenes/Client
+-- because an arriving object needs it to work out its own persistent identity,
+-- and Objects cannot require Scenes without a cycle.
+const InstanceScene: {[Types.SceneInstanceId]: Types.SceneIdentifier} = {}
+
+const function Index(Obj: Object)
+    local Held = ByInstance[Obj.InstanceId]
+    if not Held then
+        Held = {}
+        ByInstance[Obj.InstanceId] = Held
+    end
+
+    Held[Obj.RuntimeId] = Obj
+end
+
+const function Unindex(Obj: Object)
+    const Held = ByInstance[Obj.InstanceId]
+    if not Held then
+        return
+    end
+
+    Held[Obj.RuntimeId] = nil
+    if next(Held) == nil then
+        ByInstance[Obj.InstanceId] = nil
+    end
+end
 
 -- Every optimistic set takes a ticket, and only the newest outstanding one for
 -- a property is allowed to roll back. Dragging issues a set per frame: without
@@ -132,14 +168,15 @@ const function Teardown(Obj: Object)
     end
 
     if Obj.Instance then
-        ByInstance[Obj.Instance] = nil
+        ByPart[Obj.Instance] = nil
         Obj.Instance = nil
     end
 
     ByRuntimeId[Obj.RuntimeId] = nil
+    Unindex(Obj)
 
     -- Not table.clear: a stale reference should still be able to report its own
-    -- runtime id and read Destroyed rather than turning into an empty table
+    -- handle and read Destroyed rather than turning into an empty table
     -- whose every method throws.
     Obj.Get = Shared.Destroyed.Get
     Obj.Set = Shared.Destroyed.Set
@@ -159,7 +196,7 @@ const function Track(Inst: Instance)
         return
     end
 
-    ByInstance[Inst] = RuntimeId
+    ByPart[Inst] = RuntimeId
     ByRuntimeId[RuntimeId] = Inst
 
     const Obj = Workspace[RuntimeId]
@@ -172,8 +209,8 @@ end
 -- the world, and an object holding it would hand callers something detached
 -- from everything. The pairing is rebuilt by Track if it streams back in.
 const function Untrack(Inst: Instance)
-    const RuntimeId = ByInstance[Inst]
-    ByInstance[Inst] = nil
+    const RuntimeId = ByPart[Inst]
+    ByPart[Inst] = nil
 
     if RuntimeId == nil then
         return
@@ -197,6 +234,49 @@ function Objects:Get(RuntimeId: RuntimeId): Object?
     return Workspace[RuntimeId]
 end
 
+-- The two halves of a persistent id, for a caller holding one that did not come
+-- off an object. Objects carry Scene and LocalId already.
+function Objects:Split(Persistent: Types.PersistentId): (Types.SceneIdentifier, number)
+    return Handles.Split(Persistent)
+end
+
+function Objects:GetInstance(Live: Types.SceneInstanceId): {Object}
+    const Out = {}
+    for _, Obj in ByInstance[Live] or {} do
+        table.insert(Out, Obj)
+    end
+
+    return Out
+end
+
+function Objects:GetInstanceScene(Live: Types.SceneInstanceId): Types.SceneIdentifier?
+    return InstanceScene[Live]
+end
+
+-- Told by Scenes/Client as the server announces copies appearing.
+function Objects.TrackInstance(Live: Types.SceneInstanceId, Scene: Types.SceneIdentifier)
+    InstanceScene[Live] = Scene
+end
+
+-- Tears down every object of one live copy. Called by Scenes/Client when the
+-- server says the copy is gone, which arrives as a single packet: the objects
+-- are already gone there and no ObjectRemoved is coming for any of them.
+function Objects.DropInstance(Live: Types.SceneInstanceId)
+    InstanceScene[Live] = nil
+
+    const Held = ByInstance[Live]
+    if not Held then
+        return
+    end
+
+    for RuntimeId, Obj in table.clone(Held) do
+        Workspace[RuntimeId] = nil
+        Teardown(Obj)
+    end
+
+    ByInstance[Live] = nil
+end
+
 function Objects:GetRegistered(): {[ObjectIdentifier]: ObjectRegistry}
     return Registered
 end
@@ -209,7 +289,7 @@ end
 function Objects:FromInstance(Inst: Instance): Object?
     local Current: Instance? = Inst
     while Current do
-        const RuntimeId = ByInstance[Current]
+        const RuntimeId = ByPart[Current]
         if RuntimeId then
             return Workspace[RuntimeId]
         end
@@ -222,7 +302,12 @@ end
 
 -- Shared by the live ObjectAdded broadcast and the batched join replay, which
 -- carry the same three values and differ only in how many arrive at once.
-const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instance?)
+const function AddObject(
+    RuntimeId: RuntimeId,
+    Live: Types.SceneInstanceId,
+    Compressed: buffer,
+    Inst: Instance?
+)
     const Ok, Data = pcall(function()
         return Compressor:DecompressObject(Compressed)
     end)
@@ -242,8 +327,21 @@ const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instanc
     -- survive, the part may already be here and tracked under its runtime id.
     const Resolved = Inst or ByRuntimeId[RuntimeId]
 
+    -- The persistent half is assembled here rather than sent: the local id
+    -- rides inside the buffer already, and the scene is whichever one the copy
+    -- came from. Unknown only if an object outran the packet announcing its
+    -- copy, which the server orders against.
+    const Scene = InstanceScene[Live]
+    if not Scene then
+        Logger:Warn(`Object {RuntimeId} arrived for unknown scene instance {Live}.`)
+    end
+
     const Obj = {}
     Obj.RuntimeId = RuntimeId
+    Obj.InstanceId = Live
+    Obj.Scene = Scene or 0
+    Obj.LocalId = Data.LocalId
+    Obj.PersistentId = Handles.Join(Scene or 0, Data.LocalId)
     Obj.Parent = Data.Parent
     Obj.Name = Registry.Name
     Obj.Destroyed = false
@@ -270,8 +368,10 @@ const function AddObject(RuntimeId: RuntimeId, Compressed: buffer, Inst: Instanc
     Obj.Destroy = __destroy
 
     Workspace[RuntimeId] = Obj
+    Index(Obj :: any)
+
     if Resolved then
-        ByInstance[Resolved] = RuntimeId
+        ByPart[Resolved] = RuntimeId
         ByRuntimeId[RuntimeId] = Resolved
     end
 end
@@ -299,13 +399,18 @@ Network.ObjectAdded:Connect(AddObject)
 
 -- The instance list carries false where an object has no instance: a nil entry
 -- would leave a hole in the array and shift every later index against the ids.
-Network.ObjectsReplayed:Connect(function(RuntimeIds: {number}, Buffers: {buffer}, Instances: {any})
+Network.ObjectsReplayed:Connect(function(
+    RuntimeIds: {number},
+    Live: {number},
+    Buffers: {buffer},
+    Instances: {any}
+)
     for Index, RuntimeId in RuntimeIds do
         const Inst = Instances[Index]
         const Resolved = if Inst == false then nil else Inst
 
         -- One bad entry must not cost the rest of the batch.
-        const Ok, Err = pcall(AddObject, RuntimeId, Buffers[Index], Resolved)
+        const Ok, Err = pcall(AddObject, RuntimeId, Live[Index], Buffers[Index], Resolved)
         if not Ok then
             Logger:Warn(`Failed to add replayed object {RuntimeId}: {Err}`)
         end

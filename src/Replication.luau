@@ -12,12 +12,16 @@
 --
 -- Order matters and is why this lives in one place rather than as a handler
 -- inside each module: property registries have to land before object registries,
--- which have to land before the objects that reference them.
+-- which have to land before the objects that reference them. Scene registries go
+-- first of all, because an object's handle names the scene holding it and one
+-- arriving for a scene the client has never heard of cannot be filed.
 
 const Players = game:GetService("Players")
 
 const PropertiesNetwork = require("./Properties/Network")
 const ObjectsNetwork = require("./Objects/Network")
+const ScenesNetwork = require("./Scenes/Network")
+const Scenes = require("./Scenes/Server")
 const Permissions = require("./Permissions/Server")
 const Properties = require("./Properties/Server")
 const Networking = require("./Networking")
@@ -58,6 +62,36 @@ const function SendChunks<T>(Plr: Player, Send: ({T}) -> (), Items: {T}): boolea
 end
 
 function Replication.Replay(Plr: Player)
+    const SceneRegistries = {}
+    for Identifier in Scenes:GetRegistered() do
+        table.insert(SceneRegistries, Scenes:GetRegistryPayload(Identifier))
+    end
+
+    const SentScenes = SendChunks(Plr, function(Chunk)
+        ScenesNetwork.RegistriesReplayed:Fire(Plr, Chunk)
+    end, SceneRegistries)
+
+    if not SentScenes then
+        return
+    end
+
+    -- Which copies are live, before any object names one. Sent as two parallel
+    -- lists for the same reason the object replay is: a codec per element.
+    const LiveIds = {}
+    const LiveScenes = {}
+    for Index, Instance_ in Scenes:GetInstances() do
+        LiveIds[Index] = Instance_.Id
+        LiveScenes[Index] = Instance_.Scene
+    end
+
+    if #LiveIds > 0 then
+        if not Plr.Parent then
+            return
+        end
+
+        ScenesNetwork.InstancesReplayed:Fire(Plr, LiveIds, LiveScenes)
+    end
+
     const PropertyRegistries = {}
     for Identifier in Properties:GetRegistered() do
         table.insert(PropertyRegistries, Properties:GetRegistryPayload(Identifier))
@@ -91,6 +125,7 @@ function Replication.Replay(Plr: Player)
     -- Compressed a chunk at a time rather than all at once, so the cost of
     -- serializing a large workspace is spread across frames.
     local RuntimeIds = {}
+    local InstanceIds = {}
     local Buffers = {}
     local Instances = {}
     local Count = 0
@@ -104,9 +139,10 @@ function Replication.Replay(Plr: Player)
             return false
         end
 
-        ObjectsNetwork.ObjectsReplayed:Fire(Plr, RuntimeIds, Buffers, Instances)
+        ObjectsNetwork.ObjectsReplayed:Fire(Plr, RuntimeIds, InstanceIds, Buffers, Instances)
 
         RuntimeIds = {}
+        InstanceIds = {}
         Buffers = {}
         Instances = {}
         Count = 0
@@ -122,6 +158,7 @@ function Replication.Replay(Plr: Player)
 
         Count += 1
         RuntimeIds[Count] = Obj.RuntimeId
+        InstanceIds[Count] = Obj.InstanceId
         Buffers[Count] = Compressor:CompressObject(Obj :: any)
         Instances[Count] = Obj.Instance or false
 

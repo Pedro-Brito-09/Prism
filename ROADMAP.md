@@ -5,40 +5,13 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
 
 ## In design
 
-- [ ] **Scenes + object identity.** One refactor, not two: objects cannot be
-      keyed by a scene-scoped id until scenes exist, and keeping runtime ids
-      through a scenes release would be work thrown away.
-
-      *Scenes.* Objects are created into a named scene instead of one global
-      workspace. Scenes are registered in code, with stable ids, the way
-      property and object types already are. `Scene:Load()` rebuilds the scene
-      from its pack, `Scene:Unload()` serialises it and destroys the objects,
-      so an unloaded scene costs a buffer. A loaded server scene is visible to
-      every player. An implicit always-loaded `Default` scene keeps plain
-      `Objects.new` working. Replaces the case for an object hierarchy.
-
-      *Identity.* `RuntimeId` -- session-local, minted fresh every load -- is
-      replaced by a durable handle, `SceneId * 2^32 + ObjectId`, which stays a
-      single exact number in Luau and so stays a single argument everywhere.
-      The pack stores only the low half, the id within the scene, so a pack
-      stays portable: loading the same prefab into two scenes yields two
-      non-colliding sets of handles, and cross references inside a pack are
-      remapped together. Ids are never recycled within a scene; the scene's
-      `LastId` is saved in the pack exactly as `CompressMetadatas` already
-      saves the metadata one. `FORMAT_VERSION` stays at 1 and the layout
-      changes in place -- nothing has ever been written by a released build.
-
-      *Load and unload are single packets.* Tearing down a 5000 object scene
-      with one `ObjectRemoved` each is the flood `Replication` was written to
-      avoid.
-
-      *Then, separately:* client owned scenes, whose objects the server never
-      sees -- a prefab preview, a local sandbox. Needs `Objects.new` on the
-      client and a local authority path (apply on the spot, no invoke, no
-      rollback). The client never receives a registry's template instance, so
-      a local scene has to be handed one explicitly. Its natural finish --
-      committing a local scene to the server -- is a transaction full of
-      create operations, so transactions are worth doing in between.
+- [ ] **Client owned scenes.** A scene whose objects the server never sees — a
+      prefab preview, a local sandbox. Needs `Objects.new` on the client and a
+      local authority path: apply on the spot, no invoke, no rollback. The
+      client never receives a registry's template instance, so a local scene has
+      to be handed one explicitly. Its natural finish — committing a local scene
+      to the server — is a transaction full of create operations, so
+      transactions are worth doing first.
 
 - [ ] **Transactions.** One channel carrying a list of operations — create, set,
       destroy — validated and applied as a unit, so a multi-object edit is one
@@ -51,6 +24,11 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
 
 ## Queued
 
+- [ ] **Unregistering does not reach the client.** `Properties:Unregister` drops
+      a registry on the server and tells nobody, so every client keeps serving
+      the old one from its own copy. Scenes now announce it; properties predate
+      that and still do not. Object types have no unregister at all.
+
 - [ ] **Object added / removed signals on the client.** `AddObject` and
       `Teardown` are internal, so UI has to poll `GetWorkspace()` to notice
       anything appearing.
@@ -61,11 +39,33 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
       Hidden, ReadOnly}` on the registry, which already replicates — enough for
       a property panel to be generated rather than written per property.
 - [ ] **`Duplicate(object)`.** `Objects.new` already accepts initial values.
+- [ ] **Scene history: diff, merge, revert.** Two properties the format already
+      has make this reachable rather than speculative. A copy serialises
+      deterministically — objects in local id order, properties in property id
+      order — so two versions of a scene produce comparable bytes instead of
+      whatever hash order gave. And persistent ids survive a save, so a diff can
+      say "this object changed" rather than "an object went and another came".
+      That is the whole basis of a three way merge. `Commit` is the point a
+      version would be recorded at.
+
 - [ ] **Undo / redo.** After transactions, which give it the unit to record.
       Identity stops being the open problem once handles land: a resurrected
       object can come back under the id it had.
 
 ## Done
+
+- [x] **Scenes and object identity.** A scene is a document: registering one
+      creates data, `Load` reads it into a live copy, and loading twice gives
+      two equal copies, so one saved room can stand in the world five times.
+      Objects live on the copy, because a scene loaded twice cannot answer which
+      object you mean. Identity split in two: `RuntimeId` names one live object
+      and is the only thing on the wire or in the workspace key, `PersistentId`
+      (`SceneId * 2^32 + LocalId`) names an object in a pack and is the only
+      thing saved. One crossing, `instance:Find`, scoped to a copy. Only the low
+      half is packed, so a pack is portable between scenes. `Commit` writes a
+      copy back; unloading never saves on its own, because with several copies
+      live it would have to pick one. `Objects.new` still works, in an implicit
+      `Default` scene loaded on first use.
 
 - [x] **Property access from the object.** `OnChange` and `GetProperty` beside
       `Get` and `Set`, all four taking an id or a name, with the name resolved

@@ -61,7 +61,9 @@ end
 
 return {
     -- Stamped on every clone an object owns, before it is parented, so the tag
-    -- and the id replicate as part of the instance itself.
+    -- and the id replicate as part of the instance itself. The runtime id, not
+    -- the persistent one: this pairs a part with one live object, and a
+    -- persistent id names every copy of it at once.
     --
     -- The instance reference that rides alongside ObjectAdded and the join
     -- replay is a fast path, not a guarantee: a client that has not replicated

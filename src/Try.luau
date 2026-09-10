@@ -7,7 +7,7 @@ return function<A..., B...>(Attempts: number, fn: (A...) -> B..., ...: A...): (b
     const Total = math.max(1, Attempts)
 
     for Attempt = 1, Total do
-        Result = table.pack(pcall(fn, ...))
+        Result = table.pack(pcall(fn, ...) :: any)
         if Result[1] then
             break
         end
