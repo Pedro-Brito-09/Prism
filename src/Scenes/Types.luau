@@ -8,11 +8,6 @@ export type PersistentId = Handles.PersistentId
 export type SceneConfig = {
     CustomId: SceneIdentifier?,
     Name: string,
-
-    -- Where a copy of this scene parents its instances, unless the copy names
-    -- its own. Falls back to the object registry's Container, which is what a
-    -- game with one scene has always used.
-    Container: Instance?,
 }
 
 export type SceneRegistry = {
@@ -33,7 +28,11 @@ export type SceneInstance = {
     -- here would be circular with the field below.
     Owner: any,
 
-    Container: Instance?,
+    -- Where this copy's objects live: workspace.__prism.__scene_N.__copy_N, a
+    -- Model so that placing a copy is one PivotTo rather than a container the
+    -- caller has to supply and keep track of.
+    Model: Model,
+
     Objects: {[ObjectTypes.RuntimeId]: ObjectTypes.Object},
 
     -- The one crossing between the two identities, and deliberately scoped to a
@@ -64,7 +63,6 @@ export type SceneInstance = {
 export type Scene = {
     Id: SceneIdentifier,
     Name: string,
-    Container: Instance?,
 
     -- Only ever climbs, and is written into the pack. Handing a local id back
     -- out after its object is gone would make any reference still holding it --
@@ -84,7 +82,7 @@ export type Scene = {
     -- A new live copy. Called twice, it gives two, and they are equals -- which
     -- is what makes one saved room able to stand in the world five times. Nil
     -- only where the scene's pack could not be read.
-    Load: (self: Scene, Container: Instance?) -> SceneInstance?,
+    Load: (self: Scene) -> SceneInstance?,
 
     -- Every copy at once. A single copy unloads itself.
     Unload: (self: Scene) -> (),

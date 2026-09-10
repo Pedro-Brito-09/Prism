@@ -137,13 +137,6 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
         return
     end
 
-    -- A clone with no Container is never parented, so it is not replicated and
-    -- the Instance the client receives with ObjectAdded is nil -- which also
-    -- means FromInstance can never resolve these objects.
-    if Config.Instance and not Config.Container then
-        Logger:Warn(`Object {Config.Name} has an Instance but no Container, so its clones will not replicate to clients.`)
-    end
-
     const Valid = {}
     for _, PropId in Config.Properties do
         if Properties:GetRegistry(PropId) then
@@ -158,7 +151,6 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
         Name = Config.Name,
         Properties = Valid,
         Instance = Config.Instance,
-        Container = Config.Container,
         Links = Shared.ValidateLinks(Config.Name, Config.Instance, Config.Links, Valid),
     }
 
@@ -409,15 +401,10 @@ const function Construct(
         Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
         CollectionService:AddTag(Clone, Shared.ObjectTag)
 
-        -- The instance's own container wins over the registry's. A registry is
-        -- a template shared by every scene using that object type, so its
-        -- container cannot be where a particular copy belongs -- and it is the
-        -- instance, not the scene, because two copies of one room have to be
-        -- able to sit in two places.
-        const Container = Instance_.Container or Owner.Container or Ref.Container
-        if Container then
-            Clone.Parent = Container
-        end
+        -- Into the copy holding it, and nowhere else. Which copy rather than
+        -- which scene, because two copies of one room have to be able to sit
+        -- in two places, and the copy's model is what moves them.
+        Clone.Parent = Instance_.Model
 
         Inst = Clone
     end

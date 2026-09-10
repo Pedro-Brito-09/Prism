@@ -39,11 +39,11 @@ export type ObjectRegistry = {
     Name: string,
     Properties: {PropertyTypes.PropertyIdentifier},
 
-    -- Template only. Objects.new clones it and parents the clone to Container,
-    -- so put it somewhere that does not replicate or render on its own --
-    -- ServerStorage or ReplicatedStorage rather than Workspace.
+    -- Template only. Objects.new clones it and parents the clone into the copy
+    -- the object belongs to, so put it somewhere that does not replicate or
+    -- render on its own -- ServerStorage or ReplicatedStorage rather than
+    -- Workspace.
     Instance: Instance?,
-    Container: Instance?,
     Links: {InstanceLinkRegistry}?,
 }
 
@@ -57,7 +57,6 @@ export type ObjectRegistry = {
 -- building its own objects supplies both itself, once per object type.
 export type LocalRegistry = {
     Instance: Instance?,
-    Container: Instance?,
     Links: {InstanceLinkRegistry}?,
 }
 
@@ -67,7 +66,6 @@ export type ObjectConfig = {
     Properties: {PropertyTypes.PropertyIdentifier},
 
     Instance: Instance?,
-    Container: Instance?,
     Links: {InstanceLinkRegistry}?,
 }
 

@@ -443,10 +443,6 @@ const LocalTemplate = Instance.new("Part")
 LocalTemplate.Name = "PrismLocalTemplate"
 LocalTemplate.Anchored = true
 
-const LocalContainer = Instance.new("Folder")
-LocalContainer.Name = "PrismLocalContainer"
-LocalContainer.Parent = workspace
-
 T:Test("a type is localized with the half the wire could not carry", function()
     if not BareId or not TitleId then
         T:Ok(false, "no bare registry")
@@ -455,7 +451,6 @@ T:Test("a type is localized with the half the wire could not carry", function()
 
     T:Ok(Objects:Localize(BareId, {
         Instance = LocalTemplate,
-        Container = LocalContainer,
         Links = {{Property = TitleId, Type = "Attribute", Name = FIXTURE_PROPERTY}},
     }), "localized")
 
@@ -500,7 +495,7 @@ T:Test("a local scene loads a copy and builds objects in it", function()
     T:Ok(Obj.Instance, "cloned the template it was handed")
 
     if Obj.Instance then
-        T:Eq(Obj.Instance.Parent, LocalContainer, "parented to the container")
+        T:Eq(Obj.Instance.Parent, Copy.Model, "parented into the copy's model")
         T:Ok(Obj.Instance ~= LocalTemplate, "not the template itself")
         T:Eq(Obj.Instance:GetAttribute(FIXTURE_PROPERTY), "Local", "the link drove the attribute")
         T:Eq(Objects:FromInstance(Obj.Instance), Obj, "and maps back from the part")

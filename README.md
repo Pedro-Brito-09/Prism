@@ -38,7 +38,6 @@ local Enemy = Prism.Objects:Register({
     Name = "Enemy",
     Properties = {Health},
     Instance = ServerStorage.EnemyTemplate,
-    Container = workspace.Level,
     Links = {
         {Property = Health, Type = "Attribute", Name = "Health"},
     },
@@ -87,7 +86,7 @@ loaded as. Registering one creates data and nothing else. `Load` reads it into a
 live copy.
 
 ```lua
-local Rooms = Prism.Scenes.new({Name = "Rooms", Container = workspace.Levels})
+local Rooms = Prism.Scenes.new({Name = "Rooms"})
 
 local room = Rooms:Load()              -- one live copy
 room:Create(Crate, {[Health] = 50})
@@ -105,8 +104,11 @@ is no answer — ask a copy and there is.
 one.
 
 ```lua
-local a = Rooms:Load(workspace.SlotA)
-local b = Rooms:Load(workspace.SlotB)
+local a = Rooms:Load()
+local b = Rooms:Load()
+
+a.Model:PivotTo(CFrame.new(0, 0, 0))     -- and they can stand apart
+b.Model:PivotTo(CFrame.new(200, 0, 0))
 
 a:Find(localId)   -- this copy's object
 b:Find(localId)   -- the other copy's
@@ -117,6 +119,25 @@ Rooms:Unload()    -- takes every copy
 Every copy carries the persistent ids the pack was written with, so five
 identical rooms agree on *what* each object is and disagree on *which* one it
 is.
+
+### Where the parts live
+
+Prism owns one tree in the workspace and puts every object's instance in it:
+
+```
+workspace
+└── __prism
+    └── __scene_4
+        ├── __copy_11
+        └── __copy_12
+```
+
+Keyed by the copy rather than the scene, because a scene loaded five times is
+five copies and they cannot share a folder. A copy's node is a `Model`, so
+placing one is `copy.Model:PivotTo(cf)` — which is what containers used to be
+for, with the framework handing you the model rather than asking you to supply
+one. Unloading a copy destroys its model, and the scene's folder goes with the
+last of its copies.
 
 ### Saving
 
@@ -191,7 +212,6 @@ instead of asking for them. There is nobody to ask and nothing to roll back to.
 ```lua
 Prism.Objects:Localize(Crate, {
     Instance = ReplicatedStorage.CrateTemplate,
-    Container = workspace.Preview,
     Links = {{Property = Tint, Type = "Property", Name = "Color"}},
 })
 

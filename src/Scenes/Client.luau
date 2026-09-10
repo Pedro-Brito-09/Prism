@@ -26,6 +26,7 @@
 
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Client")
+const World = require("../World")
 const Network = require("./Network")
 const Handles = require("../Handles")
 const Logger = require("../Logger")
@@ -195,11 +196,12 @@ const function __instance_unload(self: SceneInstance)
     -- Every object it held, torn down here rather than announced: nothing
     -- outside this client ever knew about them.
     Objects.DropInstance(self.Id)
+    World.DropCopy(self.Scene, self.Id)
     table.clear(self.Objects)
     table.clear(self.ByLocal)
 end
 
-const function NewInstance(Owner: any, Container: Instance?): SceneInstance
+const function NewInstance(Owner: any): SceneInstance
     if NextInstanceId <= 0 then
         Logger:Error("Local scene copy id space exhausted.")
     end
@@ -210,7 +212,11 @@ const function NewInstance(Owner: any, Container: Instance?): SceneInstance
 
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
-    Instance_.Container = Container or Owner.Container
+
+    -- The same tree the server's copies live in, built locally. A local scene's
+    -- ids count down from the top of the space while the server's count up, so
+    -- a folder of this client's cannot be mistaken for one of the server's.
+    Instance_.Model = World.Copy(Owner.Id, Instance_.Id)
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
@@ -230,8 +236,8 @@ const function NewInstance(Owner: any, Container: Instance?): SceneInstance
     return Instance_ :: any
 end
 
-const function __load(self: any, Container: Instance?): any
-    const Instance_ = NewInstance(self, Container)
+const function __load(self: any): any
+    const Instance_ = NewInstance(self)
 
     const Data = self.Data
     if not Data then
@@ -340,7 +346,6 @@ function Scenes.new(Config: SceneConfig): LocalScene?
     const Scene = {}
     Scene.Id = Identifier
     Scene.Name = Config.Name
-    Scene.Container = Config.Container
     Scene.LastId = 0
     Scene.Data = nil
     Scene.Instances = {}

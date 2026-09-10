@@ -342,13 +342,10 @@ const function Construct(
         Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
         CollectionService:AddTag(Clone, Shared.ObjectTag)
 
-        -- The copy's container wins over the scene's, and the scene's over the
-        -- type's, exactly as on the server: two copies of one room have to be
-        -- able to sit in two places.
-        const Container = Live.Container or Owner.Container or Supplied.Container
-        if Container then
-            Clone.Parent = Container
-        end
+        -- Into the copy holding it, exactly as on the server: two copies of
+        -- one room have to be able to sit in two places, and the copy's model
+        -- is what moves them.
+        Clone.Parent = Live.Model
 
         Inst = Clone
     end
@@ -432,13 +429,8 @@ function Objects:Localize(Reference: ObjectRegistry | ObjectIdentifier, Config: 
         return false
     end
 
-    if Config.Instance and not Config.Container then
-        Logger:Warn(`Localized {Registry.Name} has an Instance but no Container, so its clones are built unparented.`)
-    end
-
     Localized[Identifier] = {
         Instance = Config.Instance,
-        Container = Config.Container,
 
         -- Checked here rather than per object, for the same reason the server
         -- checks at registration: every clone shares the template's shape, so a
