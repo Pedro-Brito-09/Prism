@@ -39,7 +39,9 @@ reads right, never that it was run with a player in it.
       cache keyed by role name. The price, taken knowingly: editing a role
       later does not reach anyone already holding it.
 
-      *They stay session state.* Prism does not persist a scene's rights.
+      *They stay session state.* Prism persists no rights at all, global or
+      per scene, which leaves the whole subsystem the same shape the rate
+      budget already has: granted while you are here, gone with the server.
       Who owns a level and who they invited is a question every game answers
       differently — group ranks, friends, a gamepass, a record in a service of
       its own — and a store built in here would be bypassed by half of them
