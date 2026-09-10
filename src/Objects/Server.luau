@@ -763,7 +763,7 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, Prop
         return false
     end
 
-    if not Permissions:Can(Plr, "Edit", Obj.Parent) then
+    if not Permissions:Can(Plr, "Edit", Obj, PropId) then
         return false
     end
 
@@ -796,7 +796,7 @@ Network.Destroy.OnInvoke = function(Plr: Player, Identifier: RuntimeId): boolean
         return false
     end
 
-    if not Permissions:Can(Plr, "Destroy", Obj.Parent) then
+    if not Permissions:Can(Plr, "Destroy", Obj) then
         return false
     end
 

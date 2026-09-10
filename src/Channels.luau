@@ -210,6 +210,14 @@ const Channels: {Channel} = {
         Args = {Codecs.String, Codecs.Buffer}, -- Name, Compressor:CompressScene
         Returns = {Codecs.Bool, Codecs.Varint}, -- accepted, SceneId
     },
+
+    {
+        -- One player's rights over one scene, sent to that player when they
+        -- change and at the join replay. Nil rights mean they hold nothing on
+        -- it any more. Permissions.Assigned carries their global rights.
+        Name = "Permissions.SceneAssigned",
+        Args = {Codecs.Varint, Codecs.Any}, -- SceneId, SceneRightsPayload?
+    },
 }
 
 const ById: {Channel} = Channels

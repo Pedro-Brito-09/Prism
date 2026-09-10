@@ -126,10 +126,13 @@ const Destroyable = if BareId and TitleId
     end)
     else nil
 
-const Builder = WaitFor("TestBuilder permission", function()
-    const Current = Permissions:Get()
-    return if Current.Name == "TestBuilder" then Current else nil
-end)
+-- Rights on the default scene, where every editable fixture lives.
+const Builder = if Editable
+    then WaitFor("TestBuilder rights", function()
+        const Rights = Permissions:GetOn(Editable.Scene)
+        return if Rights and Rights.Role == "TestBuilder" then Rights else nil
+    end)
+    else nil
 
 --=============================================================================
 -- Replication
@@ -349,34 +352,46 @@ end)
 
 T:Describe("Permissions")
 
-T:Test("the client received the builder role", function()
-    const Current = Permissions:Get()
-    T:Ok(Builder, "builder payload arrived")
-    T:Eq(Current.Name, "TestBuilder", "role name")
-    T:Ok(type(Current.Blacklist) == "table", "blacklist rebuilt as a map")
+T:Test("the client received its global rights", function()
+    const Global = Permissions:Get()
+    T:Eq(Global.Role, "TestBuilder", "from the role granted")
+    T:Eq(Global.Rate, 5, "its budget")
+    T:Ok(Global.CanPush, "its right to push")
+    T:Ok(Permissions:Has("TestPublish"), "and its global capability")
 end)
 
-T:Test("Can reflects verbs and the rebuilt blacklist", function()
-    T:Ok(Permissions:Can("Create"), "builder can create")
-    T:Ok(Permissions:Can("Edit"), "builder can edit")
-    T:Ok(Permissions:Can("Destroy"), "builder can destroy")
+T:Test("Can reflects the rights on the object's own scene", function()
+    if not Builder or not Editable or not Denied or not BareId then
+        T:Ok(false, "no builder rights on the fixtures")
+        return
+    end
 
-    if CrateId and BareId then
-        T:Ok(not Permissions:Can("Edit", CrateId), "crate is blacklisted")
-        T:Ok(Permissions:Can("Edit", BareId), "bare type is allowed")
-        T:Ok(Permissions:Get().Blacklist[CrateId], "blacklist entry is addressable by id")
+    T:Ok(Permissions:Can("Edit", Editable), "may edit a bare object")
+    T:Ok(Permissions:Can("Destroy", Editable), "and destroy one")
+    T:Ok(Permissions:Can("Create", {Scene = Editable.Scene, Parent = BareId}), "and create one")
+    T:Ok(not Permissions:Can("Edit", Denied), "but a crate is blacklisted")
+    T:Ok(Permissions:Get().Capabilities, "capabilities rebuilt as a map")
+    T:Ok(Permissions:Has("TestInvite", Editable.Scene), "and the scene's capability")
+
+    -- A scene that has granted this player nothing: the admitted fixture was
+    -- admitted, which is not the same thing.
+    const Scenery = if TitleId then FindLiveObject(BareId, TitleId, "FixtureAdmittedScenery") else nil
+    if Scenery then
+        T:Ok(not Permissions:Can("Edit", Scenery), "and nothing at all on a scene that granted nothing")
     end
 end)
 
-T:Test("OnChange fires when the role changes", function()
+T:Test("OnChange fires when the rights on a scene change", function()
     if not Editable or not TitleId then
         T:Ok(false, "no editable fixture")
         return
     end
 
+    const Scene = Editable.Scene
     local SawViewer = false
-    const Disconnect = Permissions:OnChange(function(Permission)
-        if Permission.Name == "TestViewer" then
+    const Disconnect = Permissions:OnChange(function(Changed)
+        const Rights = if Changed == Scene then Permissions:GetOn(Scene) else nil
+        if Rights and Rights.Role == "TestViewer" then
             SawViewer = true
         end
     end)
@@ -385,10 +400,11 @@ T:Test("OnChange fires when the role changes", function()
     T:Ok(Editable:Set(TitleId, "PermissionPulse"), "pulse edit accepted locally")
     T:Eventually(function()
         return SawViewer
-    end, 3, "viewer assignment observed")
+    end, 3, "viewer grant observed")
     T:Eventually(function()
-        return Permissions:Get().Name == "TestBuilder"
-    end, 3, "builder assignment restored")
+        const Rights = Permissions:GetOn(Scene)
+        return Rights ~= nil and Rights.Role == "TestBuilder"
+    end, 3, "builder grant restored")
     Disconnect()
 end)
 

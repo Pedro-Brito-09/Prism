@@ -1455,102 +1455,178 @@ end)
 
 T:Describe("Permissions")
 
-Permissions:Register("TestViewer", {Level = 1})
+Permissions:Register("TestViewer", {})
 Permissions:Register("TestBuilder", {
-    Level = 10,
-    CanCreate = true,
-    CanEdit = true,
-    CanDestroy = true,
-    Rate = 5,
-    Blacklist = {CrateId},
+    Global = {Rate = 5, CanPush = true, Capabilities = {"TestPublish"}},
+    Scene = {
+        CanCreate = true,
+        CanEdit = true,
+        CanDestroy = true,
+        Objects = {Blacklist = {CrateId}},
+        Capabilities = {"TestInvite"},
+    },
 })
+
+-- Stands in for a player who is not connected. Rights are keyed by user id and
+-- a table carrying one is all a check reads; the budget is keyed by the table,
+-- so each stand-in starts with a fresh one. Ids this far below zero are never a
+-- real player, Studio's test players included.
+const function Ghost(UserId: number): any
+    return {UserId = UserId}
+end
 
 T:Test("roles register once", function()
     T:Ok(Permissions:GetRegistered().TestBuilder, "registered")
-    T:Eq(Permissions:Register("TestBuilder", {Level = 1}), nil, "duplicate refused")
+    T:Eq(Permissions:Register("TestBuilder", {}), nil, "duplicate refused")
 end)
 
-T:Test("unassigned players are denied everything", function()
-    const Ghost = {} :: any -- stands in for a Player; only used as a table key
-    T:Eq(Permissions:Get(Ghost).Name, "None", "fallback role")
-    T:Ok(not Permissions:Can(Ghost, "Edit"), "cannot edit")
-    T:Ok(not Permissions:Can(Ghost, "Create"), "cannot create")
-    T:Ok(not Permissions:Can(Ghost, "Destroy"), "cannot destroy")
+T:Test("a player with no grant on a scene can do nothing there", function()
+    const Plr = Ghost(-2001)
+    const Obj = Objects.new(BareId)
+
+    T:Ok(not Permissions:Can(Plr, "Edit", Obj), "cannot edit")
+    T:Ok(not Permissions:Can(Plr, "Destroy", Obj), "cannot destroy")
+    T:Ok(not Permissions:Can(Plr, "Create", {Scene = Obj.Scene, Parent = BareId}), "cannot create")
+
+    Obj:Destroy()
 end)
 
-T:Test("a default role grants its verbs", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBuilder")
+T:Test("a role granted on a scene holds there and nowhere else", function()
+    const Plr = Ghost(-2002)
+    const Here = Scenes.new({Name = "TestRightsHere"}):Load()
+    const There = Scenes.new({Name = "TestRightsThere"}):Load()
+    const InHere = Here:Create(BareId)
+    const InThere = There:Create(BareId)
 
-    T:Eq(Permissions:Get(Ghost).Name, "TestBuilder", "defaulted")
-    T:Ok(Permissions:Can(Ghost, "Edit"), "can edit")
-    T:Ok(Permissions:Can(Ghost, "Edit", BareId), "can edit a permitted type")
+    T:Ok(Here.Owner:Grant(Plr, "TestBuilder"), "granted")
+    T:Ok(Permissions:Can(Plr, "Edit", InHere), "may edit here")
+    T:Ok(not Permissions:Can(Plr, "Edit", InThere), "and not there")
+    T:Eq(Here.Owner:GetRights(Plr).Role, "TestBuilder", "the role it came from is recorded")
 
-    Permissions:SetDefault(nil)
+    Here.Owner:Destroy()
+    There.Owner:Destroy()
 end)
 
-T:Test("the blacklist blocks a specific object type", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBuilder")
+T:Test("a present object whitelist is exhaustive, and the blacklist always holds", function()
+    Permissions:Register("TestBareOnly", {Scene = {CanEdit = true, Objects = {Whitelist = {BareId}}}})
 
-    T:Ok(not Permissions:Can(Ghost, "Edit", CrateId), "blacklisted type refused")
-    T:Ok(Permissions:Can(Ghost, "Edit", BareId), "other types still allowed")
+    const Plr = Ghost(-2003)
+    const Copy = Scenes.new({Name = "TestObjectLists"}):Load()
+    const Bare = Copy:Create(BareId)
+    const Crate = Copy:Create(CrateId)
 
-    Permissions:SetDefault(nil)
+    Copy.Owner:Grant(Plr, "TestBareOnly")
+    T:Ok(Permissions:Can(Plr, "Edit", Bare), "the whitelisted type")
+    T:Ok(not Permissions:Can(Plr, "Edit", Crate), "and nothing else")
+
+    Copy.Owner:Grant(Plr, "TestBuilder")
+    T:Ok(Permissions:Can(Plr, "Edit", Bare), "an absent whitelist constrains nothing")
+    T:Ok(not Permissions:Can(Plr, "Edit", Crate), "but the blacklist does")
+
+    Copy.Owner:Destroy()
 end)
 
-T:Test("a viewer role grants nothing without verbs", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestViewer")
-    T:Ok(not Permissions:Can(Ghost, "Edit"), "no edit verb")
+T:Test("property lists govern writing, per type where they say so", function()
+    Permissions:Register("TestNoCrateTint", {
+        Scene = {CanEdit = true, CanDestroy = true, Properties = {Blacklist = {[TintId] = {CrateId}}}},
+    })
+    Permissions:Register("TestTitleOnly", {Scene = {CanEdit = true, Properties = {Whitelist = {TitleId}}}})
 
-    Permissions:SetDefault(nil)
+    const Plr = Ghost(-2004)
+    const Copy = Scenes.new({Name = "TestPropertyLists"}):Load()
+    const Crate = Copy:Create(CrateId)
+
+    Copy.Owner:Grant(Plr, "TestNoCrateTint")
+    T:Ok(not Permissions:Can(Plr, "Edit", Crate, TintId), "tint is kept off crates")
+    T:Ok(Permissions:Can(Plr, "Edit", Crate, TitleId), "other properties are not")
+    T:Ok(Permissions:Can(Plr, "Destroy", Crate), "and a destroy writes no property")
+
+    Copy.Owner:Grant(Plr, "TestTitleOnly")
+    T:Ok(Permissions:Can(Plr, "Edit", Crate, TitleId), "the whitelisted property")
+    T:Ok(not Permissions:Can(Plr, "Edit", Crate, HealthId), "and nothing else")
+
+    Copy.Owner:Destroy()
 end)
 
-T:Test("Assign accepts a real player", function()
-    const Plr = Players:GetPlayers()[1]
-    if not Plr then
-        T:Skip("no player is connected; run a one-client play test")
-        return
-    end
+T:Test("granting a role replaces what was there, and capabilities come one at a time", function()
+    const Plr = Ghost(-2005)
+    const Scene = Scenes.new({Name = "TestCapabilities"})
 
-    T:Ok(Permissions:Assign(Plr, "TestBuilder"), "assignment accepted")
-    T:Eq(Permissions:Get(Plr).Name, "TestBuilder", "assigned role")
-    T:Ok(Permissions:Assign(Plr, nil), "assignment cleared")
+    Scene:Grant(Plr, "TestBuilder")
+    T:Ok(Permissions:Has(Plr, "TestInvite", Scene.Id), "the role's capability")
+
+    Scene:GrantCapability(Plr, "TestKick")
+    T:Ok(Permissions:Has(Plr, "TestKick", Scene.Id), "one granted on its own")
+
+    Scene:RevokeCapability(Plr, "TestInvite")
+    T:Ok(not Permissions:Has(Plr, "TestInvite", Scene.Id), "one revoked on its own")
+
+    Scene:Grant(Plr, "TestViewer")
+    T:Ok(not Permissions:Has(Plr, "TestKick", Scene.Id), "a new role clears the set")
+    T:Eq(Scene:GetRights(Plr).CanEdit, false, "verbs included")
+
+    Scene:Destroy()
 end)
 
-T:Test("REGRESSION: the payload blacklist is a sequential array", function()
+T:Test("a grant names a user id, and goes with its scene", function()
+    const Scene = Scenes.new({Name = "TestByUserId", Rights = {[-2006] = "TestBuilder"}})
+    const Obj = Scene:Load():Create(BareId)
+
+    -- Granted before anyone holding the id was here, and held by whoever holds
+    -- it -- which is what lets an owner rejoin into their own level.
+    T:Ok(Permissions:Can(Ghost(-2006), "Edit", Obj), "held by whoever holds the id")
+    T:Ok(Scene:GetRights(-2006), "and readable by id")
+
+    Scene:Destroy()
+    T:Eq(Permissions:GetOn(Scene, -2006), nil, "gone with the scene")
+end)
+
+T:Test("global rights: a budget and whether you may push", function()
+    const Plr = Ghost(-2007)
+
+    T:Eq(Permissions:Get(Plr).Rate, 60, "the default budget for anyone ungranted")
+    T:Ok(not Permissions:CanPush(Plr), "and no pushing")
+
+    T:Ok(Permissions:Grant(Plr, "TestBuilder"), "granted")
+    T:Eq(Permissions:Get(Plr).Rate, 5, "the role's budget")
+    T:Ok(Permissions:CanPush(Plr), "its right to push")
+    T:Ok(Permissions:Has(Plr, "TestPublish"), "and its global capability")
+
+    Permissions:Revoke(Plr)
+    T:Ok(not Permissions:CanPush(Plr), "revoked back to the default")
+end)
+
+T:Test("REGRESSION: every set in the payload is a sequential array", function()
     -- Sent as a map, non-sequential numeric keys are not guaranteed to survive
     -- remote serialization, and the client silently allowed blacklisted types.
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBuilder")
+    const Scene = Scenes.new({Name = "TestPayload", Rights = {[-2009] = "TestBuilder"}})
+    const Payload = Permissions:GetPayloadOn(Scene, -2009)
 
-    const Payload = Permissions:GetPayload(Ghost)
-    T:Eq(#Payload.Blacklist, 1, "one entry, reachable by length")
-    T:Eq(Payload.Blacklist[1], CrateId, "entry is the object id")
-    T:Eq(Payload.Name, "TestBuilder", "role name carried")
+    T:Ok(Payload, "built")
 
-    Permissions:SetDefault(nil)
+    if Payload then
+        T:Eq(#Payload.ObjectBlacklist, 1, "one entry, reachable by length")
+        T:Eq(Payload.ObjectBlacklist[1], CrateId, "entry is the object id")
+        T:Eq(Payload.Capabilities[1], "TestInvite", "capabilities as a list")
+        T:Eq(Payload.Role, "TestBuilder", "role name carried")
+    end
+
+    Scene:Destroy()
 end)
 
-T:Test("rate limiting cuts off past the role budget", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBuilder") -- Rate = 5
+T:Test("rate limiting cuts off past the budget", function()
+    const Plr = Ghost(-2008)
+    Permissions:Grant(Plr, "TestBuilder") -- Rate = 5
 
     local Allowed = 0
     for _ = 1, 20 do
-        if Permissions:Consume(Ghost) then
+        if Permissions:Consume(Plr) then
             Allowed += 1
         end
     end
 
     T:Eq(Allowed, 5, "exactly the budget")
-    Permissions:SetDefault(nil)
-end)
-
-T:Test("a zero rate role cannot act at all", function()
-    const Ghost = {} :: any
-    T:Ok(not Permissions:Consume(Ghost), "fallback has no budget")
+    Permissions:Revoke(Plr)
 end)
 
 --=============================================================================
@@ -1565,12 +1641,13 @@ const Transactions = Prism.Transactions
 -- every other test here would trip over. This one is the same role with room to
 -- work in, blacklist included.
 Permissions:Register("TestBulk", {
-    Level = 5,
-    CanCreate = true,
-    CanEdit = true,
-    CanDestroy = true,
-    Rate = 200,
-    Blacklist = {CrateId},
+    Global = {Rate = 200, CanPush = true},
+    Scene = {
+        CanCreate = true,
+        CanEdit = true,
+        CanDestroy = true,
+        Objects = {Blacklist = {CrateId}},
+    },
 })
 
 T:Test("the wire form round trips every operation kind", function()
@@ -1801,25 +1878,28 @@ T:Test("a create lands in the copy it names", function()
 end)
 
 T:Test("the create verb and the blacklist are both checked", function()
-    const Ghost = {} :: any -- stands in for a Player; only used as a table key
-    Permissions:SetDefault("TestBulk")
+    const Plr = Ghost(-3001)
+    const Default = Scenes:GetDefault()
+    Permissions:Grant(Plr, "TestBulk")
+    Default:Grant(Plr, "TestBulk")
 
-    T:Ok(not Transactions.Apply(Ghost, {
+    T:Ok(not Transactions.Apply(Plr, {
         {Kind = "Create", Object = CrateId, Instance = 0, Properties = {}},
     } :: any), "a blacklisted type is refused")
 
-    const Applied, Created = Transactions.Apply(Ghost, {
+    const Applied, Created = Transactions.Apply(Plr, {
         {Kind = "Create", Object = BareId, Instance = 0, Properties = {}},
     } :: any)
 
     T:Ok(Applied, "a permitted type is created")
 
-    Permissions:SetDefault("TestViewer")
-    T:Ok(not Transactions.Apply(Ghost, {
+    Default:Grant(Plr, "TestViewer")
+    T:Ok(not Transactions.Apply(Plr, {
         {Kind = "Create", Object = BareId, Instance = 0, Properties = {}},
     } :: any), "a role without the verb cannot create")
 
-    Permissions:SetDefault(nil)
+    Default:Revoke(Plr)
+    Permissions:Revoke(Plr)
 
     const Made = if Created[1] then Objects:Get(Created[1]) else nil
     if Made then
@@ -1828,8 +1908,9 @@ T:Test("the create verb and the blacklist are both checked", function()
 end)
 
 T:Test("a transaction is charged one action per operation", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBuilder") -- Rate = 5
+    const Plr = Ghost(-3002)
+    Permissions:Grant(Plr, "TestBuilder") -- Rate = 5
+    Scenes:GetDefault():Grant(Plr, "TestBuilder")
 
     const Objs = {Objects.new(BareId), Objects.new(BareId), Objects.new(BareId)}
 
@@ -1845,13 +1926,14 @@ T:Test("a transaction is charged one action per operation", function()
             })
         end
 
-        return (Transactions.Apply(Ghost, Operations :: any))
+        return (Transactions.Apply(Plr, Operations :: any))
     end
 
     T:Ok(Edit(3), "three operations fit a budget of five")
     T:Ok(not Edit(3), "three more do not, in the same window")
 
-    Permissions:SetDefault(nil)
+    Scenes:GetDefault():Revoke(Plr)
+    Permissions:Revoke(Plr)
 
     for _, Obj in Objs do
         Obj:Destroy()
@@ -1869,6 +1951,12 @@ T:Describe("Scene commits")
 -- no client in a server-only run to invoke it for real.
 const Commit = Networking:Get("Scenes.Commit").OnInvoke
 
+-- Every commit test pushes as the same user, granted and revoked around each
+-- one; a fresh table each time gives each test a fresh budget.
+const function Pusher(): any
+    return {UserId = -5000}
+end
+
 const function Packed(LastId: number, Entries: {{Parent: number, LocalId: number, Properties: {[number]: any}}}): buffer
     const Objects_ = {}
     for Index, Entry in Entries do
@@ -1884,14 +1972,14 @@ const function Packed(LastId: number, Entries: {{Parent: number, LocalId: number
 end
 
 T:Test("a pack a client built becomes a scene of its own", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBulk")
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted, Identifier = Commit(Ghost, "PushedRoom", Packed(1, {
         {Parent = BareId, LocalId = 1, Properties = {[TitleId] = "Pushed"}},
     }))
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
 
     T:Ok(Accepted, "accepted")
     T:Ok(Identifier and Identifier > 0, "answered with an id")
@@ -1923,8 +2011,8 @@ T:Test("a pack a client built becomes a scene of its own", function()
 end)
 
 T:Test("the id space a pack claims is not taken on trust", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBulk")
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
 
     -- One object, and a last id near the top of the space. Kept as it arrived,
     -- the scene would have room for one more object ever.
@@ -1932,7 +2020,7 @@ T:Test("the id space a pack claims is not taken on trust", function()
         {Parent = BareId, LocalId = 1, Properties = {}},
     }))
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
     T:Ok(Accepted, "accepted")
 
     const Scene = Scenes:Get("ClaimedRoom")
@@ -1946,88 +2034,73 @@ T:Test("the id space a pack claims is not taken on trust", function()
     Copy:Unload()
 end)
 
-T:Test("a type the role may not create refuses the whole pack", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBulk") -- blacklists TestCrate
-
-    const Accepted = Commit(Ghost, "BlacklistedRoom", Packed(2, {
-        {Parent = BareId, LocalId = 1, Properties = {}},
-        {Parent = CrateId, LocalId = 2, Properties = {}},
-    }))
-
-    Permissions:SetDefault(nil)
-
-    T:Ok(not Accepted, "refused")
-    T:Eq(Scenes:Get("BlacklistedRoom"), nil, "and registered nothing")
-end)
-
-T:Test("a role without the create verb cannot commit at all", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestViewer")
+T:Test("a player who may not push cannot commit at all", function()
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestViewer")
 
     const Accepted = Commit(Ghost, "ViewerRoom", Packed(1, {
         {Parent = BareId, LocalId = 1, Properties = {}},
     }))
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
 
     T:Ok(not Accepted, "refused")
     T:Eq(Scenes:Get("ViewerRoom"), nil, "and registered nothing")
 end)
 
 T:Test("an unregistered object type refuses the pack", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBulk")
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted = Commit(Ghost, "UnknownRoom", Packed(1, {
         {Parent = 99999, LocalId = 1, Properties = {}},
     }))
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
 
     T:Ok(not Accepted, "refused")
     T:Eq(Scenes:Get("UnknownRoom"), nil, "and registered nothing")
 end)
 
 T:Test("a name already taken is refused before the pack is read", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBulk")
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted = Commit(Ghost, "PushedRoom", Packed(1, {
         {Parent = BareId, LocalId = 1, Properties = {}},
     }))
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
     T:Ok(not Accepted, "refused")
 end)
 
 T:Test("bytes that are not a pack are refused rather than thrown", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBulk")
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted = Commit(Ghost, "GarbageRoom", buffer.fromstring("not a pack at all"))
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
 
     T:Ok(not Accepted, "refused")
     T:Eq(Scenes:Get("GarbageRoom"), nil, "and registered nothing")
 end)
 
 T:Test("an empty name is refused", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBulk")
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted = Commit(Ghost, "", Packed(1, {
         {Parent = BareId, LocalId = 1, Properties = {}},
     }))
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
     T:Ok(not Accepted, "refused")
 end)
 
 T:Test("a pack past the object cap is refused", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBulk")
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
 
     const Entries = table.create(4097)
     for Index = 1, 4097 do
@@ -2036,15 +2109,15 @@ T:Test("a pack past the object cap is refused", function()
 
     const Accepted = Commit(Ghost, "HugeRoom", Packed(4097, Entries))
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
 
     T:Ok(not Accepted, "refused")
     T:Eq(Scenes:Get("HugeRoom"), nil, "and registered nothing")
 end)
 
 T:Test("a commit costs one action, not one per object", function()
-    const Ghost = {} :: any
-    Permissions:SetDefault("TestBuilder") -- Rate = 5
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBuilder") -- Rate = 5
 
     const Pack = Packed(3, {
         {Parent = BareId, LocalId = 1, Properties = {}},
@@ -2060,7 +2133,7 @@ T:Test("a commit costs one action, not one per object", function()
         end
     end
 
-    Permissions:SetDefault(nil)
+    Permissions:Revoke(Ghost)
 
     -- Five commits of three objects each, not one and two thirds.
     T:Eq(Allowed, 5, "the budget counted packets")
@@ -2105,8 +2178,11 @@ AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmittedPrivate"})
 const OpenedScene = Scenes.new({Name = "FixtureOpened", Admitted = {1}})
 OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
 
+-- Global rights for the budget and pushing, and rights on the default scene,
+-- which is where every editable fixture above lives.
 const function AssignBuilder(Plr: Player)
-    Permissions:Assign(Plr, "TestBuilder")
+    Permissions:Grant(Plr, "TestBuilder")
+    Scenes:GetDefault():Grant(Plr, "TestBuilder")
     AdmittedScene:Admit(Plr)
     OpenedScene:Admit(Plr)
 end
@@ -2117,8 +2193,9 @@ end
 Players.PlayerAdded:Connect(AssignBuilder)
 
 -- A client writes this marker while its Permissions.OnChange listener is
--- attached. The server briefly changes the role, then restores the builder so
--- the remaining accepted-edit and destroy tests can proceed deterministically.
+-- attached. The server briefly grants the viewer role on the default scene,
+-- then the builder again, so the remaining accepted-edit and destroy tests can
+-- proceed deterministically.
 EditableFixture:OnChange(TitleId, function(Value)
     if Value == "EvictPulse" then
         for _, Plr in Players:GetPlayers() do
@@ -2133,10 +2210,10 @@ EditableFixture:OnChange(TitleId, function(Value)
     end
 
     for _, Plr in Players:GetPlayers() do
-        Permissions:Assign(Plr, "TestViewer")
+        Scenes:GetDefault():Grant(Plr, "TestViewer")
         task.delay(0.2, function()
             if Plr.Parent then
-                Permissions:Assign(Plr, "TestBuilder")
+                Scenes:GetDefault():Grant(Plr, "TestBuilder")
             end
         end)
     end

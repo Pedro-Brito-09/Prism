@@ -2,4 +2,5 @@
 const Networking = require("../Networking")
 return {
     Assigned = Networking:Get("Permissions.Assigned"),
+    SceneAssigned = Networking:Get("Permissions.SceneAssigned"),
 }

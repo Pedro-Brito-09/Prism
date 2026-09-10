@@ -1,56 +1,136 @@
 --!strict
--- Permissions are named roles, not per object grants. A player holds exactly one
--- role; the role says which verbs it may use and which object types it may not
--- touch. That keeps the check O(1) and keeps authorization out of every object.
+-- Rights come in two kinds, and a role is written with both halves.
+--
+-- Global rights are about the session: the action budget, whether a client may
+-- push a scene of its own, and capabilities that belong to no document. Scene
+-- rights are about one scene: the three verbs, the object and property lists
+-- they reach, and capabilities of that scene. Granting a role globally copies
+-- its global half in; granting it on a scene copies its scene half.
 
 export type Action = "Create" | "Edit" | "Destroy"
 
--- Object registry id. Kept as a plain number so this module does not have to
--- depend on Objects.
+-- Registry ids. Plain numbers so this module does not have to depend on Objects
+-- or Properties.
 export type ObjectType = number
+export type PropertyId = number
 
-export type PermissionConfig = {
-    -- Ordering only. Prism never compares levels itself; it is there so your
-    -- editor can ask "is this player at least a Builder" without a lookup table.
-    Level: number,
+-- What a check is asked about. An object already carries both fields; a create
+-- has no object yet, so it names the scene and the type it would make.
+export type Target = {
+    Scene: number,
+    Parent: ObjectType,
+}
 
+-- A whitelist that is present is exhaustive, and one that is absent constrains
+-- nothing -- the same thing the two words mean in enum constraints, and the
+-- direction that fails closed when a list is built wrong.
+export type ObjectLists = {
+    Whitelist: {ObjectType}?,
+    Blacklist: {ObjectType}?,
+}
+
+-- Property ids, as the object lists take object types, or [Property] =
+-- {ObjectType} to limit an entry to those types. Kept apart from the object
+-- lists so the field says which kind its keys are, and an id that is both a
+-- property and an object type means one thing.
+export type PropertyLists = {
+    Whitelist: {[any]: any}?,
+    Blacklist: {[any]: any}?,
+}
+
+export type SceneRoleConfig = {
     CanCreate: boolean?,
     CanEdit: boolean?,
     CanDestroy: boolean?,
 
-    -- Actions per second this role may spend on the object remotes. Defaults to
-    -- 60, which is roughly one action per frame. A transaction spends one per
-    -- operation it carries rather than one for the packet, so this bounds the
-    -- work asked for rather than the number of times it is asked.
+    Objects: ObjectLists?,
+
+    -- Writing only. Nothing in these is a reason to withhold data: what a
+    -- client is sent is admission's business.
+    Properties: PropertyLists?,
+
+    -- Plain strings that exist by appearing here. Prism enforces its three
+    -- verbs and only answers for these.
+    Capabilities: {string}?,
+}
+
+export type GlobalRoleConfig = {
+    -- Actions per second on the object remotes. A transaction spends one per
+    -- operation it carries, so this bounds the work asked for rather than the
+    -- number of times it is asked. Defaults to 60.
     Rate: number?,
 
-    -- Object types this role may never touch, whatever its verbs allow.
-    Blacklist: {ObjectType}?,
+    -- Whether a client may hand the server a scene it built.
+    CanPush: boolean?,
+
+    Capabilities: {string}?,
 }
 
-export type Permission = {
-    Name: string,
-    Level: number,
+export type RoleConfig = {
+    Global: GlobalRoleConfig?,
+    Scene: SceneRoleConfig?,
+}
+
+-- One property's entry in a list: every type, or only these.
+export type PropertyEntry = true | {[ObjectType]: true}
+
+export type SceneRights = {
+    -- The role most recently granted, for display. Informational only: the
+    -- sets below are the whole truth, and a capability granted since may have
+    -- moved them away from the role.
+    Role: string?,
+
     CanCreate: boolean,
     CanEdit: boolean,
     CanDestroy: boolean,
-    Rate: number,
-    Blacklist: {[ObjectType]: true},
+
+    ObjectWhitelist: {[ObjectType]: true}?,
+    ObjectBlacklist: {[ObjectType]: true},
+    PropertyWhitelist: {[PropertyId]: PropertyEntry}?,
+    PropertyBlacklist: {[PropertyId]: PropertyEntry},
+
+    Capabilities: {[string]: true},
 }
 
--- What actually crosses the wire. Blacklist is a sequential array here rather
--- than the {[id]: true} map the server keeps: remotes do not guarantee that
--- non-sequential numeric keys survive serialization, so the map arrived on the
--- client with entries missing and Can() started answering true for blacklisted
--- types. The client rebuilds the map from this on arrival.
-export type PermissionPayload = {
+export type GlobalRights = {
+    Role: string?,
+    Rate: number,
+    CanPush: boolean,
+    Capabilities: {[string]: true},
+}
+
+export type Role = {
     Name: string,
-    Level: number,
+    Global: GlobalRights,
+    Scene: SceneRights,
+}
+
+-- What crosses the wire. Every set is a sequential array here: remotes do not
+-- guarantee that non-sequential numeric keys survive serialization, and a map
+-- sent as one used to arrive with entries missing, which made the client's Can
+-- answer true for blacklisted types.
+export type PropertyEntryPayload = {
+    Property: PropertyId,
+    Types: {ObjectType}?,
+}
+
+export type SceneRightsPayload = {
+    Role: string?,
     CanCreate: boolean,
     CanEdit: boolean,
     CanDestroy: boolean,
+    ObjectWhitelist: {ObjectType}?,
+    ObjectBlacklist: {ObjectType},
+    PropertyWhitelist: {PropertyEntryPayload}?,
+    PropertyBlacklist: {PropertyEntryPayload},
+    Capabilities: {string},
+}
+
+export type GlobalRightsPayload = {
+    Role: string?,
     Rate: number,
-    Blacklist: {ObjectType},
+    CanPush: boolean,
+    Capabilities: {string},
 }
 
 return true
