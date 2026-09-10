@@ -16,6 +16,7 @@ const ReplicatedStorage = game:GetService("ReplicatedStorage")
 const PRISM = ReplicatedStorage:WaitForChild("Prism").src
 const CRATE_OBJECT = "TestCrate"
 const BARE_OBJECT = "TestBare"
+const SHOWN_OBJECT = "TestShown"
 const FIXTURE_PROPERTY = "TestTitle"
 const DENIED_MARKER = "FixtureDenied"
 const EDITABLE_MARKER = "FixtureEditable"
@@ -95,6 +96,10 @@ end)
 
 const BareId = WaitFor("bare registry", function()
     return FindObjectType(BARE_OBJECT)
+end)
+
+const ShownId = WaitFor("shown registry", function()
+    return FindObjectType(SHOWN_OBJECT)
 end)
 
 const Denied = if CrateId and TitleId
@@ -435,34 +440,27 @@ end)
 
 T:Describe("Local scenes")
 
--- The client never receives a registry's template, so a local scene is handed
--- one here. A plain part built on the spot is enough: what matters is that a
--- local object clones it, tags it and drives it exactly as a server side object
--- drives the one it was given.
-const LocalTemplate = Instance.new("Part")
-LocalTemplate.Name = "PrismLocalTemplate"
-LocalTemplate.Anchored = true
+-- A registry arrives carrying its template and links, and a local object
+-- clones, tags and drives that template exactly as a server side object does.
+-- Only a template this client can see arrives as anything: TestShown's sits in
+-- ReplicatedStorage, TestCrate's in ServerStorage.
+const ShownTemplate = ReplicatedStorage:WaitForChild("PrismShownTemplate", TIMEOUT)
 
-T:Test("a type is localized with the half the wire could not carry", function()
-    if not BareId or not TitleId then
-        T:Ok(false, "no bare registry")
+T:Test("a registry arrives with its template and links", function()
+    const Shown = if ShownId then Objects:GetRegistry(ShownId) else nil
+    const Crate = if CrateId then Objects:GetRegistry(CrateId) else nil
+
+    if not Shown or not Crate then
+        T:Ok(false, "no registries")
         return
     end
 
-    T:Ok(Objects:Localize(BareId, {
-        Instance = LocalTemplate,
-        Links = {{Property = TitleId, Type = "Attribute", Name = FIXTURE_PROPERTY}},
-    }), "localized")
+    T:Ok(ShownTemplate, "the template replicated")
+    T:Eq(Shown.Instance, ShownTemplate, "and the registry names it")
+    T:Ok(Shown.Links and #Shown.Links == 1, "its link came with it")
 
-    const Supplied = Objects:GetLocalized(BareId)
-    T:Ok(Supplied, "held for the type")
-
-    if Supplied then
-        T:Eq(Supplied.Instance, LocalTemplate, "template kept")
-        T:Ok(Supplied.Links and #Supplied.Links == 1, "link validated and kept")
-    end
-
-    T:Ok(not Objects:Localize(99999, {}), "an unregistered type is refused")
+    T:Eq(Crate.Instance, nil, "a template in ServerStorage arrives as nil")
+    T:Ok(Crate.Links and #Crate.Links == 2, "its links still arrive, and drive nothing without it")
 end)
 
 T:Test("a local scene loads a copy and builds objects in it", function()
@@ -479,7 +477,7 @@ T:Test("a local scene loads a copy and builds objects in it", function()
     const Copy = Sandbox:Load()
     T:Ok(Copy, "loaded a copy")
 
-    const Obj = Copy:Create(BareId, {[TitleId] = "Local"})
+    const Obj = Copy:Create(ShownId, {[TitleId] = "Local"})
     T:Ok(Obj, "created")
     T:Ok(Obj.Local, "marked as this client's own")
     T:Eq(Obj:Get(TitleId), "Local", "initial value applied")
@@ -496,7 +494,7 @@ T:Test("a local scene loads a copy and builds objects in it", function()
 
     if Obj.Instance then
         T:Eq(Obj.Instance.Parent, Copy.Folder, "parented into the copy's folder")
-        T:Ok(Obj.Instance ~= LocalTemplate, "not the template itself")
+        T:Ok(Obj.Instance ~= ShownTemplate, "not the template itself")
         T:Eq(Obj.Instance:GetAttribute(FIXTURE_PROPERTY), "Local", "the link drove the attribute")
         T:Eq(Objects:FromInstance(Obj.Instance), Obj, "and maps back from the part")
     end
@@ -512,7 +510,7 @@ T:Test("an edit applies on the spot and nothing takes it back", function()
     end
 
     const Copy = Sandbox:Load()
-    const Obj = Copy:Create(BareId, {[TitleId] = "Before"})
+    const Obj = Copy:Create(ShownId, {[TitleId] = "Before"})
 
     T:Ok(Obj:Set(TitleId, "After"), "accepted")
     T:Eq(Obj:Get(TitleId), "After", "applied immediately")
@@ -602,9 +600,10 @@ T:Test("destroying a local object takes its part with it", function()
     end
 
     const Copy = Sandbox:Load()
-    const Obj = Copy:Create(BareId)
+    const Obj = Copy:Create(ShownId)
     const Part = Obj.Instance
 
+    T:Ok(Part, "built with a part")
     T:Ok(Obj:Destroy(), "destroyed")
     T:Ok(Obj.Destroyed, "marked")
     T:Eq(Objects:Get(Obj.RuntimeId), nil, "out of the workspace")

@@ -149,9 +149,9 @@ const ATTRIBUTE_TYPES: {[string]: true} = {
     Font = true,
 }
 
--- Links are checked once, against the template, when the type is registered --
--- or, on a client, when it is handed the template the wire does not carry.
--- Every clone has the same class and the same members, so the answer never
+-- Links are checked once, against the template, when the type is registered on
+-- the server. A client receives them already checked, beside the template they
+-- were checked against. Every clone has the same class and the same members, so the answer never
 -- differs between them, and these checks used to run inside Objects.new, which
 -- meant one malformed link warned once for every object ever created from that
 -- registry.
