@@ -1390,6 +1390,311 @@ T:Test("a zero rate role cannot act at all", function()
 end)
 
 --=============================================================================
+-- Transactions
+--=============================================================================
+
+T:Describe("Transactions")
+
+const Transactions = Prism.Transactions
+
+-- TestBuilder's rate is five, which is what the budget test wants and what
+-- every other test here would trip over. This one is the same role with room to
+-- work in, blacklist included.
+Permissions:Register("TestBulk", {
+    Level = 5,
+    CanCreate = true,
+    CanEdit = true,
+    CanDestroy = true,
+    Rate = 200,
+    Blacklist = {CrateId},
+})
+
+T:Test("the wire form round trips every operation kind", function()
+    const Operations = {
+        {Kind = "Create", Object = CrateId, Instance = 0, Properties = {[TitleId] = "Made", [HealthId] = 40}},
+        {Kind = "Set", Target = 7, Property = TitleId, Value = "Changed"},
+        {Kind = "Destroy", Target = 9},
+    }
+
+    const Read = Compressor:DecompressTransaction(Compressor:CompressTransaction(Operations :: any))
+
+    T:Eq(#Read, 3, "three operations")
+
+    T:Eq(Read[1].Kind, "Create", "first is a create")
+    T:Eq(Read[1].Object, CrateId, "object type carried")
+    T:Eq(Read[1].Instance, 0, "scene copy carried")
+    T:Eq(Read[1].Properties[TitleId], "Made", "initial text")
+    T:Eq(Read[1].Properties[HealthId], 40, "initial number")
+
+    T:Eq(Read[2].Kind, "Set", "second is a set")
+    T:Eq(Read[2].Target, 7, "target carried")
+    T:Eq(Read[2].Property, TitleId, "property carried")
+    T:Eq(Read[2].Value, "Changed", "value carried")
+    T:Eq(Read[2].Type, "Text", "the value's own tag came back with it")
+
+    T:Eq(Read[3].Kind, "Destroy", "third is a destroy")
+    T:Eq(Read[3].Target, 9, "target carried")
+end)
+
+T:Test("the same edit always produces the same bytes", function()
+    -- Written in id order rather than hash order, so one edit can be compared
+    -- against another rather than only replayed. The two tables hold the same
+    -- pairs, inserted in opposite orders.
+    const First = {}
+    First[TitleId] = "Same"
+    First[HealthId] = 10
+
+    const Second = {}
+    Second[HealthId] = 10
+    Second[TitleId] = "Same"
+
+    const A = Compressor:CompressTransaction({{Kind = "Create", Object = CrateId, Instance = 3, Properties = First}} :: any)
+    const B = Compressor:CompressTransaction({{Kind = "Create", Object = CrateId, Instance = 3, Properties = Second}} :: any)
+
+    T:Eq(buffer.tostring(A), buffer.tostring(B), "byte identical")
+end)
+
+T:Test("an operation of an unknown kind is refused outright", function()
+    const Encoded = Compressor:CompressTransaction({{Kind = "Destroy", Target = 4}} :: any)
+
+    -- Header, version, count, then the first operation's kind byte.
+    buffer.writeu8(Encoded, 5, 200)
+
+    T:Throws(function()
+        Compressor:DecompressTransaction(Encoded)
+    end, "unknown kind")
+end)
+
+T:Test("a truncated transaction throws rather than half decoding", function()
+    const Encoded = Compressor:CompressTransaction({
+        {Kind = "Set", Target = 1, Property = TitleId, Value = "Cut"},
+    } :: any)
+
+    -- Everything up to and including the kind byte, and nothing of the target.
+    const Short = buffer.create(6)
+    buffer.copy(Short, 0, Encoded, 0, 6)
+
+    T:Throws(function()
+        Compressor:DecompressTransaction(Short)
+    end, "truncated")
+end)
+
+T:Test("a transaction creates, sets and destroys as one", function()
+    const Existing = Objects.new(BareId)
+    const Doomed = Objects.new(BareId)
+
+    const Applied, Created = Transactions.new()
+        :Create(CrateId, {[TitleId] = "FromTransaction"})
+        :Set(Existing, TitleId, "Edited")
+        :Destroy(Doomed)
+        :Commit()
+
+    T:Ok(Applied, "applied")
+    T:Eq(#Created, 1, "one object created")
+
+    const Made = Objects:Get(Created[1])
+    T:Ok(Made, "the created object is live")
+    T:Eq(Made:Get(TitleId), "FromTransaction", "initial value applied")
+    T:Eq(Existing:Get(TitleId), "Edited", "the set applied")
+    T:Ok(Doomed.Destroyed, "the destroy applied")
+
+    Made:Destroy()
+    Existing:Destroy()
+end)
+
+T:Test("committing nothing succeeds and sends nothing", function()
+    const Applied, Created = Transactions.new():Commit()
+    T:Ok(Applied, "succeeded")
+    T:Eq(#Created, 0, "created nothing")
+end)
+
+T:Test("an operation that cannot be built stops the whole commit", function()
+    const Obj = Objects.new(BareId)
+
+    const Edit = Transactions.new()
+        :Set(Obj, TitleId, "First")
+        :Set(Obj, "NoSuchProperty", "Second")
+
+    T:Eq(Edit.Rejected, 1, "one operation refused while building")
+    T:Eq(#Edit.Operations, 1, "the other was still built")
+    T:Ok(not Edit:Commit(), "commit refused rather than sending what is left")
+    T:Eq(Obj:Get(TitleId), "Untitled", "nothing applied")
+
+    Obj:Destroy()
+end)
+
+T:Test("one refused operation applies none of the others", function()
+    const Obj = Objects.new(BareId)
+
+    const Applied = Transactions.Apply(nil, {
+        {Kind = "Set", Target = Obj.RuntimeId, Property = TitleId, Value = "Never", Type = "Text"},
+        {Kind = "Destroy", Target = 999999},
+    } :: any)
+
+    T:Ok(not Applied, "refused")
+    T:Eq(Obj:Get(TitleId), "Untitled", "the set that came first never happened")
+
+    Obj:Destroy()
+end)
+
+T:Test("a value whose tag disagrees with the property is refused", function()
+    const Obj = Objects.new(CrateId)
+
+    const Applied = Transactions.Apply(nil, {
+        {Kind = "Set", Target = Obj.RuntimeId, Property = HealthId, Value = "not a number", Type = "Text"},
+    } :: any)
+
+    T:Ok(not Applied, "refused")
+    T:Eq(Obj:Get(HealthId), 100, "unchanged")
+
+    Obj:Destroy()
+end)
+
+T:Test("changing and destroying the same object in one transaction applies", function()
+    const Obj = Objects.new(BareId)
+
+    -- Declared the other way round. Every operation is resolved before any of
+    -- them run, and destroys run last, so the set lands on a live object and
+    -- the object goes afterwards.
+    const Applied = Transactions.Apply(nil, {
+        {Kind = "Destroy", Target = Obj.RuntimeId},
+        {Kind = "Set", Target = Obj.RuntimeId, Property = TitleId, Value = "Ordered", Type = "Text"},
+    } :: any)
+
+    T:Ok(Applied, "applied")
+    T:Ok(Obj.Destroyed, "the destroy landed")
+    T:Eq(Obj.Properties[TitleId].Value, "Ordered", "and the set landed before it")
+end)
+
+T:Test("naming the same object for destruction twice is not a failure", function()
+    const Obj = Objects.new(BareId)
+
+    const Applied = Transactions.Apply(nil, {
+        {Kind = "Destroy", Target = Obj.RuntimeId},
+        {Kind = "Destroy", Target = Obj.RuntimeId},
+    } :: any)
+
+    T:Ok(Applied, "applied")
+    T:Ok(Obj.Destroyed, "destroyed once")
+end)
+
+T:Test("a list past the cap is refused before anything is planned", function()
+    const Obj = Objects.new(BareId)
+    const Operations = table.create(1025)
+
+    Operations[1] = {Kind = "Set", Target = Obj.RuntimeId, Property = TitleId, Value = "Never", Type = "Text"}
+    for Index = 2, 1025 do
+        Operations[Index] = {Kind = "Destroy", Target = 999999}
+    end
+
+    T:Ok(not Transactions.Apply(nil, Operations :: any), "refused")
+    T:Eq(Obj:Get(TitleId), "Untitled", "nothing applied")
+
+    Obj:Destroy()
+end)
+
+T:Test("a create carrying a value its type cannot hold is refused", function()
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = CrateId, Instance = 0, Properties = {[HealthId] = "not a number"}},
+    } :: any), "refused")
+end)
+
+T:Test("a create carrying a property its type does not have drops it", function()
+    -- What restoring a saved object does with one, rather than a refusal: the
+    -- object is still the object that was asked for.
+    const Applied, Created = Transactions.Apply(nil, {
+        {Kind = "Create", Object = BareId, Instance = 0, Properties = {[TitleId] = "Kept", [HealthId] = 50}},
+    } :: any)
+
+    T:Ok(Applied, "applied")
+
+    const Made = Objects:Get(Created[1])
+    T:Eq(Made:Get(TitleId), "Kept", "the value it does carry")
+    T:Eq(Made:Get(HealthId), nil, "the one it does not")
+
+    Made:Destroy()
+end)
+
+T:Test("a create lands in the copy it names", function()
+    const Scene = Scenes.new({Name = "TransactionRoom"})
+    const Copy = Scene:Load()
+
+    const Applied, Created = Transactions.new()
+        :Create(BareId, {[TitleId] = "InRoom"}, Copy.Id)
+        :Commit()
+
+    T:Ok(Applied, "applied")
+
+    const Made = Objects:Get(Created[1])
+    T:Eq(Made.InstanceId, Copy.Id, "landed in the copy")
+    T:Eq(Copy:Find(Made.LocalId), Made, "the copy answers for it")
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = BareId, Instance = 999999, Properties = {}},
+    } :: any), "a copy that is not live is refused")
+
+    Copy:Unload()
+end)
+
+T:Test("the create verb and the blacklist are both checked", function()
+    const Ghost = {} :: any -- stands in for a Player; only used as a table key
+    Permissions:SetDefault("TestBulk")
+
+    T:Ok(not Transactions.Apply(Ghost, {
+        {Kind = "Create", Object = CrateId, Instance = 0, Properties = {}},
+    } :: any), "a blacklisted type is refused")
+
+    const Applied, Created = Transactions.Apply(Ghost, {
+        {Kind = "Create", Object = BareId, Instance = 0, Properties = {}},
+    } :: any)
+
+    T:Ok(Applied, "a permitted type is created")
+
+    Permissions:SetDefault("TestViewer")
+    T:Ok(not Transactions.Apply(Ghost, {
+        {Kind = "Create", Object = BareId, Instance = 0, Properties = {}},
+    } :: any), "a role without the verb cannot create")
+
+    Permissions:SetDefault(nil)
+
+    const Made = if Created[1] then Objects:Get(Created[1]) else nil
+    if Made then
+        Made:Destroy()
+    end
+end)
+
+T:Test("a transaction is charged one action per operation", function()
+    const Ghost = {} :: any
+    Permissions:SetDefault("TestBuilder") -- Rate = 5
+
+    const Objs = {Objects.new(BareId), Objects.new(BareId), Objects.new(BareId)}
+
+    const function Edit(Count: number): boolean
+        const Operations = {}
+        for Index = 1, Count do
+            table.insert(Operations, {
+                Kind = "Set",
+                Target = Objs[Index].RuntimeId,
+                Property = TitleId,
+                Value = `Value{Index}`,
+                Type = "Text",
+            })
+        end
+
+        return (Transactions.Apply(Ghost, Operations :: any))
+    end
+
+    T:Ok(Edit(3), "three operations fit a budget of five")
+    T:Ok(not Edit(3), "three more do not, in the same window")
+
+    Permissions:SetDefault(nil)
+
+    for _, Obj in Objs do
+        Obj:Destroy()
+    end
+end)
+
+--=============================================================================
 -- Client integration fixtures
 --=============================================================================
 

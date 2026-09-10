@@ -181,6 +181,65 @@ a joining player receives. One packet per object would put a five thousand
 object scene into the remote queue in a single frame, which is the flood the
 join replay exists to avoid.
 
+## Transactions
+
+A list of operations — create, set, destroy — validated and applied as a unit.
+One packet up, one permission pass, and one thing for an editor's history to
+record.
+
+```lua
+local edit = Prism.Transactions.new()
+
+edit:Create(Crate, {[Health] = 50}, room.Id)
+    :Set(other, "Health", 20)
+    :Destroy(stale)
+
+local applied, created = edit:Commit()
+```
+
+`Commit` answers whether the whole list landed, and the runtime ids of what it
+created, in the order the creates were declared. `Create` takes the copy the
+object belongs in, because a scene loaded twice has two equally good ones;
+leave it out and the object lands where `Objects.new` would have put it.
+
+Nothing is applied unless everything passes. A single refused operation ends the
+transaction while the world has not moved yet, and an operation that could not
+even be built — an unknown property, a target that is not an object — makes
+`Commit` refuse rather than send what is left.
+
+This is also the only way a client creates an object. `Objects.new` is server
+side, and until a channel asked for a create, `CanCreate` was a permission
+nothing could reach.
+
+### Ordering
+
+Operations apply creates first, then sets, then destroys, whatever order they
+were declared in. That is what makes a transaction atomic rather than merely
+batched: a create can be taken back by destroying what it made, and a set by
+writing back what it overwrote, but a destroy cannot be taken back at all — so
+nothing irreversible happens until everything reversible has already succeeded.
+
+Two sets on one property are one change by the time it lands, and an object
+destroyed by the same transaction that changed it is announced once, as gone.
+
+### On the client
+
+`Commit` yields until the server answers, and applies nothing early. A single
+`Set` is optimistic because it has a local object to write to and a value to
+roll back to; a create has neither, and no id at all until the server mints one.
+
+The result comes back as one broadcast rather than one per operation: created
+objects arrive down the same chunked path a scene load uses, and changes and
+removals have bulk channels beside the single ones.
+
+### Budget
+
+A transaction spends one action per operation rather than one per packet, so a
+role with `Rate = 60` may commit sixty operations a second however they are
+grouped. Charging per call would let one packet carrying ten thousand
+operations walk straight past the limiter. A single transaction carries at most
+1024 operations.
+
 ## Selection
 
 Client side, and purely local: the server never hears about it. Entries are
@@ -211,7 +270,7 @@ Prism.Permissions:Register("Builder", {
     CanCreate = true,
     CanEdit = true,
     CanDestroy = true,
-    Rate = 120,           -- actions per second
+    Rate = 120,           -- actions per second, counted per operation
     Blacklist = {Enemy},  -- may not touch this object type
 })
 
@@ -366,7 +425,7 @@ not — the version lives on the pack that contains them.
 ## Tests
 
 The tests run the unit suite on the server and the replication, permissions,
-optimistic-edit, and lifecycle suite on one client. Sync the files into Studio
+optimistic-edit, transaction and lifecycle suite on one client. Sync the files into Studio
 with Roblox Script Sync using this layout:
 
 ```text

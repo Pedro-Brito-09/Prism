@@ -19,6 +19,10 @@ if IS_SERVER then
     -- default scene in place, and an object cannot be built without one.
     Prism.Scenes = require("@self/Scenes/Server")
     Prism.Permissions = require("@self/Permissions/Server")
+
+    -- After both: it applies through Objects, resolves scene copies through
+    -- Scenes, and checks every operation against Permissions.
+    Prism.Transactions = require("@self/Transactions/Server")
     Prism.Database = require("@self/Database/Server")
 
     -- Required for the side effect: it wires up the join replay.
@@ -28,6 +32,7 @@ else
     Prism.Objects = require("@self/Objects/Client")
     Prism.Scenes = require("@self/Scenes/Client")
     Prism.Permissions = require("@self/Permissions/Client")
+    Prism.Transactions = require("@self/Transactions/Client")
 
     -- Client only, and not as a policy: it reads Objects/Client directly, so
     -- requiring it on the server would pull the client half of the object

@@ -3,6 +3,11 @@
 Agreed work, in the order it makes sense to build it. Ticked when it lands on
 `main`.
 
+Nothing here waits on Studio. The suites in `tests/` are written alongside the
+work and left unrun on purpose — the framework gets played through in one pass
+once it is structurally finished, so a ticked item means the work landed and
+reads right, never that it was run with a player in it.
+
 ## In design
 
 - [ ] **Client owned scenes.** A scene whose objects the server never sees — a
@@ -10,17 +15,9 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
       local authority path: apply on the spot, no invoke, no rollback. The
       client never receives a registry's template instance, so a local scene has
       to be handed one explicitly. Its natural finish — committing a local scene
-      to the server — is a transaction full of create operations, so
-      transactions are worth doing first.
-
-- [ ] **Transactions.** One channel carrying a list of operations — create, set,
-      destroy — validated and applied as a unit, so a multi-object edit is one
-      packet, one permission pass and one entry in the undo history. Subsumes
-      the missing create path: the client cannot create an object today because
-      no channel asks for it, and `Permissions:Can(_, "Create", _)` is reached
-      by nothing.
-      *Note: the rate limiter has to charge per operation, not per call, or a
-      single transaction with ten thousand operations walks past it.*
+      to the server — is a transaction full of create operations, which now
+      exist; what it needs from them is a way past the per-operation budget, or
+      a role allowed to spend it.
 
 ## Queued
 
@@ -48,11 +45,27 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
       That is the whole basis of a three way merge. `Commit` is the point a
       version would be recorded at.
 
-- [ ] **Undo / redo.** After transactions, which give it the unit to record.
-      Identity stops being the open problem once handles land: a resurrected
+- [ ] **Undo / redo.** Transactions are the unit to record, and they already
+      carry the reversal rules: a create is undone by destroying what it made, a
+      set by writing back what it overwrote, and a destroy by neither, which is
+      why it goes last. Identity is no longer the open problem: a resurrected
       object can come back under the id it had.
 
 ## Done
+
+- [x] **Transactions.** One channel carrying a list of operations — create, set,
+      destroy — planned and applied as a unit, so a multi-object edit is one
+      packet, one permission pass and one thing to record. A single refusal ends
+      it before the world moves; a failure partway rolls the reversible part
+      back, which is why the apply order is creates, then sets, then destroys
+      whatever order they were declared in — a destroy is the one operation that
+      cannot be taken back. Subsumes the missing create path: `Objects.new` is
+      server side, and until this there was no channel that asked for a create,
+      so `Permissions:Can(_, "Create", _)` was reached by nothing. The rate
+      limiter now charges per operation rather than per call, and the result
+      comes back as one broadcast rather than one per operation — created
+      objects down the chunked path a scene load uses, changes and removals
+      through bulk channels beside the single ones.
 
 - [x] **Scenes and object identity.** A scene is a document: registering one
       creates data, `Load` reads it into a live copy, and loading twice gives

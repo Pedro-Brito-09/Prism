@@ -19,7 +19,9 @@ export type PermissionConfig = {
     CanDestroy: boolean?,
 
     -- Actions per second this role may spend on the object remotes. Defaults to
-    -- 60, which is roughly one action per frame.
+    -- 60, which is roughly one action per frame. A transaction spends one per
+    -- operation it carries rather than one for the packet, so this bounds the
+    -- work asked for rather than the number of times it is asked.
     Rate: number?,
 
     -- Object types this role may never touch, whatever its verbs allow.

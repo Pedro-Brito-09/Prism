@@ -33,6 +33,7 @@ const PropertyTypes = require("./Properties/Types")
 const Handles = require("./Handles")
 const DatabaseTypes = require("./Database/Types")
 const ObjectTypes = require("./Objects/Types")
+const TransactionTypes = require("./Transactions/Types")
 const CustomEnum = require("./CustomEnum")
 const Varint = require("./Varint")
 const Logger = require("./Logger")
@@ -52,6 +53,10 @@ export type DecompressedObject = {
 const OBJECT_HEADER = "/oh"
 const METADATA_HEADER = "/mh"
 const PACK_HEADER = "/ph"
+
+-- A packet rather than a record, and the only header here that never reaches
+-- storage. See the Transactions section.
+const TRANSACTION_HEADER = "/th"
 
 -- Bump when the layout changes. Readers refuse anything newer than they know
 -- rather than misreading it.
@@ -699,6 +704,224 @@ function Compressor:DecompressScene(CompressedScene: buffer): (number, {Decompre
     end
 
     return LastId, Objects
+end
+
+--=============================================================================
+-- Transactions
+--=============================================================================
+
+-- [/th][varint version][varint count][operations...]
+--
+--   create   [1][varint object type][varint scene copy][varint count][properties...]
+--   set      [2][varint runtime id][varint property id][tag][value]
+--   destroy  [3][varint runtime id]
+--
+-- The only format here that is never written to disk. It lives beside the ones
+-- that are because it is the same problem -- tagged values authored by a peer
+-- running a different build -- and because sharing the property writer is what
+-- makes a value mean the same thing in a packet as it does in a save.
+--
+-- An operation of an unknown kind is refused rather than skipped. A value can be
+-- stepped over knowing only its wire shape, which is what keeps an old reader
+-- reading a new record; an operation cannot, and a transaction that quietly
+-- drops the part it did not understand is no longer applied as a unit.
+const function WriteValues(Buffers: {buffer}, Values: {[PropertyTypes.PropertyIdentifier]: any}): (number, number)
+    local Size = 0
+    local Count = 0
+
+    -- Id order, like an object's properties, so the same edit always produces
+    -- the same bytes -- which is what lets one history entry be compared
+    -- against another rather than only replayed.
+    const Keys = {}
+    for Key in Values do
+        table.insert(Keys, Key)
+    end
+
+    table.sort(Keys)
+
+    -- Refused rather than skipped, unlike an object being saved. A record that
+    -- drops a value it could not write is a record missing a field; a
+    -- transaction that does it is a different transaction from the one the
+    -- caller built, applied in full at the far end and reported as a success.
+    for _, Key in Keys do
+        const Registry = Properties:GetRegistry(Key)
+        if not Registry then
+            Logger:Error(`Cannot write an operation carrying unregistered property id {Key}.`)
+        end
+
+        const Written = WriteProperty(Buffers, Key, Registry.Type, Values[Key])
+        if Written == 0 then
+            Logger:Error(`Cannot write {Registry.Name} as a {Registry.Type}: the value it was given cannot be encoded.`)
+        end
+
+        Size += Written
+        Count += 1
+    end
+
+    return Size, Count
+end
+
+-- Throws rather than dropping, for the same reason. The caller is the author of
+-- the list, not a peer, so an operation that cannot be written is a mistake to
+-- be shown rather than a difference to be tolerated -- and the one thing this
+-- must never do is quietly send four of five operations.
+const function WriteOperation(Operation: TransactionTypes.Operation): buffer
+    if Operation.Kind == "Create" then
+        const Buffers = {}
+        const Size, Count = WriteValues(Buffers, Operation.Properties)
+
+        const PrefixSize = 1
+            + Varint.Measure(Operation.Object)
+            + Varint.Measure(Operation.Instance)
+            + Varint.Measure(Count)
+
+        const Prefix = buffer.create(PrefixSize)
+        buffer.writeu8(Prefix, 0, TransactionTypes.Kinds.Create)
+
+        local At = 1 + Varint.Write(Prefix, 1, Operation.Object)
+        At += Varint.Write(Prefix, At, Operation.Instance)
+        Varint.Write(Prefix, At, Count)
+
+        return Concat("", Prefix, Buffers, Size)
+    elseif Operation.Kind == "Set" then
+        const Registry = Properties:GetRegistry(Operation.Property)
+        if not Registry then
+            Logger:Error(`Cannot write a set for unregistered property id {Operation.Property}.`)
+        end
+
+        const Buffers = {}
+        const Size = WriteProperty(Buffers, Operation.Property, Registry.Type, Operation.Value)
+        if Size == 0 then
+            Logger:Error(`Cannot write a set of {Registry.Name}: the value it was given cannot be encoded.`)
+        end
+
+        const Prefix = buffer.create(1 + Varint.Measure(Operation.Target))
+        buffer.writeu8(Prefix, 0, TransactionTypes.Kinds.Set)
+        Varint.Write(Prefix, 1, Operation.Target)
+
+        return Concat("", Prefix, Buffers, Size)
+    elseif Operation.Kind == "Destroy" then
+        const Encoded = buffer.create(1 + Varint.Measure(Operation.Target))
+        buffer.writeu8(Encoded, 0, TransactionTypes.Kinds.Destroy)
+        Varint.Write(Encoded, 1, Operation.Target)
+
+        return Encoded
+    end
+
+    Logger:Error(`Cannot write an operation of unknown kind {tostring((Operation :: any).Kind)}.`)
+end
+
+function Compressor:CompressTransaction(Operations: {TransactionTypes.Operation}): buffer
+    const Buffers = {}
+    local Size = 0
+    local Count = 0
+
+    for _, Operation in Operations do
+        const Encoded = WriteOperation(Operation)
+
+        table.insert(Buffers, Encoded)
+        Size += buffer.len(Encoded)
+        Count += 1
+    end
+
+    const PrefixSize = Varint.Measure(FORMAT_VERSION) + Varint.Measure(Count)
+    const Prefix = buffer.create(PrefixSize)
+
+    const At = Varint.Write(Prefix, 0, FORMAT_VERSION)
+    Varint.Write(Prefix, At, Count)
+
+    return Concat(TRANSACTION_HEADER, Prefix, Buffers, Size)
+end
+
+-- Everything below is reading bytes a client authored, so it is written to throw
+-- rather than to cope: the caller runs it inside a pcall and drops the packet. A
+-- truncated buffer throws out of Varint or out of buffer itself, which is the
+-- same answer by a different route.
+function Compressor:DecompressTransaction(CompressedTransaction: buffer): {TransactionTypes.Operation}
+    if buffer.readstring(CompressedTransaction, 0, #TRANSACTION_HEADER) ~= TRANSACTION_HEADER then
+        Logger:Error("Tried to decompress invalid transaction buffer.")
+    end
+
+    local Offset = #TRANSACTION_HEADER
+
+    const Version, VersionRead = Varint.Read(CompressedTransaction, Offset)
+    CheckVersion(Version, "Transaction")
+    Offset += VersionRead
+
+    const Count, CountRead = Varint.Read(CompressedTransaction, Offset)
+    Offset += CountRead
+
+    const Operations = {}
+
+    for _ = 1, Count do
+        const Kind = buffer.readu8(CompressedTransaction, Offset)
+        Offset += 1
+
+        if Kind == TransactionTypes.Kinds.Create then
+            const Object, ObjectRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += ObjectRead
+
+            const Live, LiveRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += LiveRead
+
+            const Total, TotalRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += TotalRead
+
+            const Values = {}
+            for _ = 1, Total do
+                -- Skipped and warned about, like restoring a saved object: a
+                -- value for a property this build has never heard of is not a
+                -- reason to refuse the object that carried it.
+                const Id, Value, Consumed = ReadProperty(CompressedTransaction, Offset)
+                Offset += Consumed
+
+                if Id then
+                    Values[Id] = Value
+                end
+            end
+
+            table.insert(Operations, {
+                Kind = "Create" :: "Create",
+                Object = Object,
+                Instance = Live,
+                Properties = Values,
+            })
+        elseif Kind == TransactionTypes.Kinds.Set then
+            const Target, TargetRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += TargetRead
+
+            const Property, PropertyRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += PropertyRead
+
+            -- Read raw rather than through ReadProperty, which drops a value
+            -- whose type has drifted and warns. Here the drift is the thing the
+            -- receiver has to be told about: it decides whether the type the
+            -- author wrote matches the property being set, and refuses the whole
+            -- transaction when it does not.
+            const Value, ValueRead, Type = Compressor:DecompressValue(CompressedTransaction, Offset)
+            Offset += ValueRead
+
+            table.insert(Operations, {
+                Kind = "Set" :: "Set",
+                Target = Target,
+                Property = Property,
+                Value = Value,
+                Type = Type,
+            })
+        elseif Kind == TransactionTypes.Kinds.Destroy then
+            const Target, TargetRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += TargetRead
+
+            table.insert(Operations, {
+                Kind = "Destroy" :: "Destroy",
+                Target = Target,
+            })
+        else
+            Logger:Error(`Transaction carries an operation of unknown kind {Kind}.`)
+        end
+    end
+
+    return Operations
 end
 
 return Compressor

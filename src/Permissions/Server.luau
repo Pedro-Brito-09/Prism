@@ -169,7 +169,17 @@ end
 
 -- Sliding one second window, budgeted per role so a trusted role is not held to
 -- the same ceiling as an untrusted one.
-function Permissions:Consume(Plr: Player): boolean
+--
+-- Cost is what the request asks the server to do, not how many packets it
+-- arrived in. A transaction charges one per operation: charging per call would
+-- let a single packet carrying ten thousand operations spend one unit of a
+-- sixty unit budget and walk straight past the limiter, which is the one flood
+-- the limiter most needs to catch.
+--
+-- Clamped to at least one so no request is ever free, whatever it claims to
+-- cost.
+function Permissions:Consume(Plr: Player, Cost: number?): boolean
+    const Charge = math.max(Cost or 1, 1)
     const Rate = Permissions:Get(Plr).Rate
     if Rate <= 0 then
         return false
@@ -178,12 +188,15 @@ function Permissions:Consume(Plr: Player): boolean
     const Now = os.clock()
     const Entry = Budget[Plr]
 
+    -- A fresh window is not a free one. The old form returned true here without
+    -- comparing, which was harmless while every call cost one and a rate below
+    -- one denies anyway, and is not once a call can cost a thousand.
     if not Entry or Now - Entry.Window >= RATE_WINDOW then
-        Budget[Plr] = {Count = 1, Window = Now}
-        return true
+        Budget[Plr] = {Count = Charge, Window = Now}
+        return Charge <= Rate
     end
 
-    Entry.Count += 1
+    Entry.Count += Charge
     return Entry.Count <= Rate
 end
 
