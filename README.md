@@ -23,7 +23,12 @@ local Health = Prism.Properties:Register({
 })
 ```
 
-Types: `Text`, `Number`, `Bool`, `Color`, `Vector`, `CFrame`, `Enum`, `CustomEnum`.
+Types: `Text`, `Number`, `Bool`, `Color`, `Vector`, `CFrame`, `Enum`,
+`CustomEnum`, `Object`.
+
+`Object` is a reference to another object — a button's door, a path node's next
+node. It's stored as a local id, so it's saved and duplicated like one; see
+[References](#references) for what that buys you and what it rules out.
 
 Constraints reject or clamp depending on the constraint: `MinLength` rejects an
 invalid value, `MinValue`/`MaxValue`/`MaxLength` clamp it into range.
@@ -157,6 +162,12 @@ local id and a part of its own. On the client this works for objects in scenes
 the client owns; an object the server holds is duplicated with a transaction's
 `Duplicate`, which checks create rights like any other create.
 
+`Objects:DuplicateGroup(objects, copy?)` duplicates several as one thing, which
+is not the same as calling `Duplicate` on each: references *between* the
+originals are remapped onto the copies, and references pointing outside the
+group are left alone. Duplicate a room and its buttons work its own doors;
+duplicate one lever and it still works the door it always worked.
+
 Watch a single property without paying for a signal on every property:
 
 ```lua
@@ -176,6 +187,67 @@ not cover:
 ```lua
 enemy:GetProperty("Health").Constraints.MaxValue
 ```
+
+### References
+
+An `Object` property points at another object.
+
+```lua
+local Target = Prism.Properties:Register({
+    Name = "Target",
+    Type = "Object",
+    DefaultValue = 0,                       -- 0 is "points at nothing"
+    Constraints = {Types = {Door}},         -- optional; ids or type names
+})
+
+button:Set("Target", door)                  -- takes the object
+button:Get("Target")                        -- hands back the object, not a number
+```
+
+What's stored is the target's **local id** — the low half of its persistent id —
+so a reference is saved exactly as the pack's own ids are, and survives a save
+and a reload without anything having to rewrite it.
+
+It resolves through the copy holding the object doing the pointing, which is the
+whole point: load one room twice and each copy's button works that copy's own
+door. That also fixes the boundary. **A reference only ever names an object in
+the same copy.** Pointing at one in another copy is refused, and cross-scene
+references are out of scope — the id would mean nothing once either scene was
+loaded somewhere else.
+
+`Get` answers `nil` in three cases it does not tell apart: nothing is pointed
+at, the target was destroyed, and the target has not arrived yet — a copy builds
+its objects one at a time, so a button exists before its door does, and on a
+client either half can replicate first. The stored id is kept in all three, so
+the link comes back on its own when the target does. To read the raw id, go
+through the property: `button:GetProperty("Target").Value`.
+
+`Constraints.Types` says what the property may point at, by object type id or
+registered name. It's checked when the target actually resolves; an id naming
+nothing is always allowed, because refusing one would make a pack restorable
+only in the order it happened to be written.
+
+Two limits worth knowing. A reference can't drive an instance member, so a
+`Links` entry naming one is dropped at registration — a local id on a part would
+mean nothing outside its copy. And a target restored as a *new* object rather
+than under its old local id is a new object: undoing a destroy makes one, so
+references to what was destroyed stay dangling rather than snapping back.
+
+Creating two objects already wired to each other takes one transaction, because
+neither id exists until the server mints it:
+
+```lua
+local edit = Prism.Transactions.new()
+edit:Create(Button, {}, room.Id)
+    :Create(Door, {}, room.Id)
+
+-- the button's Target points at whatever operation 2 creates
+edit.Operations[1].References = {[Target] = 2}
+edit:Commit()
+```
+
+`Transactions.new():DuplicateGroup(objects, copy?)` does this for you, and is
+what a client uses to duplicate a selection with its references intact.
 
 ## Scenes
 
@@ -456,6 +528,7 @@ local edit = Prism.Transactions.new()
 
 edit:Create(Crate, {[Health] = 50}, room.Id)
     :Duplicate(original)             -- a create holding original's values
+    :DuplicateGroup(selection)       -- the same, references between them remapped
     :Set(other, "Health", 20)
     :Destroy(stale)
 

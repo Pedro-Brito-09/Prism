@@ -62,13 +62,31 @@ const function ReachOf(Obj: Object): Types.Reach
     return if Registry then Registry.Replicate else "Admitted"
 end
 
+-- One object in one copy, by the id a reference stores. The crossing between
+-- the two identities, and scoped to a copy for the reason Find is.
+const function Find(Copy: Types.SceneInstanceId, Local: number): Object?
+    const Live = SceneRegistry.Instances[Copy]
+    return if Live then Live.ByLocal[Local] else nil
+end
+
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
         return nil
     end
 
-    return if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+    const Value = if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+
+    -- A reference reads as the object it names rather than as the id it
+    -- stores, because the id is the storage and the object is the answer.
+    -- Nothing is hidden by this: the raw id is still there on the property
+    -- itself, through GetProperty, which is where everything Get and Set do
+    -- not cover lives.
+    if Prop.Type == "Object" then
+        return Shared.ResolveReference(self.InstanceId, Value, Find)
+    end
+
+    return Value
 end
 
 const function __setter(self: Object, Reference: Types.PropertyReference, Value: any?): boolean
@@ -77,7 +95,14 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         return false
     end
 
-    const Accepted, Changed = Prop:Set(Value)
+    -- Takes the target object as readily as its id, which is the counterpart
+    -- to Get handing one back.
+    const Allowed, Val = Shared.Accept(self, Prop, Value, Find)
+    if not Allowed then
+        return false
+    end
+
+    const Accepted, Changed = Prop:Set(Val)
     if not Accepted then
         return false
     end
@@ -511,6 +536,25 @@ function Objects:Split(Persistent: Types.PersistentId): (Types.SceneIdentifier, 
     return Handles.Split(Persistent)
 end
 
+-- The object a stored reference names, for a caller holding the raw local id
+-- rather than reading it off a property. Scoped to a copy, because that is the
+-- only scope a local id answers in.
+function Objects:Resolve(Copy: Types.SceneInstanceId, Local: number): Object?
+    return Find(Copy, Local)
+end
+
+-- What may be written into an Object property of an object in this copy, as a
+-- local id, or nil and the reason it may not. Exported so a transaction makes
+-- exactly the check Object:Set makes: a reference that means one thing through
+-- a set and another through a transaction is worse than either rule alone.
+function Objects.Reference(
+    Copy: Types.SceneInstanceId,
+    Prop: PropertyTypes.Property<any>,
+    Value: any
+): (number?, string?)
+    return Shared.Reference(Copy, Prop, Value, Find)
+end
+
 function Objects:GetRegistered(): {[ObjectIdentifier]: ObjectRegistry}
     return Registered
 end
@@ -622,9 +666,26 @@ const function Construct(
     if InitialValues then
         for PropertyId, Value in InitialValues do
             const Prop = Props[PropertyId]
-            if Prop then
-                Prop:Set(Value)
+            if not Prop then
+                continue
             end
+
+            -- Against the copy the object is going into, which is the only
+            -- copy its references will ever mean anything in. The object
+            -- itself does not exist yet, and does not need to: a reference is
+            -- read against the copy, not against whoever holds it.
+            if Prop.Type == "Object" then
+                const Target, Why = Shared.Reference(Instance_.Id, Prop, Value, Find)
+                if Target == nil then
+                    Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
+                    continue
+                end
+
+                Prop:Set(Target)
+                continue
+            end
+
+            Prop:Set(Value)
         end
     end
 
@@ -754,6 +815,77 @@ function Objects:Duplicate(Obj: Object, Target: any?): Object?
     end
 
     return Objects.new(Obj.Parent, Shared.Snapshot(Obj), Target or SceneRegistry.Instances[Obj.InstanceId])
+end
+
+-- Several objects duplicated as one thing, which is not the same as duplicating
+-- each of them. A reference is copied verbatim by Duplicate, so a duplicated
+-- button still points at the original door -- right for one object, wrong for a
+-- room copied whole, where the new button should point at the new door.
+--
+-- So: references that point inside the group are remapped onto the new objects,
+-- and references that point outside it are left alone. A path node duplicated
+-- with the node it points at follows its copy; a lever duplicated on its own
+-- still works the door it always worked.
+--
+-- Silent creates and one announcement at the end, down the chunked path a scene
+-- load uses. Announcing each object as it is made would send every reference
+-- twice: once pointing at the original, once corrected a moment later.
+function Objects:DuplicateGroup(List: {Object}, Target: any?): {Object}
+    const Sources: {Object} = {}
+    const Made: {Object} = {}
+
+    -- Which new object stands for which original. Keyed by the object rather
+    -- than by its local id, because a group can span copies and two copies
+    -- hand out the same ids.
+    const Counterpart: {[Object]: Object} = {}
+
+    for _, Obj in List do
+        if Obj.Destroyed then
+            continue
+        end
+
+        const New = Objects.new(
+            Obj.Parent,
+            Shared.Snapshot(Obj),
+            Target or SceneRegistry.Instances[Obj.InstanceId],
+            false
+        )
+
+        table.insert(Sources, Obj)
+        table.insert(Made, New)
+        Counterpart[Obj] = New
+    end
+
+    for Index, New in Made do
+        const Source = Sources[Index]
+
+        for PropertyId, Prop in New.Properties do
+            if Prop.Type ~= "Object" then
+                continue
+            end
+
+            -- Read from the original, against the original's copy: that is
+            -- where the id it was written with means what it meant. The
+            -- duplicate holds the same id, but nothing says it names the same
+            -- object there.
+            const Was = Source.Properties[PropertyId]
+            const Pointed = if Was then Shared.ResolveReference(Source.InstanceId, Was.Value, Find) else nil
+            if not Pointed then
+                continue
+            end
+
+            const Instead = Counterpart[Pointed]
+            if Instead then
+                Prop:Set(Instead.LocalId)
+            end
+        end
+    end
+
+    if #Made > 0 then
+        Objects.AnnounceAll(Made)
+    end
+
+    return Made
 end
 
 -- A copy, not a restore. The buffer carries the id its original was saved
