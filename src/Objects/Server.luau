@@ -745,6 +745,17 @@ function Objects.restore(Target: any, Decompressed: any, Announce: boolean?): Ob
     )
 end
 
+-- A new object of the same type holding the same values: in the copy the
+-- original sits in, or in Target when one is named. A new local id and a new
+-- part; nothing is shared with the original from here on.
+function Objects:Duplicate(Obj: Object, Target: any?): Object?
+    if Obj.Destroyed then
+        return nil
+    end
+
+    return Objects.new(Obj.Parent, Shared.Snapshot(Obj), Target or SceneRegistry.Instances[Obj.InstanceId])
+end
+
 -- A copy, not a restore. The buffer carries the id its original was saved
 -- under, and handing that to the new object would alias the two while both are
 -- live -- so this mints a fresh one. Loading a scene wants the saved id and

@@ -676,6 +676,23 @@ T:Test("an operation that cannot be built never reaches the server", function()
     T:Ok(not Edit:Commit(), "commit refused")
 end)
 
+T:Test("duplicating a server object builds a create into its copy", function()
+    if not Editable or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    -- Built, not committed: what goes on the wire is the whole of it.
+    const Edit = Transactions.new():Duplicate(Editable)
+    const Operation = Edit.Operations[1] :: any
+
+    T:Eq(Edit.Rejected, 0, "built")
+    T:Eq(Operation.Kind, "Create", "as a create")
+    T:Eq(Operation.Object, Editable.Parent, "of the same type")
+    T:Eq(Operation.Instance, Editable.InstanceId, "into its copy")
+    T:Eq(Operation.Properties[TitleId], Editable:Get(TitleId), "holding its value")
+end)
+
 T:Test("committing nothing succeeds without a round trip", function()
     const Applied, Created = Transactions.new():Commit()
     T:Ok(Applied, "succeeded")
@@ -860,6 +877,32 @@ T:Test("destroying a local object takes its part with it", function()
 
     if Part then
         T:Eq(Part.Parent, nil, "the part it owned went with it")
+    end
+
+    Sandbox:Destroy()
+end)
+
+T:Test("a local object duplicates into its own copy", function()
+    const Sandbox = Scenes.new({Name = "ClientDuplicate"})
+    if not Sandbox or not ShownId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Original = Copy:Create(ShownId, {[TitleId] = "Original"})
+    const Twin = Objects:Duplicate(Original)
+
+    T:Ok(Twin and Twin.Local, "a local object")
+
+    if Twin then
+        T:Eq(Twin:Get(TitleId), "Original", "holding the original's value")
+        T:Eq(Copy:Find(Twin.LocalId), Twin, "filed in the same copy")
+        T:Ok(Twin.Instance and Twin.Instance ~= Original.Instance, "with a part of its own")
+    end
+
+    if Editable then
+        T:Eq(Objects:Duplicate(Editable), nil, "a server object is a transaction's to duplicate")
     end
 
     Sandbox:Destroy()
