@@ -731,6 +731,10 @@ end
 --                [varint count][varint property id][varint operation]...
 --   set      [2][varint runtime id][varint property id][tag][value]
 --   destroy  [3][varint runtime id]
+--   lock     [4][varint runtime id]
+--   unlock   [5][varint runtime id]
+--   load     [6][varint scene id]
+--   unload   [7][varint scene copy]
 --
 -- A create's second list is its references: Object properties pointing at
 -- something this same transaction creates, which cannot be written as values
@@ -854,6 +858,24 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         const Encoded = buffer.create(1 + Varint.Measure(Operation.Target))
         buffer.writeu8(Encoded, 0, TransactionTypes.Kinds.Destroy)
         Varint.Write(Encoded, 1, Operation.Target)
+
+        return Encoded
+    elseif Operation.Kind == "Lock" or Operation.Kind == "Unlock" then
+        const Encoded = buffer.create(1 + Varint.Measure(Operation.Target))
+        buffer.writeu8(Encoded, 0, TransactionTypes.Kinds[Operation.Kind])
+        Varint.Write(Encoded, 1, Operation.Target)
+
+        return Encoded
+    elseif Operation.Kind == "Load" then
+        const Encoded = buffer.create(1 + Varint.Measure(Operation.Scene))
+        buffer.writeu8(Encoded, 0, TransactionTypes.Kinds.Load)
+        Varint.Write(Encoded, 1, Operation.Scene)
+
+        return Encoded
+    elseif Operation.Kind == "Unload" then
+        const Encoded = buffer.create(1 + Varint.Measure(Operation.Instance))
+        buffer.writeu8(Encoded, 0, TransactionTypes.Kinds.Unload)
+        Varint.Write(Encoded, 1, Operation.Instance)
 
         return Encoded
     end
@@ -989,6 +1011,30 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
             table.insert(Operations, {
                 Kind = "Destroy" :: "Destroy",
                 Target = Target,
+            })
+        elseif Kind == TransactionTypes.Kinds.Lock or Kind == TransactionTypes.Kinds.Unlock then
+            const Target, TargetRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += TargetRead
+
+            table.insert(Operations, {
+                Kind = if Kind == TransactionTypes.Kinds.Lock then "Lock" :: "Lock" else "Unlock" :: "Unlock",
+                Target = Target,
+            })
+        elseif Kind == TransactionTypes.Kinds.Load then
+            const Scene, SceneRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += SceneRead
+
+            table.insert(Operations, {
+                Kind = "Load" :: "Load",
+                Scene = Scene,
+            })
+        elseif Kind == TransactionTypes.Kinds.Unload then
+            const Instance_, InstanceRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += InstanceRead
+
+            table.insert(Operations, {
+                Kind = "Unload" :: "Unload",
+                Instance = Instance_,
             })
         else
             Logger:Error(`Transaction carries an operation of unknown kind {Kind}.`)

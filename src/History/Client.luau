@@ -21,6 +21,7 @@
 -- is what this reconciles against.
 
 const Objects = require("../Objects/Client")
+const Transactions = require("../Transactions/Client")
 const Network = require("./Network")
 const Listeners = require("../Listeners")
 const Logger = require("../Logger")
@@ -45,9 +46,22 @@ const LIMIT = 100
 -- drag sets every frame; two edits a few seconds apart are two actions.
 const MERGE_WINDOW = 1
 
+-- A copy appearing and going is a step like any other, and the same act in
+-- opposite directions: undoing a load withdraws the copy it made, undoing an
+-- unload puts back the one it took. Both are suspends, so what comes back is
+-- what was there -- objects, values, ids and all -- rather than what the scene
+-- last committed.
+--
+-- Holds are not here. A lock is not a change to the world, and an undo that
+-- took somebody's hold back would be taking back something they may still be
+-- using.
 type Entry = {
-    Kind: "Set" | "Create" | "Destroy",
-    Target: Types.Object,
+    Kind: "Set" | "Create" | "Destroy" | "Load" | "Unload",
+
+    -- One or the other: an object for the first three, a live copy for the two
+    -- below them.
+    Target: Types.Object?,
+    Copy: any?,
 
     Property: number?,
     Before: any,
@@ -119,8 +133,20 @@ const function Clear(Step: Step)
     end
 
     for _, Entry in Step.Entries do
-        if Entry.Kind ~= "Set" and Entry.Target.Suspended then
-            Objects.Dispose(Entry.Target)
+        const Copy = Entry.Copy
+        if Copy then
+            -- A copy this step was holding against an undo that will now never
+            -- come. Its objects end here, and the folder they were in.
+            if Copy.Suspended then
+                Copy:Dispose()
+            end
+
+            continue
+        end
+
+        const Target = Entry.Target
+        if Target and Entry.Kind ~= "Set" and Target.Suspended then
+            Objects.Dispose(Target)
         end
     end
 
@@ -186,7 +212,7 @@ end
 --=============================================================================
 
 const function Present(Entry: Entry, Forward: boolean): boolean
-    return (Entry.Kind == "Create") == Forward
+    return (Entry.Kind == "Create" or Entry.Kind == "Load") == Forward
 end
 
 const function Ends(Entry: Entry, Forward: boolean): (any, any)
@@ -229,7 +255,18 @@ const function ApplyLocal(Step: Step, Forward: boolean): boolean
     end
 
     for _, Entry in Ordered(Step.Entries, Forward) do
-        const Obj = Entry.Target
+        const Copy = Entry.Copy
+        if Copy then
+            if Present(Entry, Forward) then
+                Copy:Revive()
+            else
+                Copy:Suspend()
+            end
+
+            continue
+        end
+
+        const Obj = Entry.Target :: Types.Object
 
         if Entry.Kind == "Set" then
             const Prop = if Obj.Destroyed then nil else Obj.Properties[Entry.Property :: number]
@@ -418,6 +455,74 @@ end)
 
 -- Only scenes this client owns. What it does to the server's is recorded there,
 -- where the objects are, and reaches this side as a step id and nothing else.
+
+-- A local transaction is one step, which is what a transaction is for. The two
+-- hooks are why it can be: the first stops the object by object recording below
+-- from firing while the edit runs, and the second hands the whole thing over.
+-- Without the first, a transaction creating three objects would land as three
+-- steps and then a fourth.
+Transactions.OnApplying(function()
+    Applying = true
+end)
+
+Transactions.OnApplied(function(Record): boolean
+    Applying = false
+
+    -- Nil when the apply came apart and was rolled back: nothing happened, so
+    -- there is nothing to take back.
+    if not Record then
+        return false
+    end
+
+    const Entries: {Entry} = {}
+    local Creates = 0
+
+    for Index, Operation in Record.Operations do
+        const Op = Operation :: any
+
+        if Op.Kind == "Create" then
+            Creates += 1
+            const Made = Record.Created[Creates]
+            if Made then
+                table.insert(Entries, {Kind = "Create" :: "Create", Target = Made})
+            end
+        elseif Op.Kind == "Set" then
+            const Obj = Record.Targets[Index]
+            if Obj then
+                table.insert(Entries, {
+                    Kind = "Set" :: "Set",
+                    Target = Obj,
+                    Property = Op.Property,
+                    Before = Record.Before[Index],
+                    After = Op.Value,
+                })
+            end
+        elseif Op.Kind == "Destroy" then
+            const Obj = Record.Targets[Index]
+
+            -- Named twice in one transaction is one destroy by the time it
+            -- lands, and the second naming has no object suspended of its own.
+            if Obj and Obj.Suspended then
+                table.insert(Entries, {Kind = "Destroy" :: "Destroy", Target = Obj})
+            end
+        end
+    end
+
+    for _, Live in Record.Loaded do
+        table.insert(Entries, {Kind = "Load" :: "Load", Copy = Live})
+    end
+
+    for _, Live in Record.Withdrew do
+        table.insert(Entries, {Kind = "Unload" :: "Unload", Copy = Live})
+    end
+
+    if #Entries == 0 then
+        return false
+    end
+
+    Push({Entries = Entries})
+    return true
+end)
 
 Objects:OnEdited(function(Obj, Property, Before, After)
     if Applying or not Obj.Local then

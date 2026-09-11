@@ -153,6 +153,8 @@ Prism.Objects:OnLockChanged(function(runtimeId, userId) ... end)
 
 Taking a lock needs edit rights on the object, costs one action per object, and
 fails if anyone else holds any of the objects named. Releasing needs no rights.
+A transaction can take and release them too, in the same list as the edit they
+are for — see Transactions.
 A lock goes when its object goes or its holder leaves. The server's own edits
 ignore locks. The server can take locks on a player's behalf with
 `Objects:Lock(list, player)`, which is refused the same way if someone else
@@ -336,6 +338,45 @@ objects are or where that class belongs.
 Unloading a copy destroys its folder and everything in it. A default scene
 folder goes with the last of its copies; a parent you supplied is yours and is
 left alone.
+
+### Placing a pack into a copy
+
+Loading reads a pack as a whole new copy, every object under the id it was saved
+with. Placing reads one **into a copy that already exists** — pasting a prefab
+into a level somebody is editing:
+
+```lua
+local prefab = doorway:Serialize()          -- any pack: a copy's or a scene's
+
+local made = room:Place(prefab)             -- server side, returns the new objects
+```
+
+Every object is created afresh under an id the target copy's scene mints, so the
+pack's own ids — and its `LastId` — are ignored; they belong to the scene it was
+written in. Place the same prefab five times and you get five independent sets.
+
+References inside the pack follow it: a door and the button that works it come
+out wired to each other. A reference to anything the pack *didn't* carry is
+dropped rather than carried over, because that id means nothing in the target
+copy — and if it happens to mean something, it means the wrong thing.
+
+A client places through a transaction, which makes it one create per object and
+so needs create rights and nothing more:
+
+```lua
+Prism.Transactions.new():Place(prefab, room.Id):Commit()
+```
+
+One transaction, so it lands whole or not at all and undoes as a single step.
+
+Copies of scenes the client owns have `Place` too, straight on the copy. That
+form creates the objects one at a time, so the history records one step each;
+the transaction form works on a local copy as well, and is the one to reach for
+when the placement should undo as a single step:
+
+```lua
+Prism.Transactions.new():Place(prefab, sandbox.Id):Commit()
+```
 
 ### Saving
 
@@ -546,8 +587,13 @@ local edit = Prism.Transactions.new()
 edit:Create(Crate, {[Health] = 50}, room.Id)
     :Duplicate(original)             -- a create holding original's values
     :DuplicateGroup(selection)       -- the same, references between them remapped
+    :Place(prefab, room.Id)          -- a saved pack, one create per object in it
+    :Lock(selection)                 -- one object or a list, all or none
     :Set(other, "Health", 20)
     :Destroy(stale)
+    :Unlock(selection)
+    :Load(sceneId)                   -- a copy of a scene into the world
+    :Unload(copyId)                  -- and a live copy out of it
 
 local applied, created = edit:Commit()
 ```
@@ -566,10 +612,64 @@ This is also the only way a client creates an object. `Objects.new` is server
 side, and until a channel asked for a create, `CanCreate` was a permission
 nothing could reach.
 
+### Not only for talking to the server
+
+A transaction whose objects are all in scenes the client owns **applies on the
+spot**. Same builder, same operations; `Commit` sees what it is about and either
+sends it or does the work, and a local commit does not yield because there is
+nobody to ask.
+
+That is what batching a local edit looks like. Without it every set, create and
+destroy in a scene the client owns was its own apply and its own undo step, so
+undoing a pasted prefab took it apart one object at a time.
+
+```lua
+-- A whole prefab into a copy this client owns: one edit, one undo step.
+Prism.Transactions.new():Place(prefab, sandbox.Id):Commit()
+```
+
+A transaction is **all local or all the server's**, never both. The second kind
+to arrive is refused by name when it is added. That one is forced: half of a
+mixed transaction needs a round trip that can come back refused, and by then the
+local half has already applied — there is no atomicity to be had across that
+line, and a transaction that cannot be atomic is not one.
+
+Everything else is the same on both paths: the three phases in the same order,
+a rollback if it throws partway, and one entry in the history.
+
+### Holds, and copies
+
+`Lock` and `Unlock` put taking a hold in the same list as the edit that needs
+it. Locking three objects and moving them used to be two round trips, with the
+lock able to come back refused *after* the edit was built; now it is one packet
+that either gets all three and moves them or does neither. Locks are taken
+before everything else in the transaction and released after — hold these, do
+this, let go. Refused for objects in scenes the client owns, which are never
+held: nobody else can touch them.
+
+`Load` names a scene and `Unload` a live copy, and they are the only way a
+client asks for either — there is no channel of their own. Loading needs the
+**create** verb on that scene and unloading needs **destroy**, because that is
+what they amount to: every object in it made, or every object in it taken away.
+The verb alone: a pack holds whatever it holds, so there is no type to check the
+object lists against, and those lists govern what a role builds by hand.
+
+The copy a load makes is not in what `Commit` hands back. It arrives the way
+created objects do, through the packet announcing it — `Scenes:OnCopyAdded`.
+
+An unload **withdraws** the copy rather than unloading it: out of the
+registries, its folder out of the tree, every object in it suspended, the whole
+thing kept. That is what makes it undoable. Loading it again would read what the
+scene last committed, which is not what was on screen unless somebody had just
+saved; withdrawing it means an undo brings back exactly what was there. The copy
+ends when the step holding it does, the same way a destroyed object does.
+`copy:Unload()` from server code is still final — nobody asked for that one.
+
 ### Ordering
 
-Operations apply creates first, then sets, then destroys, whatever order they
-were declared in. That is what makes a transaction atomic rather than merely
+Operations apply locks first, then loads, then creates, then sets, then
+destroys, then unloads, then the releases — whatever order they were declared
+in. That is what makes a transaction atomic rather than merely
 batched: a create can be taken back by destroying what it made, and a set by
 writing back what it overwrote, but a destroy cannot be taken back at all — so
 nothing irreversible happens until everything reversible has already succeeded.
@@ -590,7 +690,10 @@ Prism.History:OnChange(function() toolbar:Refresh() end)
 
 A step is one committed transaction, one create or destroy, or a run of
 `Object:Set` calls to one property with no pause longer than a second, so a drag
-undoes as one.
+undoes as one. A copy loaded or unloaded by a transaction is part of its step:
+undoing a load withdraws the copy it made, and undoing an unload puts back the
+one it took, objects and values and ids intact. Holds are not recorded — a lock
+is not a change to the world, and taking somebody's hold back is not an undo.
 
 Each stack keeps the last 100 steps. That count is **per player and across every
 scene** — editing two rooms does not give you two hundred steps, because what
@@ -714,6 +817,11 @@ objects arrive down the same chunked path a scene load uses, and changes and
 removals have bulk channels beside the single ones.
 
 ### Budget
+
+Undo and redo spend one action each, whatever the step holds: a transaction is
+one thing to take back however many operations it carried, and charging by the
+entry would leave a player who committed an edit at their ceiling unable to undo
+it. Loading a scene is one action for the same reason.
 
 A transaction spends one action per operation rather than one per packet, so a
 role with `Rate = 60` may commit sixty operations a second however they are

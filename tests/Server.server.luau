@@ -3150,6 +3150,410 @@ T:Test("a step past the limit lets go of what it held", function()
 end)
 
 --=============================================================================
+-- Placing
+--=============================================================================
+
+T:Describe("Placing")
+
+-- A pack holding a door and a button wired to it, for the placing tests to
+-- paste around. Built once, in a scene of its own, and committed.
+const Prefab = (function(): buffer
+    const Scene = Scenes.new({Name = "PrefabSource"}) :: any
+    const Copy = Scene:Load()
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "PrefabDoor"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "PrefabButton"})
+    Button:Set(TargetId, Door)
+
+    const Pack = Copy:Serialize()
+    Scene:Destroy()
+    return Pack
+end)()
+
+T:Test("a placed pack lands under this copy's own ids", function()
+    const Scene, Copy = Room("PlaceRoom")
+    const Sitting = Copy:Create(DoorId, {[TitleId] = "Sitting"})
+
+    const Made = Copy:Place(Prefab)
+    T:Ok(Made and #Made == 2, "both objects placed")
+
+    if not Made then
+        Scene:Destroy()
+        return
+    end
+
+    T:Eq(#Copy:GetObjects(), 3, "beside what was already there")
+
+    for _, Obj in Made do
+        T:Ok(Obj.LocalId ~= Sitting.LocalId, "a fresh id, not the saved one")
+        T:Eq(Copy:Find(Obj.LocalId), Obj, "filed under it")
+        T:Eq(Obj.InstanceId, Copy.Id, "in this copy")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("references inside a placed pack follow it", function()
+    const Scene, Copy = Room("PlaceReferences")
+    const Made = Copy:Place(Prefab) :: any
+
+    local Door, Button
+    for _, Obj in Made do
+        if Obj:Get(TitleId) == "PrefabDoor" then
+            Door = Obj
+        else
+            Button = Obj
+        end
+    end
+
+    T:Ok(Door and Button, "found both")
+
+    if Door and Button then
+        -- The saved id named a door in the scene the pack was written in. What
+        -- it names here is whatever the placement made.
+        T:Eq(Button:Get(TargetId), Door, "the button works the door it came with")
+        T:Ok(Button:GetProperty(TargetId).Value ~= 0, "by a real id")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("placing twice gives two independent sets", function()
+    const Scene, Copy = Room("PlaceTwice")
+
+    const First = Copy:Place(Prefab) :: any
+    const Second = Copy:Place(Prefab) :: any
+
+    T:Eq(#Copy:GetObjects(), 4, "four objects in the copy")
+
+    local FirstButton, SecondButton
+    for _, Obj in First do
+        if Obj:Get(TitleId) == "PrefabButton" then
+            FirstButton = Obj
+        end
+    end
+
+    for _, Obj in Second do
+        if Obj:Get(TitleId) == "PrefabButton" then
+            SecondButton = Obj
+        end
+    end
+
+    T:Ok(FirstButton and SecondButton, "a button in each")
+
+    if FirstButton and SecondButton then
+        T:Ok(FirstButton:Get(TargetId) ~= SecondButton:Get(TargetId), "each works its own door")
+        T:Ok(table.find(First, FirstButton:Get(TargetId)) ~= nil, "the door it was placed with")
+        T:Ok(table.find(Second, SecondButton:Get(TargetId)) ~= nil, "and likewise")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("a reference the pack did not carry is dropped", function()
+    const Source = Scenes.new({Name = "PlaceDangling"}) :: any
+    const SourceCopy = Source:Load()
+
+    -- A button whose door is not in the pack: the door is destroyed before the
+    -- pack is written, so the reference is an id naming nothing.
+    const Door = SourceCopy:Create(DoorId)
+    const Button = SourceCopy:Create(ButtonId)
+    Button:Set(TargetId, Door)
+    const Saved = Door.LocalId
+    Door:Destroy()
+
+    const Pack = SourceCopy:Serialize()
+    Source:Destroy()
+
+    const Scene, Copy = Room("PlaceDanglingTarget")
+
+    -- Something in the target copy answering to the id the pack carried, which
+    -- is the whole hazard: carried over, the placed button would come up wired
+    -- to this.
+    local Filler = Copy:Create(DoorId, {[TitleId] = "NotYours"})
+    while Filler.LocalId < Saved do
+        Filler = Copy:Create(DoorId, {[TitleId] = "NotYours"})
+    end
+
+    const Made = Copy:Place(Pack) :: any
+    T:Ok(Made and #Made == 1, "the button placed")
+
+    if Made and Made[1] then
+        T:Eq(Made[1]:Get(TargetId), nil, "pointing at nothing")
+        T:Eq(Made[1]:GetProperty(TargetId).Value, nil, "with nothing written")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("a client places through create rights, as one step", function()
+    const Scene, Copy = Room("PlaceTransaction")
+    const Plr = Editor(-6100, Scene)
+
+    -- Built as a client builds it, applied as the player rather than as the
+    -- server, so the create rights are the ones actually being asked for.
+    const Edit = Transactions.new():Place(Prefab, Copy.Id)
+    T:Eq(#Edit.Operations, 2, "one create per object in the pack")
+
+    const Applied, Created = Transactions.Apply(Plr, Edit.Operations)
+
+    T:Ok(Applied, "applied")
+    T:Eq(#Created, 2, "both landed")
+
+    const First = Objects:Get(Created[1])
+    const Second = Objects:Get(Created[2])
+    T:Ok(First and Second, "both are here")
+
+    if First and Second then
+        const Button = if First:Get(TitleId) == "PrefabButton" then First else Second
+        const Door = if Button == First then Second else First
+        T:Eq(Button:Get(TargetId), Door, "wired to the door placed with it")
+    end
+
+    -- One transaction, so one step: undoing takes the whole placement back
+    -- rather than one object of it.
+    T:Ok(History:CanUndo(Plr), "recorded")
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(#Copy:GetObjects(), 0, "the placement went as a unit")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a placement a client is not allowed refuses whole", function()
+    const Scene, Copy = Room("PlaceRefused")
+    const Plr = Ghost(-6101)
+
+    -- No rights on this scene at all.
+    const Applied = Transactions.Apply(Plr, Transactions.new():Place(Prefab, Copy.Id).Operations)
+
+    T:Ok(not Applied, "refused")
+    T:Eq(#Copy:GetObjects(), 0, "and placed nothing")
+
+    Scene:Destroy()
+end)
+
+--=============================================================================
+-- Holds and copies as operations
+--=============================================================================
+
+T:Describe("Holds and copies as operations")
+
+T:Test("a transaction takes holds, edits, and lets go", function()
+    const Scene, Copy = Room("HoldRoom")
+    const Plr = Editor(-6200, Scene)
+    const Other = Ghost(-6201)
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+
+    const Applied = Transactions.Apply(Plr, {
+        {Kind = "Lock", Target = Door.RuntimeId},
+        {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = "Held", Type = "Text"},
+    } :: any)
+
+    T:Ok(Applied, "applied")
+    T:Eq(Door:Get(TitleId), "Held", "the edit landed")
+    T:Eq(Objects:GetLock(Door), -6200, "and the hold is still taken")
+
+    -- Held, so somebody else cannot have it.
+    T:Ok(Objects.LockedAgainst(Door, Other), "against everyone else")
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Unlock", Target = Door.RuntimeId},
+    } :: any), "released")
+
+    T:Eq(Objects:GetLock(Door), nil, "and let go")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a hold somebody else has refuses the whole transaction", function()
+    const Scene, Copy = Room("HoldTaken")
+    const Plr = Editor(-6202, Scene)
+    const Other = Ghost(-6203)
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    T:Ok(Objects:Lock({Door}, Other), "somebody else has it")
+
+    const Applied = Transactions.Apply(Plr, {
+        {Kind = "Lock", Target = Door.RuntimeId},
+        {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = "Mine", Type = "Text"},
+    } :: any)
+
+    T:Ok(not Applied, "refused")
+    T:Eq(Door:Get(TitleId), "Door", "and the edit that rode with it never landed")
+
+    Objects:Unlock({Door})
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("holds are not undoable", function()
+    const Scene, Copy = Room("HoldHistory")
+    const Plr = Editor(-6204, Scene)
+    const Door = Copy:Create(DoorId)
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Lock", Target = Door.RuntimeId},
+    } :: any), "held")
+
+    -- A lock is not a change to the world, so there is nothing to take back.
+    T:Ok(not History:CanUndo(Plr), "nothing recorded")
+    T:Eq(Objects:GetLock(Door), -6204, "and the hold stands")
+
+    Objects:Unlock({Door})
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a client loads a scene through create rights", function()
+    const Scene = Scenes.new({Name = "LoadTarget"}) :: any
+    const Plr = Editor(-6205, Scene)
+
+    -- Something committed, so the copy it loads is not empty.
+    const Seed = Scene:Load()
+    Seed:Create(DoorId, {[TitleId] = "Inside"})
+    Seed:Commit()
+    Seed:Unload()
+
+    T:Eq(#Scene:GetInstances(), 0, "nothing live to begin with")
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Load", Scene = Scene.Id},
+    } :: any), "loaded")
+
+    const Live = Scene:GetInstances()[1]
+    T:Ok(Live, "a copy appeared")
+
+    if Live then
+        T:Eq(#Live:GetObjects(), 1, "holding what the scene had")
+    end
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a load without create rights on the scene is refused", function()
+    const Scene = Scenes.new({Name = "LoadRefused"}) :: any
+    const Plr = Ghost(-6206)
+
+    T:Ok(not Transactions.Apply(Plr, {
+        {Kind = "Load", Scene = Scene.Id},
+    } :: any), "refused")
+
+    T:Eq(#Scene:GetInstances(), 0, "and loaded nothing")
+    Scene:Destroy()
+end)
+
+T:Test("an unload withdraws the copy, and undoing brings back what was in it", function()
+    const Scene, Copy = Room("UnloadRoom")
+    const Plr = Editor(-6207, Scene)
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId)
+    Button:Set(TargetId, Door)
+
+    -- Never committed, so the scene's data holds none of this: reloading would
+    -- read nothing, and only a withdrawal can bring it back.
+    const CopyId = Copy.Id
+    const Folder = Copy.Folder
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Unload", Instance = CopyId},
+    } :: any), "unloaded")
+
+    T:Ok(Copy.Suspended, "the copy was kept rather than unloaded")
+    T:Eq(Scenes:GetInstance(CopyId), nil, "and is not live")
+    T:Ok(Door.Suspended and Button.Suspended, "with its objects held")
+    T:Eq(Folder.Parent, nil, "and its folder out of the world")
+
+    T:Ok(History:Undo(Plr), "undone")
+
+    T:Eq(Scenes:GetInstance(CopyId), Copy, "the same copy is live again")
+    T:Eq(Copy:Find(Door.LocalId), Door, "holding the same objects")
+    T:Eq(Button:Get(TargetId), Door, "still wired to each other")
+    T:Eq(Door:Get(TitleId), "Door", "with what they held")
+    T:Ok(Folder.Parent ~= nil, "and its folder back in the world")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a withdrawn copy ends when nothing can reach the step", function()
+    const Scene, Copy = Room("UnloadCleared")
+    const Plr = Editor(-6208, Scene)
+    const Door = Copy:Create(DoorId)
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Unload", Instance = Copy.Id},
+    } :: any), "unloaded")
+
+    T:Ok(Copy.Suspended, "held")
+
+    History:Clear(Plr)
+
+    T:Eq(Copy.Suspended, nil, "and let go once nothing could bring it back")
+    T:Eq(Door.Suspended, nil, "its objects with it")
+
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("undoing a load withdraws the copy it made", function()
+    const Scene = Scenes.new({Name = "LoadUndo"}) :: any
+    const Plr = Editor(-6209, Scene)
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Load", Scene = Scene.Id},
+    } :: any), "loaded")
+
+    const Live = Scene:GetInstances()[1]
+    T:Ok(Live, "a copy appeared")
+
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(#Scene:GetInstances(), 0, "the copy went")
+
+    if Live then
+        T:Ok(Live.Suspended, "withdrawn rather than unloaded")
+    end
+
+    T:Ok(History:Redo(Plr), "redone")
+    T:Eq(Scene:GetInstances()[1], Live, "and the same copy came back")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("the four new kinds round trip on the wire", function()
+    const Operations = {
+        {Kind = "Lock", Target = 11},
+        {Kind = "Unlock", Target = 12},
+        {Kind = "Load", Scene = 13},
+        {Kind = "Unload", Instance = 14},
+    }
+
+    const Read = Compressor:DecompressTransaction(Compressor:CompressTransaction(Operations :: any))
+
+    T:Eq(#Read, 4, "four operations")
+    T:Eq(Read[1].Kind, "Lock", "lock")
+    T:Eq(Read[1].Target, 11, "its target")
+    T:Eq(Read[2].Kind, "Unlock", "unlock")
+    T:Eq(Read[2].Target, 12, "its target")
+    T:Eq(Read[3].Kind, "Load", "load")
+    T:Eq(Read[3].Scene, 13, "its scene")
+    T:Eq(Read[4].Kind, "Unload", "unload")
+    T:Eq(Read[4].Instance, 14, "its copy")
+end)
+
+--=============================================================================
 -- Client integration fixtures
 --=============================================================================
 

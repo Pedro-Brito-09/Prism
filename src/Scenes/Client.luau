@@ -26,6 +26,7 @@
 
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Client")
+const ObjectShared = require("../Objects/Shared")
 const World = require("../World")
 const Network = require("./Network")
 const Handles = require("../Handles")
@@ -162,7 +163,7 @@ const function AddInstance(Instance_: SceneInstanceId, Scene: SceneIdentifier, O
         Folders[Instance_] = Folder
     end
 
-    Objects.TrackInstance(Instance_, Scene, if Opened then Folder else nil)
+    Objects.TrackInstance(Instance_, Scene, if Opened then Folder else nil, false)
     Notify(CopyAdded, Instance_, Scene, if Opened then Folder else nil)
 end
 
@@ -215,6 +216,55 @@ const function __create(self: SceneInstance, Reference: any, InitialValues: {[nu
     return Objects.new(Reference, InitialValues, self)
 end
 
+-- A pack read into this copy rather than into a copy of its own. The server's
+-- twin -- see Scenes/Server, which explains why the references cannot simply be
+-- carried across -- with nothing to announce, because a scene this client owns
+-- replicates to nobody.
+const function __place(self: SceneInstance, Pack: buffer): any
+    const Ok, _, Decompressed = pcall(function()
+        return Compressor:DecompressScene(Pack)
+    end)
+
+    if not Ok or not Decompressed then
+        Logger:Warn(`Failed to read a pack being placed into a copy of {self.Owner.Name}.`)
+        return nil
+    end
+
+    const Made = {}
+    const Placed: {[number]: any} = {}
+    const Pending: {{Object: any, References: {[number]: any}}} = {}
+
+    for _, Saved in Decompressed :: {any} do
+        if not Objects:GetRegistry(Saved.Parent) then
+            Logger:Warn(`Skipped an object while placing a pack: object type {Saved.Parent} is not registered.`)
+            continue
+        end
+
+        const Values, References = ObjectShared.SplitReferences(Saved.Properties)
+        const Obj = Objects.new(Saved.Parent, Values, self)
+
+        table.insert(Made, Obj)
+        Placed[Saved.LocalId] = Obj
+
+        if References then
+            table.insert(Pending, {Object = Obj, References = References})
+        end
+    end
+
+    for _, Entry in Pending do
+        for PropertyId, Saved in Entry.References do
+            const Prop = Entry.Object.Properties[PropertyId]
+            const Target = Placed[Saved]
+
+            if Prop and Target then
+                Prop:Set(Target.LocalId)
+            end
+        end
+    end
+
+    return Made
+end
+
 const function __find(self: SceneInstance, Local_: number): any
     return self.ByLocal[Local_]
 end
@@ -246,6 +296,74 @@ end
 
 const function __commit(self: SceneInstance)
     self.Owner.Data = __instance_serialize(self)
+end
+
+-- A copy withdrawn from the world rather than unloaded, and kept whole. The
+-- server's twin; see Scenes/Server for why a player asking for a copy to go
+-- gets this rather than the real thing. Nothing is announced, because nothing
+-- in a scene this client owns ever is.
+const function __instance_suspend(self: any): boolean
+    if self.Suspended then
+        return false
+    end
+
+    const Owner = self.Owner
+    if not Owner or Owner.Instances[self.Id] ~= self then
+        return false
+    end
+
+    self.Suspended = Objects.SuspendInstance(self.Id)
+    Owner.Instances[self.Id] = nil
+
+    if self.Folder then
+        self.Parent = self.Folder.Parent
+        self.Folder.Parent = nil
+    end
+
+    Notify(CopyRemoved, self.Id, self.Scene)
+    return true
+end
+
+const function __instance_revive(self: any): boolean
+    const Held = self.Suspended
+    if not Held then
+        return false
+    end
+
+    const Owner = self.Owner
+    if not Owner or not Owned[self.Scene] then
+        -- Its scene has been destroyed while it was away.
+        return false
+    end
+
+    self.Suspended = nil
+    Owner.Instances[self.Id] = self
+
+    if self.Folder then
+        World.Place(self.Folder, self.Scene, self.Parent)
+        self.Parent = nil
+    end
+
+    -- Filed before its objects, which file themselves back into it, and told
+    -- before them for the reason a load tells of its copy first.
+    Notify(CopyAdded, self.Id, self.Scene, nil)
+    Objects.ReviveInstance(Held)
+    return true
+end
+
+const function __instance_dispose(self: any)
+    const Held = self.Suspended
+    if not Held then
+        return
+    end
+
+    self.Suspended = nil
+    Objects.DisposeInstance(Held)
+
+    if self.Folder then
+        self.Folder:Destroy()
+        self.Folder = nil
+    end
 end
 
 const function __instance_unload(self: SceneInstance)
@@ -285,18 +403,22 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     Instance_.ByLocal = {}
 
     Instance_.Create = __create
+    Instance_.Place = __place
     Instance_.Find = __find
     Instance_.GetObjects = __instance_objects
     Instance_.Serialize = __instance_serialize
     Instance_.Commit = __commit
     Instance_.Unload = __instance_unload
+    Instance_.Suspend = __instance_suspend
+    Instance_.Revive = __instance_revive
+    Instance_.Dispose = __instance_dispose
 
     Owner.Instances[Instance_.Id] = Instance_
 
     -- Filed the same way a replicated copy is, so an object of this copy can
     -- work out its own persistent identity and Objects:GetInstance answers for
     -- it like any other.
-    Objects.TrackInstance(Instance_.Id, Owner.Id)
+    Objects.TrackInstance(Instance_.Id, Owner.Id, nil, true)
     return Instance_ :: any
 end
 
@@ -388,6 +510,7 @@ const function __destroy(self: any)
     __unload(self)
 
     Owned[self.Id] = nil
+    Objects.TrackLocalScene(self.Id, false)
     OwnedByName[self.Name] = nil
     self.Data = nil
 end
@@ -422,6 +545,7 @@ function Scenes.new(Config: SceneConfig): LocalScene?
     Scene.Destroy = __destroy
 
     Owned[Identifier] = Scene
+    Objects.TrackLocalScene(Identifier, true)
     OwnedByName[Config.Name] = Scene
 
     return Scene :: any
@@ -451,6 +575,21 @@ end
 
 function Scenes:GetOwned(): {[SceneIdentifier]: LocalScene}
     return Owned
+end
+
+-- One live copy of a scene this client owns, by its id, or nil for anything
+-- else -- a copy of the server's, or one that has been unloaded. What a
+-- transaction asks before applying itself here: an operation naming a copy this
+-- side does not own is one it has no business doing on its own.
+function Scenes:GetLocalCopy(Copy: SceneInstanceId): SceneInstance?
+    for _, Scene in Owned do
+        const Instance_ = (Scene :: any).Instances[Copy]
+        if Instance_ then
+            return Instance_
+        end
+    end
+
+    return nil
 end
 
 return Scenes

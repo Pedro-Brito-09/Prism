@@ -62,6 +62,11 @@ export type ApplyRecord = {
     -- out of the workspace by the time anyone reads the record, and a set on an
     -- object the same transaction went on to destroy would find nothing.
     Targets: {[number]: ObjectTypes.Object},
+
+    -- The copies it put in the world, and the ones it withdrew -- suspended
+    -- rather than unloaded, so whatever takes this record takes them too.
+    Loaded: {any},
+    Withdrew: {any},
 }
 
 -- Synchronous, and answers: taking the record means taking the suspended
@@ -128,6 +133,10 @@ type Plan = {
     Creates: {PlannedCreate},
     Sets: {PlannedSet},
     Destroys: {ObjectTypes.Object},
+    Locks: {ObjectTypes.Object},
+    Unlocks: {ObjectTypes.Object},
+    Loads: {any},
+    Unloads: {any},
 
     -- What each set and destroy operation resolved to, kept by operation so the
     -- record handed out afterwards can name them without looking them up in a
@@ -152,6 +161,15 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
     const Creates: {PlannedCreate} = {}
     const Sets: {PlannedSet} = {}
     const Destroys: {ObjectTypes.Object} = {}
+
+    -- Holds taken and released, and copies coming and going. Gathered rather
+    -- than applied one at a time: a lock is all or none, so every Lock in the
+    -- list is one claim.
+    const Locks: {ObjectTypes.Object} = {}
+    const Unlocks: {ObjectTypes.Object} = {}
+    const Loads: {any} = {}
+    const Unloads: {any} = {}
+    const Withdrawn: {[number]: true} = {}
 
     -- Objects already listed for destruction. Naming one twice is a redundant
     -- operation rather than an invalid one, and dropping the repeat here keeps
@@ -362,6 +380,80 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 Doomed[Obj.RuntimeId] = true
                 table.insert(Destroys, Obj)
             end
+        elseif Operation.Kind == "Lock" or Operation.Kind == "Unlock" then
+            const Obj = Objects:Get(Operation.Target)
+            if not Obj or Obj.Destroyed or (Plr and not Audience.Sees(Plr, Obj.Scene)) then
+                return Refuse(Plr, `object {Operation.Target} is not here.`)
+            end
+
+            Targets[OperationIndex] = Obj
+
+            if Operation.Kind == "Lock" then
+                -- The same right taking one through Objects:Lock needs: a hold
+                -- is worth having only where an edit would be allowed, and
+                -- holding what you may not change is a way to stop other people
+                -- working rather than a way to work.
+                if Plr and not Permissions:Can(Plr, "Edit", Obj) then
+                    return Refuse(Plr, `not allowed to hold {Obj.Name}.`)
+                end
+
+                -- Held by somebody else, which Objects:Lock would refuse. Caught
+                -- here so the whole transaction stops before the world moves
+                -- rather than after the creates have run.
+                if Plr and Objects.LockedAgainst(Obj, Plr) then
+                    return Refuse(Plr, `{Obj.Name} is held by someone else.`)
+                end
+
+                table.insert(Locks, Obj)
+            else
+                -- Releasing needs no right, but releasing what is not yours does
+                -- not happen: Objects:Unlock refuses the lot if any of them is
+                -- somebody else's.
+                if Plr and Objects.LockedAgainst(Obj, Plr) then
+                    return Refuse(Plr, `{Obj.Name} is held by someone else.`)
+                end
+
+                table.insert(Unlocks, Obj)
+            end
+        elseif Operation.Kind == "Load" then
+            const Scene = Scenes:GetById(Operation.Scene)
+            if not Scene or (Plr and not Audience.Sees(Plr, Scene.Id)) then
+                return Refuse(Plr, `scene {Operation.Scene} is not registered.`)
+            end
+
+            -- Loading a scene is making every object in it, so it asks for what
+            -- making one asks for: the create verb on that scene.
+            --
+            -- The verb alone, and deliberately. A pack holds whatever it holds,
+            -- so there is no type here to check the object lists against
+            -- without reading the whole thing first -- which is why those lists
+            -- govern what a role builds by hand and say nothing about this. A
+            -- role that may create in a scene may put copies of it in the world.
+            const Allowed = if Plr then Scene:GetRights(Plr) else nil
+            if Plr and not (Allowed and Allowed.CanCreate) then
+                return Refuse(Plr, `not allowed to load {Scene.Name}.`)
+            end
+
+            table.insert(Loads, Scene)
+        elseif Operation.Kind == "Unload" then
+            const Live = Scenes:GetInstance(Operation.Instance)
+            if not Live or (Plr and not Audience.Sees(Plr, Live.Scene)) then
+                return Refuse(Plr, `scene copy {Operation.Instance} is not live.`)
+            end
+
+            -- And taking a copy away is destroying every object in it, read the
+            -- same way and for the same reason.
+            const Owner = Scenes:GetById(Live.Scene)
+            const Allowed = if Plr and Owner then Owner:GetRights(Plr) else nil
+            if Plr and not (Allowed and Allowed.CanDestroy) then
+                return Refuse(Plr, "not allowed to unload that copy.")
+            end
+
+            -- Named twice is one unload, like a destroy.
+            if not Withdrawn[Live.Id] then
+                Withdrawn[Live.Id] = true
+                table.insert(Unloads, Live)
+            end
         else
             return Refuse(Plr, `unknown operation kind {tostring((Operation :: any).Kind)}.`)
         end
@@ -396,6 +488,10 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
         Sets = Sets,
         Destroys = Destroys,
         Targets = Targets,
+        Locks = Locks,
+        Unlocks = Unlocks,
+        Loads = Loads,
+        Unloads = Unloads,
     }
 end
 
@@ -428,6 +524,15 @@ function Transactions.Apply(
     const Created: {ObjectTypes.Object} = {}
     const Removed: {ObjectTypes.Object} = {}
 
+    -- Copies this transaction put in the world and took out of it. Taken out
+    -- means suspended: a copy a player asked to go is set aside whole, so an
+    -- undo brings back what was in it rather than what its scene last saved.
+    const Loaded: {any} = {}
+    const Withdrew: {any} = {}
+
+    -- Whether the holds were taken, so a roll back knows to let them go again.
+    local Held = false
+
     -- What to broadcast, and at most one entry per property: two sets on the
     -- same property in one transaction are one change by the time it lands, and
     -- sending both would replay the transaction's history rather than its
@@ -451,6 +556,29 @@ function Transactions.Apply(
     const Before: {[number]: any} = {}
 
     const Ok, Err = pcall(function()
+        -- Holds first, because that is what they are for: everything below
+        -- happens with them already taken. All or none, like Objects:Lock --
+        -- and the plan has already refused any that somebody else is holding,
+        -- so this failing is a race rather than the ordinary case.
+        if #Planned.Locks > 0 then
+            if not Objects:Lock(Planned.Locks, Plr) then
+                error("could not take the holds it asked for")
+            end
+
+            Held = true
+        end
+
+        -- Then the copies it asks to appear, before anything that might name
+        -- one: a create can land in a copy this same transaction loaded.
+        for _, Scene in Planned.Loads do
+            const Live = Scene:Load()
+            if not Live then
+                error(`could not load {Scene.Name}`)
+            end
+
+            table.insert(Loaded, Live)
+        end
+
         for _, Create in Planned.Creates do
             -- Silent: the objects go out together at the end, down the chunked
             -- path a scene load uses, rather than one packet each.
@@ -534,6 +662,21 @@ function Transactions.Apply(
             Objects.Suspend(Obj, false)
             table.insert(Removed, Obj)
         end
+
+        -- Copies out after the objects, for the same reason destroys come after
+        -- sets: an edit to something in a copy this transaction also withdraws
+        -- should land before the copy goes.
+        for _, Live in Planned.Unloads do
+            if Live:Suspend() then
+                table.insert(Withdrew, Live)
+            end
+        end
+
+        -- And the holds let go last, which is the order the words are in: hold
+        -- these, do this, let go.
+        if #Planned.Unlocks > 0 then
+            Objects:Unlock(Planned.Unlocks)
+        end
     end)
 
     if not Ok then
@@ -555,6 +698,21 @@ function Transactions.Apply(
         -- not reach that -- so no client ever knew they had gone.
         for _, Obj in Removed do
             Objects.Revive(Obj, false)
+        end
+
+        -- Copies likewise, and the ones it loaded go again. A copy it made and
+        -- is now taking back is not a withdrawal of anybody's work: nothing has
+        -- had a chance to touch it, so it is unloaded outright.
+        for _, Live in Withdrew do
+            Live:Revive()
+        end
+
+        for _, Live in Loaded do
+            Live:Unload()
+        end
+
+        if Held then
+            Objects:Unlock(Planned.Locks)
         end
 
         return false, {}
@@ -599,6 +757,8 @@ function Transactions.Apply(
             Removed = Removed,
             Before = Before,
             Targets = Planned.Targets,
+            Loaded = Loaded,
+            Withdrew = Withdrew,
         }
 
         for _, Callback in Recorders do
@@ -612,6 +772,10 @@ function Transactions.Apply(
     if not Kept then
         for _, Obj in Removed do
             Objects.Dispose(Obj)
+        end
+
+        for _, Live in Withdrew do
+            Live:Dispose()
         end
     end
 

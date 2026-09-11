@@ -119,6 +119,34 @@ end
 -- copy's objects -- be handled before the copy it belongs to was set up. What
 -- is drawn into the folder meanwhile appears with it. A folder the caller has
 -- placed somewhere of its own by then is left where it was put.
+-- Puts a copy's folder where it belongs, which is wherever the caller said or
+-- the scene's own place in the tree. Separate from making one because a copy
+-- withdrawn from the world keeps its folder and needs putting back: what comes
+-- back has to be the folder that left, with whatever the game had parented to
+-- it, and a fresh one would not be.
+function World.Place(Folder: Folder, Scene: number, Parent: Instance?)
+    if Parent and Parent.Parent ~= nil then
+        Folder.Parent = Parent
+        return
+    end
+
+    -- The parent it was under has been destroyed since, or there never was one.
+    -- Either way the scene's own place in the tree is the answer.
+    if IS_SERVER or (Root and Root.Parent) or workspace:FindFirstChild(ROOT_NAME) then
+        Folder.Parent = DefaultParent(Scene)
+        return
+    end
+
+    task.spawn(function()
+        const Resolved = DefaultParent(Scene)
+        if Folder.Parent == nil then
+            pcall(function()
+                Folder.Parent = Resolved
+            end)
+        end
+    end)
+end
+
 function World.Copy(Scene: number, Copy: number, Parent: Instance?): Folder
     const Folder = Instance.new("Folder")
     Folder.Name = CopyName(Copy)

@@ -23,6 +23,10 @@ const Kinds = {
     Create = 1,
     Set = 2,
     Destroy = 3,
+    Lock = 4,
+    Unlock = 5,
+    Load = 6,
+    Unload = 7,
 }
 
 export type CreateOperation = {
@@ -74,7 +78,49 @@ export type DestroyOperation = {
     Target: ObjectTypes.RuntimeId,
 }
 
-export type Operation = CreateOperation | SetOperation | DestroyOperation
+-- Taking and releasing a hold on one object. In the list rather than on a
+-- channel of their own so that claiming what an edit needs and making the edit
+-- are one thing: locking three objects and moving them used to be two round
+-- trips, with the lock able to come back refused after the edit was built.
+--
+-- Locks are taken before anything else in the transaction and released after,
+-- which is the order the words are in: hold these, do this, let go.
+export type LockOperation = {
+    Kind: "Lock",
+    Target: ObjectTypes.RuntimeId,
+}
+
+export type UnlockOperation = {
+    Kind: "Unlock",
+    Target: ObjectTypes.RuntimeId,
+}
+
+-- A copy of a scene appearing and going. Load names the scene to read, Unload
+-- the live copy to withdraw -- and withdraw is the word: a copy a player asked
+-- to go is set aside whole rather than unloaded, because loading it again would
+-- read what the scene last committed rather than what was on screen.
+--
+-- The copy that a load makes is not in what Commit hands back. It arrives the
+-- way created objects do, through the packet that announces it, which is what
+-- Scenes:OnCopyAdded is for.
+export type LoadOperation = {
+    Kind: "Load",
+    Scene: ObjectTypes.SceneIdentifier,
+}
+
+export type UnloadOperation = {
+    Kind: "Unload",
+    Instance: ObjectTypes.SceneInstanceId,
+}
+
+export type Operation =
+    CreateOperation
+    | SetOperation
+    | DestroyOperation
+    | LockOperation
+    | UnlockOperation
+    | LoadOperation
+    | UnloadOperation
 
 export type ObjectReference = ObjectTypes.Object | ObjectTypes.RuntimeId
 export type TypeReference = ObjectTypes.ObjectRegistry | ObjectTypes.ObjectIdentifier
@@ -87,6 +133,16 @@ export type Transaction = {
     -- rather than sending what is left: applying four of the five things the
     -- caller asked for is the one behaviour a transaction must not have.
     Rejected: number,
+
+    -- Which side this transaction is about, decided by the first object or copy
+    -- it touches: true for scenes the client owns, false for the server's, nil
+    -- while it is still empty. Committing reads it to know whether that means
+    -- sending a packet or doing the work here.
+    --
+    -- One or the other, never both. A mixed transaction would have to send half
+    -- of itself and wait, with the other half already applied if the answer came
+    -- back no, and a transaction that cannot be atomic is not one.
+    Local: boolean?,
 
     -- Set by whoever commits it to keep it out of the author's undo history.
     -- It rides to the server, because for a scene the server owns that is where
@@ -131,10 +187,33 @@ export type Transaction = {
         Instance: ObjectTypes.SceneInstanceId?
     ) -> Transaction,
 
+    -- A saved pack placed into a live copy: one create per object in it, with
+    -- the references inside the pack rewritten to name those creates. Checked
+    -- as creates are, so placing a prefab needs create rights and nothing more,
+    -- and undone as one step because it is one transaction.
+    Place: (
+        self: Transaction,
+        Pack: buffer,
+        Instance: ObjectTypes.SceneInstanceId?
+    ) -> Transaction,
+
     -- Whether the whole list applied, and the runtime ids of what it created, in
     -- the order the creates were declared. On the client this yields until the
     -- server has answered: a created object has no local identity to hand back
     -- before the server has minted one.
+    -- One object or a list, all or none, like Objects:Lock. Refused for objects
+    -- in scenes the client owns, which are never locked -- nobody else can
+    -- touch them.
+    Lock: (self: Transaction, Targets: ObjectReference | {ObjectReference}) -> Transaction,
+    Unlock: (self: Transaction, Targets: ObjectReference | {ObjectReference}) -> Transaction,
+
+    -- A copy of a scene into the world, and a live copy out of it. Loading
+    -- needs create rights on that scene and unloading needs destroy rights,
+    -- because that is what they amount to: every object in it made, or every
+    -- object in it taken away.
+    Load: (self: Transaction, Scene: ObjectTypes.SceneIdentifier) -> Transaction,
+    Unload: (self: Transaction, Instance: ObjectTypes.SceneInstanceId) -> Transaction,
+
     Commit: (self: Transaction) -> (boolean, {ObjectTypes.RuntimeId}),
 }
 

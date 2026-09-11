@@ -44,18 +44,6 @@ In the order to build them. Each is described well enough to start without
 the conversation that produced it; anything marked *Ask* is a decision that is
 Pedro's to make before or while building.
 
-- [ ] **Placing a prefab into an existing copy.** Next up. A pack loads only as
-      a whole new copy today (`Read` in `src/Scenes/Server.luau`, which restores
-      each object under its saved local id). Pasting a saved group of objects into
-      a level being edited needs the opposite: fresh local ids minted by the
-      target copy's scene, and references inside the pack remapped to the new
-      ids — the same remap `Objects:DuplicateGroup` does, over a pack rather
-      than over live objects. Server side first
-      (`copy:Place(pack)` or similar, returning the new objects), then a
-      transaction step so a client can place one through create rights, then
-      the client-owned-scene equivalent. Undo should see a placement as one
-      step; recording it as a transaction gives that for free.
-
 - [ ] **Small edges left open.** Each is a decision as much as a fix — *Ask*
       before doing any of them.
       - **A retired id can be claimed again by `CustomId`.** `IdPool` never
@@ -78,6 +66,81 @@ Pedro's to make before or while building.
         rights on it (`Permissions:GrantOn` / `RevokeOn`) would close it.
 
 ## Done
+
+- [x] **Holds and copies are operations.** `Lock`, `Unlock`, `Load` and
+      `Unload` joined create, set and destroy, so the things a player does that
+      a transaction could not carry now go in the list with everything else.
+
+      Locks were two round trips: take them, then send the edit, with the hold
+      able to come back refused after the edit was built. Now they are taken
+      before everything else in the transaction and released after, and the plan
+      refuses the lot if any of them is somebody else's -- so it either gets all
+      three and moves them or does neither.
+
+      Load and Unload were not player actions at all; no channel existed for
+      either. Loading asks for the create verb on that scene and unloading for
+      destroy, since that is what they amount to -- every object in it made, or
+      every object in it taken away. The verb alone: a pack holds whatever it
+      holds, so there is no type to check a role's object lists against, and
+      those lists go on governing what it builds by hand. One action each,
+      whatever the size of the scene.
+
+      Unloading withdraws the copy rather than ending it -- out of the
+      registries, folder out of the tree, every object in it suspended, the
+      whole thing kept -- which is what makes it undoable. Loading it again
+      would read what the scene last committed rather than what was on screen.
+      So a copy suspends the way an object does, one level up, and `World.Place`
+      exists to put a folder back where it was rather than where a new one would
+      go. `copy:Unload` from server code stays final: nobody asked for that one.
+
+      Holds are not recorded in the history. A lock is not a change to the
+      world, and taking back somebody's hold is not an undo.
+
+- [x] **A transaction is not only a way to talk to the server.** One whose
+      objects are all in scenes the client owns applies on the spot: the same
+      builder, the same operations, the same three phases and the same rollback,
+      with nothing sent and nothing waited for. Committing reads what the
+      transaction is about and does one or the other.
+
+      Before it, a scene the client owned had no batching at all. Every set,
+      create and destroy was its own apply and its own undo step, which is why
+      placing a prefab into one came apart object by object on undo -- the edge
+      this closes.
+
+      A transaction is all local or all the server's, decided by the first thing
+      it touches and refused by name when the second kind arrives. Half of a
+      mixed one needs a round trip that can come back refused, by which point the
+      local half has applied; there is no atomicity across that line. Duplicate
+      and DuplicateGroup stopped refusing local objects, because now there is
+      something for them to mean.
+
+      It is one history step, which took two hooks: the client records local
+      objects one at a time from the object signals, so the apply says when it
+      starts -- stop that -- and says when it is done, handing over the whole
+      edit. The second fires either way, with nothing to record when the apply
+      rolled back, so what the first switched off is always switched back on.
+
+- [x] **Placing a prefab into an existing copy.** `copy:Place(pack)` on both
+      sides, and `Transaction:Place(pack, copy)` for a client. A load reads a
+      pack as a whole new copy under the ids it was saved with; a placement
+      reads one into a copy that already exists, so every object is created
+      afresh and the target scene mints the ids. The pack's own LastId is
+      ignored -- it belongs to the scene the pack was written in.
+
+      References are the reason it is not a loop over Create. A saved reference
+      holds a local id from that other scene, so the values are split before
+      anything is built (`Objects/Shared.SplitReferences`) and written
+      afterwards against what the placement actually made. One that points at
+      another object in the pack follows it; one that points at anything else is
+      dropped rather than carried, because in the target copy that id names
+      nothing -- or, worse, names something.
+
+      The transaction path expands into one create per object rather than
+      adding an operation kind, so a client places through create rights and
+      nothing more, and the references name the operations that make their
+      targets -- the machinery object references already added for group
+      duplication. One transaction, so a placement lands whole or not at all and
+      undoes as a single step.
 
 - [x] **Object added / removed signals on the server.** `Objects:OnAdded` and
       `OnRemoved`, mirroring the client's down to the `Restored` argument, so a

@@ -16,6 +16,7 @@
 const PropertyTypes = require("../Properties/Types")
 const ObjectTypes = require("../Objects/Types")
 const ObjectShared = require("../Objects/Shared")
+const Compressor = require("../Compressor")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
@@ -55,6 +56,29 @@ function Shared.factory(
         return nil
     end
 
+    -- Which side a transaction belongs to, decided by the first thing it
+    -- touches and held to for the rest of it.
+    --
+    -- A transaction is all of one or all of the other. Half of a mixed one
+    -- would need a round trip that can come back refused, and by the time it
+    -- did the local half would already have applied -- there is no atomicity to
+    -- be had across that line, and a transaction that is not atomic is not a
+    -- transaction. So the second kind to arrive is refused, by name, rather
+    -- than quietly splitting the edit in two.
+    const function Claim(self: Transaction, Local: boolean, What: string): boolean
+        if self.Local == nil then
+            self.Local = Local
+            return true
+        end
+
+        if self.Local == Local then
+            return true
+        end
+
+        Reject(self, `{What} belongs to {if Local then "a scene this client owns" else "the server"}, and this transaction is already about {if Local then "the server" else "a scene this client owns"}.`)
+        return false
+    end
+
     const function __create(
         self: Transaction,
         Reference: Types.TypeReference,
@@ -68,6 +92,11 @@ function Shared.factory(
         const Registry = if type(Identifier) == "number" then Objects:GetRegistry(Identifier) else nil
         if not Registry or type(Identifier) ~= "number" then
             Reject(self, `Cannot create {tostring(Identifier)}: no object type is registered here with that id.`)
+            return self
+        end
+
+        -- Zero is the implicit default scene, which is the server's.
+        if not Claim(self, Live ~= nil and Objects:IsLocalCopy(Live), Registry.Name) then
             return self
         end
 
@@ -116,13 +145,6 @@ function Shared.factory(
             return self
         end
 
-        -- A scene this client owns has no copy the server knows, so a create
-        -- aimed at it would only be refused there.
-        if Obj.Local then
-            Reject(self, `{Obj.Name} belongs to a scene this client owns; duplicate it with Objects:Duplicate.`)
-            return self
-        end
-
         return __create(self, Obj.Parent, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
     end
 
@@ -145,11 +167,6 @@ function Shared.factory(
             const Obj = Resolve(Target)
             if not Obj or Obj.Destroyed then
                 Reject(self, "Cannot duplicate an object that is not here.")
-                continue
-            end
-
-            if Obj.Local then
-                Reject(self, `{Obj.Name} belongs to a scene this client owns; duplicate it with Objects:DuplicateGroup.`)
                 continue
             end
 
@@ -208,6 +225,75 @@ function Shared.factory(
         return self
     end
 
+    -- A pack placed into a copy the server owns, as a list of creates: one per
+    -- object in it, each asking for exactly what a create asks for, so placing a
+    -- prefab is checked against create rights rather than needing a right of its
+    -- own. One transaction, so it lands whole or not at all and undoes as one
+    -- step.
+    --
+    -- The references are why this is not a loop over Create. A saved reference
+    -- holds a local id from the scene the pack was written in, and the ids these
+    -- objects will answer to are minted at the far end, after the packet is
+    -- written -- so each one names the operation that makes its target instead,
+    -- and the far end fills in the id once the creates have run. A reference to
+    -- something the pack did not carry is dropped: the id would mean nothing
+    -- there, or worse, would mean something.
+    const function __place(
+        self: Transaction,
+        Pack: buffer,
+        Live: ObjectTypes.SceneInstanceId?
+    ): Transaction
+        const Ok, _, Decompressed = pcall(function()
+            return Compressor:DecompressScene(Pack)
+        end)
+
+        if not Ok or not Decompressed then
+            Reject(self, "Cannot place a pack that could not be read.")
+            return self
+        end
+
+        -- Which operation makes each object, by the id the pack knew it as.
+        const Placed: {[number]: number} = {}
+        const Pending: {{Index: number, References: {[number]: any}}} = {}
+
+        for _, Saved in Decompressed :: {any} do
+            const Values, References = ObjectShared.SplitReferences(Saved.Properties)
+
+            const Before = #self.Operations
+            __create(self, Saved.Parent, Values, Live)
+
+            -- Rejected, and the transaction will refuse to commit; there is
+            -- nothing to record an operation index against.
+            if #self.Operations == Before then
+                continue
+            end
+
+            Placed[Saved.LocalId] = #self.Operations
+            if References then
+                table.insert(Pending, {Index = #self.Operations, References = References})
+            end
+        end
+
+        for _, Entry in Pending do
+            const Operation = self.Operations[Entry.Index] :: Types.CreateOperation
+
+            for PropertyId, Saved in Entry.References do
+                const Names = Placed[Saved]
+                if not Names then
+                    continue
+                end
+
+                if not Operation.References then
+                    Operation.References = {}
+                end
+
+                (Operation.References :: any)[PropertyId] = Names
+            end
+        end
+
+        return self
+    end
+
     const function __set(
         self: Transaction,
         Target: Types.ObjectReference,
@@ -217,6 +303,10 @@ function Shared.factory(
         const Obj = Resolve(Target)
         if not Obj or Obj.Destroyed then
             Reject(self, "Cannot set a property on an object that is not here.")
+            return self
+        end
+
+        if not Claim(self, Obj.Local == true, Obj.Name) then
             return self
         end
 
@@ -268,9 +358,106 @@ function Shared.factory(
             return self
         end
 
+        if not Claim(self, Obj.Local == true, Obj.Name) then
+            return self
+        end
+
         table.insert(self.Operations, {
             Kind = "Destroy" :: "Destroy",
             Target = Obj.RuntimeId,
+        })
+
+        return self
+    end
+
+    -- Taking and releasing a hold, in the list with the edit that needs it.
+    -- One object or several, and several is the point: a lock is all or none,
+    -- so naming three of them in one transaction is the only way to be sure of
+    -- getting all three before anything moves.
+    --
+    -- Refused for objects in scenes this client owns. Nothing there is anybody
+    -- else's to touch, so there is no hold to take -- and a transaction that
+    -- carried one would be asking the server about an object it has never
+    -- heard of.
+    const function Holding(
+        self: Transaction,
+        Targets: Types.ObjectReference | {Types.ObjectReference},
+        Kind: "Lock" | "Unlock"
+    ): Transaction
+        const List = if type(Targets) == "table" and (Targets :: any).RuntimeId == nil
+            then Targets :: {Types.ObjectReference}
+            else {Targets :: Types.ObjectReference}
+
+        for _, Target in List do
+            const Obj = Resolve(Target)
+            if not Obj or Obj.Destroyed then
+                Reject(self, `Cannot {string.lower(Kind)} an object that is not here.`)
+                continue
+            end
+
+            if Obj.Local then
+                Reject(self, `{Obj.Name} belongs to a scene this client owns, which nobody else can touch and nothing can hold.`)
+                continue
+            end
+
+            if not Claim(self, false, Obj.Name) then
+                return self
+            end
+
+            table.insert(self.Operations, {
+                Kind = Kind :: any,
+                Target = Obj.RuntimeId,
+            })
+        end
+
+        return self
+    end
+
+    const function __lock(self: Transaction, Targets: any): Transaction
+        return Holding(self, Targets, "Lock")
+    end
+
+    const function __unlock(self: Transaction, Targets: any): Transaction
+        return Holding(self, Targets, "Unlock")
+    end
+
+    -- A copy of a scene into the world. The scene is named, not the copy: the
+    -- copy does not exist yet, and which one it turns out to be is the far
+    -- end's to decide -- it arrives through the packet announcing it, the way
+    -- a created object does.
+    const function __load(self: Transaction, Scene: ObjectTypes.SceneIdentifier): Transaction
+        if type(Scene) ~= "number" then
+            Reject(self, `Cannot load {tostring(Scene)}: a scene is named by its id.`)
+            return self
+        end
+
+        if not Claim(self, Objects:IsLocalScene(Scene), `scene {Scene}`) then
+            return self
+        end
+
+        table.insert(self.Operations, {
+            Kind = "Load" :: "Load",
+            Scene = Scene,
+        })
+
+        return self
+    end
+
+    -- A live copy out of the world. Withdrawn rather than unloaded, so an undo
+    -- brings back what was in it rather than what its scene last saved.
+    const function __unload(self: Transaction, Instance_: ObjectTypes.SceneInstanceId): Transaction
+        if type(Instance_) ~= "number" then
+            Reject(self, `Cannot unload {tostring(Instance_)}: a copy is named by its id.`)
+            return self
+        end
+
+        if not Claim(self, Objects:IsLocalCopy(Instance_), `copy {Instance_}`) then
+            return self
+        end
+
+        table.insert(self.Operations, {
+            Kind = "Unload" :: "Unload",
+            Instance = Instance_,
         })
 
         return self
@@ -294,10 +481,16 @@ function Shared.factory(
         const Transaction = {}
         Transaction.Operations = {}
         Transaction.Rejected = 0
+        Transaction.Local = nil
 
         Transaction.Create = __create
         Transaction.Duplicate = __duplicate
         Transaction.DuplicateGroup = __duplicate_group
+        Transaction.Place = __place
+        Transaction.Lock = __lock
+        Transaction.Unlock = __unlock
+        Transaction.Load = __load
+        Transaction.Unload = __unload
         Transaction.Set = __set
         Transaction.Destroy = __destroy
         Transaction.Commit = __commit
