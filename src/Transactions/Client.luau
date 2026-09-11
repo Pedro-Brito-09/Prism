@@ -81,6 +81,11 @@ export type ApplyRecord = {
     Removed: {any},
     Before: {[number]: any},
     Targets: {[number]: any},
+
+    -- The copies it put in the world and the ones it withdrew, suspended rather
+    -- than unloaded, so whatever takes this record takes them too.
+    Loaded: {any},
+    Withdrew: {any},
 }
 
 -- Fired before a local apply begins and after it lands. History listens to
@@ -121,13 +126,16 @@ type LocalPlan = {
     Sets: {{Index: number, Property: any, Value: any}},
     Destroys: {any},
     Targets: {[number]: any},
+    Loads: {any},
+    Unloads: {any},
 }
 
 -- Resolve and check everything, touching nothing. A transaction that cannot be
 -- applied whole is not applied at all, and this is where that is settled.
 const function Plan(Transaction: Transaction): LocalPlan?
-    const Planned: LocalPlan = {Creates = {}, Sets = {}, Destroys = {}, Targets = {}}
+    const Planned: LocalPlan = {Creates = {}, Sets = {}, Destroys = {}, Targets = {}, Loads = {}, Unloads = {}}
     const Doomed: {[number]: true} = {}
+    const Withdrawn: {[number]: true} = {}
     const CreateAt: {[number]: number} = {}
     const Pending: {{At: number, References: {[number]: number}}} = {}
 
@@ -180,6 +188,32 @@ const function Plan(Transaction: Transaction): LocalPlan?
                 Doomed[Obj.RuntimeId] = true
                 table.insert(Planned.Destroys, Obj)
             end
+        elseif Op.Kind == "Load" then
+            const Scene = Scenes:GetLocalById(Op.Scene)
+            if not Scene then
+                Logger:Warn(`A local transaction names scene {Op.Scene}, which is not one this client owns.`)
+                return nil
+            end
+
+            table.insert(Planned.Loads, Scene)
+        elseif Op.Kind == "Unload" then
+            const Live = Scenes:GetLocalCopy(Op.Instance)
+            if not Live then
+                Logger:Warn(`A local transaction names copy {Op.Instance}, which is not a copy of a scene this client owns.`)
+                return nil
+            end
+
+            if not Withdrawn[Op.Instance] then
+                Withdrawn[Op.Instance] = true
+                table.insert(Planned.Unloads, Live)
+            end
+        elseif Op.Kind == "Lock" or Op.Kind == "Unlock" then
+            -- Cannot happen through the builder, which refuses a hold on a
+            -- local object. Said plainly rather than left to the branch below,
+            -- because the reason is a rule rather than a mistake: nothing in a
+            -- scene this client owns is anybody else's to touch.
+            Logger:Warn("A local transaction cannot hold objects: nothing in a scene this client owns is held.")
+            return nil
         else
             Logger:Warn(`A local transaction carries an operation of unknown kind {tostring(Op.Kind)}.`)
             return nil
@@ -219,6 +253,8 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
     const Created: {any} = {}
     const Removed: {any} = {}
     const Before: {[number]: any} = {}
+    const Loaded: {any} = {}
+    const Withdrew: {any} = {}
 
     -- What to write back if the apply throws partway. A list as well as a map,
     -- because a property whose value was nil leaves no entry in the map to
@@ -228,6 +264,17 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
     const Previous: {[any]: any} = {}
 
     const Ok, Err = pcall(function()
+        -- Copies first, before anything that might name one: a create can land
+        -- in a copy this same transaction loaded.
+        for _, Scene in Planned.Loads do
+            const Live = Scene:Load()
+            if not Live then
+                error(`could not load {Scene.Name}`)
+            end
+
+            table.insert(Loaded, Live)
+        end
+
         for _, Create in Planned.Creates do
             table.insert(Created, Objects.new(Create.Object, Create.Properties, Create.Live))
         end
@@ -271,10 +318,22 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
             Objects.Suspend(Obj)
             table.insert(Removed, Obj)
         end
+
+        -- Copies out after the objects, so an edit to something in a copy this
+        -- transaction also withdraws lands before the copy goes.
+        for _, Live in Planned.Unloads do
+            if Live:Suspend() then
+                table.insert(Withdrew, Live)
+            end
+        end
     end)
 
     if not Ok then
         Logger:Warn(`A local transaction failed partway through and was rolled back: {Err}`)
+
+        for _, Live in Withdrew do
+            Live:Revive()
+        end
 
         for _, Obj in Removed do
             Objects.Revive(Obj)
@@ -286,6 +345,12 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
 
         for _, Obj in Created do
             Objects.Retire(Obj)
+        end
+
+        -- A copy it made and is now taking back is not anybody's work being
+        -- withdrawn: nothing has had a chance to touch it, so it goes outright.
+        for _, Live in Loaded do
+            Live:Unload()
         end
 
         -- Said even though there is nothing to record, because something is
@@ -309,6 +374,8 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
             Removed = Removed,
             Before = Before,
             Targets = Planned.Targets,
+            Loaded = Loaded,
+            Withdrew = Withdrew,
         }
 
         for _, Callback in Recorders do
@@ -322,6 +389,10 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
     if not Kept then
         for _, Obj in Removed do
             Objects.Dispose(Obj)
+        end
+
+        for _, Live in Withdrew do
+            Live:Dispose()
         end
     end
 

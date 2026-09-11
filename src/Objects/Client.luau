@@ -57,6 +57,11 @@ const DrawInto: {[Types.SceneInstanceId]: Folder} = {}
 -- to know whether committing means sending a packet or doing the work.
 const LocalCopies: {[Types.SceneInstanceId]: true} = {}
 
+-- Scenes this client owns, by id. Kept beside the copies because a scene can be
+-- asked for before it has any: loading one is exactly the case where there are
+-- no copies yet to read the answer off.
+const LocalScenes: {[Types.SceneIdentifier]: true} = {}
+
 -- Every object appearing here and going, whichever way it came: replicated
 -- from the server, built in a scene this client owns, or drawn for a copy the
 -- server opened. UI used to poll GetWorkspace to notice any of it.
@@ -964,9 +969,51 @@ function Objects:IsLocalCopy(Live: Types.SceneInstanceId): boolean
     return LocalCopies[Live] == true
 end
 
+-- Told by Scenes/Client as it registers and destroys them. Objects cannot ask
+-- Scenes -- that is the cycle every module here is arranged to avoid -- so it
+-- is told instead, the way it is told which copy belongs to which scene.
+function Objects.TrackLocalScene(Scene: Types.SceneIdentifier, Owned: boolean)
+    LocalScenes[Scene] = if Owned then true else nil
+end
+
+function Objects:IsLocalScene(Scene: Types.SceneIdentifier): boolean
+    return LocalScenes[Scene] == true
+end
+
 -- Tears down every object of one live copy. Called by Scenes/Client when the
 -- server says the copy is gone, which arrives as a single packet: the objects
 -- are already gone there and no ObjectRemoved is coming for any of them.
+-- Every object of one copy this client owns withdrawn at once, and kept. The
+-- server's twin; see Objects/Server. Nothing here is announced either way,
+-- because nothing in a scene this client owns ever was.
+function Objects.SuspendInstance(Live: Types.SceneInstanceId): {Object}
+    const Held = {}
+    for _, Obj in table.clone(ByInstance[Live] or {}) do
+        if Objects.Suspend(Obj) then
+            table.insert(Held, Obj)
+        end
+    end
+
+    return Held
+end
+
+function Objects.ReviveInstance(Held: {Object}): {Object}
+    const Back = {}
+    for _, Obj in Held do
+        if Objects.Revive(Obj) then
+            table.insert(Back, Obj)
+        end
+    end
+
+    return Back
+end
+
+function Objects.DisposeInstance(Held: {Object})
+    for _, Obj in Held do
+        Objects.Dispose(Obj)
+    end
+end
+
 function Objects.DropInstance(Live: Types.SceneInstanceId)
     InstanceScene[Live] = nil
     DrawInto[Live] = nil

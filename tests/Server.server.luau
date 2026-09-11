@@ -3335,6 +3335,225 @@ T:Test("a placement a client is not allowed refuses whole", function()
 end)
 
 --=============================================================================
+-- Holds and copies as operations
+--=============================================================================
+
+T:Describe("Holds and copies as operations")
+
+T:Test("a transaction takes holds, edits, and lets go", function()
+    const Scene, Copy = Room("HoldRoom")
+    const Plr = Editor(-6200, Scene)
+    const Other = Ghost(-6201)
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+
+    const Applied = Transactions.Apply(Plr, {
+        {Kind = "Lock", Target = Door.RuntimeId},
+        {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = "Held", Type = "Text"},
+    } :: any)
+
+    T:Ok(Applied, "applied")
+    T:Eq(Door:Get(TitleId), "Held", "the edit landed")
+    T:Eq(Objects:GetLock(Door), -6200, "and the hold is still taken")
+
+    -- Held, so somebody else cannot have it.
+    T:Ok(Objects.LockedAgainst(Door, Other), "against everyone else")
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Unlock", Target = Door.RuntimeId},
+    } :: any), "released")
+
+    T:Eq(Objects:GetLock(Door), nil, "and let go")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a hold somebody else has refuses the whole transaction", function()
+    const Scene, Copy = Room("HoldTaken")
+    const Plr = Editor(-6202, Scene)
+    const Other = Ghost(-6203)
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    T:Ok(Objects:Lock({Door}, Other), "somebody else has it")
+
+    const Applied = Transactions.Apply(Plr, {
+        {Kind = "Lock", Target = Door.RuntimeId},
+        {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = "Mine", Type = "Text"},
+    } :: any)
+
+    T:Ok(not Applied, "refused")
+    T:Eq(Door:Get(TitleId), "Door", "and the edit that rode with it never landed")
+
+    Objects:Unlock({Door})
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("holds are not undoable", function()
+    const Scene, Copy = Room("HoldHistory")
+    const Plr = Editor(-6204, Scene)
+    const Door = Copy:Create(DoorId)
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Lock", Target = Door.RuntimeId},
+    } :: any), "held")
+
+    -- A lock is not a change to the world, so there is nothing to take back.
+    T:Ok(not History:CanUndo(Plr), "nothing recorded")
+    T:Eq(Objects:GetLock(Door), -6204, "and the hold stands")
+
+    Objects:Unlock({Door})
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a client loads a scene through create rights", function()
+    const Scene = Scenes.new({Name = "LoadTarget"}) :: any
+    const Plr = Editor(-6205, Scene)
+
+    -- Something committed, so the copy it loads is not empty.
+    const Seed = Scene:Load()
+    Seed:Create(DoorId, {[TitleId] = "Inside"})
+    Seed:Commit()
+    Seed:Unload()
+
+    T:Eq(#Scene:GetInstances(), 0, "nothing live to begin with")
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Load", Scene = Scene.Id},
+    } :: any), "loaded")
+
+    const Live = Scene:GetInstances()[1]
+    T:Ok(Live, "a copy appeared")
+
+    if Live then
+        T:Eq(#Live:GetObjects(), 1, "holding what the scene had")
+    end
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a load without create rights on the scene is refused", function()
+    const Scene = Scenes.new({Name = "LoadRefused"}) :: any
+    const Plr = Ghost(-6206)
+
+    T:Ok(not Transactions.Apply(Plr, {
+        {Kind = "Load", Scene = Scene.Id},
+    } :: any), "refused")
+
+    T:Eq(#Scene:GetInstances(), 0, "and loaded nothing")
+    Scene:Destroy()
+end)
+
+T:Test("an unload withdraws the copy, and undoing brings back what was in it", function()
+    const Scene, Copy = Room("UnloadRoom")
+    const Plr = Editor(-6207, Scene)
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId)
+    Button:Set(TargetId, Door)
+
+    -- Never committed, so the scene's data holds none of this: reloading would
+    -- read nothing, and only a withdrawal can bring it back.
+    const CopyId = Copy.Id
+    const Folder = Copy.Folder
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Unload", Instance = CopyId},
+    } :: any), "unloaded")
+
+    T:Ok(Copy.Suspended, "the copy was kept rather than unloaded")
+    T:Eq(Scenes:GetInstance(CopyId), nil, "and is not live")
+    T:Ok(Door.Suspended and Button.Suspended, "with its objects held")
+    T:Eq(Folder.Parent, nil, "and its folder out of the world")
+
+    T:Ok(History:Undo(Plr), "undone")
+
+    T:Eq(Scenes:GetInstance(CopyId), Copy, "the same copy is live again")
+    T:Eq(Copy:Find(Door.LocalId), Door, "holding the same objects")
+    T:Eq(Button:Get(TargetId), Door, "still wired to each other")
+    T:Eq(Door:Get(TitleId), "Door", "with what they held")
+    T:Ok(Folder.Parent ~= nil, "and its folder back in the world")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a withdrawn copy ends when nothing can reach the step", function()
+    const Scene, Copy = Room("UnloadCleared")
+    const Plr = Editor(-6208, Scene)
+    const Door = Copy:Create(DoorId)
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Unload", Instance = Copy.Id},
+    } :: any), "unloaded")
+
+    T:Ok(Copy.Suspended, "held")
+
+    History:Clear(Plr)
+
+    T:Eq(Copy.Suspended, nil, "and let go once nothing could bring it back")
+    T:Eq(Door.Suspended, nil, "its objects with it")
+
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("undoing a load withdraws the copy it made", function()
+    const Scene = Scenes.new({Name = "LoadUndo"}) :: any
+    const Plr = Editor(-6209, Scene)
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Load", Scene = Scene.Id},
+    } :: any), "loaded")
+
+    const Live = Scene:GetInstances()[1]
+    T:Ok(Live, "a copy appeared")
+
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(#Scene:GetInstances(), 0, "the copy went")
+
+    if Live then
+        T:Ok(Live.Suspended, "withdrawn rather than unloaded")
+    end
+
+    T:Ok(History:Redo(Plr), "redone")
+    T:Eq(Scene:GetInstances()[1], Live, "and the same copy came back")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("the four new kinds round trip on the wire", function()
+    const Operations = {
+        {Kind = "Lock", Target = 11},
+        {Kind = "Unlock", Target = 12},
+        {Kind = "Load", Scene = 13},
+        {Kind = "Unload", Instance = 14},
+    }
+
+    const Read = Compressor:DecompressTransaction(Compressor:CompressTransaction(Operations :: any))
+
+    T:Eq(#Read, 4, "four operations")
+    T:Eq(Read[1].Kind, "Lock", "lock")
+    T:Eq(Read[1].Target, 11, "its target")
+    T:Eq(Read[2].Kind, "Unlock", "unlock")
+    T:Eq(Read[2].Target, 12, "its target")
+    T:Eq(Read[3].Kind, "Load", "load")
+    T:Eq(Read[3].Scene, 13, "its scene")
+    T:Eq(Read[4].Kind, "Unload", "unload")
+    T:Eq(Read[4].Instance, 14, "its copy")
+end)
+
+--=============================================================================
 -- Client integration fixtures
 --=============================================================================
 

@@ -324,6 +324,106 @@ const function __commit(self: SceneInstance)
     self.Owner.Data = __instance_serialize(self)
 end
 
+-- A copy withdrawn from the world rather than unloaded, and kept whole: the
+-- same thing suspending does to an object, one level up.
+--
+-- Unloading is final. It exists because a game decides a room is done with, and
+-- nothing about that needs taking back. But a player asking for a copy to go is
+-- a player who may want it back a second later, and a copy cannot be rebuilt
+-- from its scene the way it was: loading reads what the scene last committed,
+-- which is not what was on screen unless somebody had just saved. So the copy
+-- is set aside instead -- out of the registries, its folder out of the world,
+-- every object in it suspended -- and put back exactly as it was.
+--
+-- What it costs while it is away is what the objects cost, which is what they
+-- cost anyway: they are the same tables, out of sight.
+const function __instance_suspend(self: SceneInstance): boolean
+    if self.Suspended then
+        return false
+    end
+
+    const Owner = self.Owner
+    if not Owner or Owner.Instances[self.Id] ~= self then
+        return false
+    end
+
+    -- The objects first, while the copy is still filed: each unfiles itself
+    -- from the tables below on the way out.
+    self.Suspended = Objects.SuspendInstance(self)
+
+    Owner.Instances[self.Id] = nil
+    Registry.Instances[self.Id] = nil
+
+    -- Out of the world, not destroyed -- the same distinction an object's part
+    -- gets, and for the same reason: what comes back has to be what left,
+    -- including anything the game hung on the folder.
+    if self.Folder then
+        -- Remembered rather than recomputed: a game that loaded this copy into
+        -- PlayerGui or into a Model of its own gets it back there.
+        self.Parent = self.Folder.Parent
+        self.Folder.Parent = nil
+    end
+
+    Audience.Fire(Network.InstanceRemoved, self.Scene, if self.Opened then "Admitted" else "Everyone", self.Id)
+    return true
+end
+
+const function __instance_revive(self: SceneInstance): boolean
+    const Held = self.Suspended
+    if not Held then
+        return false
+    end
+
+    const Owner = self.Owner
+    if not Owner or not Registry.ById[self.Scene] then
+        -- Its scene has been unregistered while it was away. There is nothing
+        -- to put it back into.
+        return false
+    end
+
+    self.Suspended = nil
+
+    -- Filed before its objects, which file themselves into it as they come
+    -- back, and announced before them for the reason a load announces its copy
+    -- first: a client must never be handed an object of a copy it has not been
+    -- told about.
+    Owner.Instances[self.Id] = self :: any
+    Registry.Instances[self.Id] = self
+
+    if self.Folder then
+        World.Place(self.Folder, self.Scene, self.Id)
+    end
+
+    Audience.Fire(
+        Network.InstanceAdded,
+        self.Scene,
+        if self.Opened then "Admitted" else "Everyone",
+        self.Id,
+        self.Scene,
+        self.Opened
+    )
+
+    Objects.AnnounceAll(Objects.ReviveInstance(Held))
+    return true
+end
+
+-- The end of a suspended copy: its objects for good, and the folder they were
+-- in. Everything else about it was already done when it was withdrawn.
+const function __instance_dispose(self: SceneInstance)
+    const Held = self.Suspended
+    if not Held then
+        return
+    end
+
+    self.Suspended = nil
+    Objects.DisposeInstance(Held)
+
+    if self.Folder then
+        self.Folder:Destroy()
+        self.Folder = nil
+    end
+end
+
 const function __instance_unload(self: SceneInstance)
     const Owner = self.Owner
     if Owner then
@@ -363,6 +463,9 @@ const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean): Sc
     Instance_.Serialize = __instance_serialize
     Instance_.Commit = __commit
     Instance_.Unload = __instance_unload
+    Instance_.Suspend = __instance_suspend
+    Instance_.Revive = __instance_revive
+    Instance_.Dispose = __instance_dispose
 
     Owner.Instances[Instance_.Id] = Instance_ :: any
     Registry.Instances[Instance_.Id] = Instance_

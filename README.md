@@ -153,6 +153,8 @@ Prism.Objects:OnLockChanged(function(runtimeId, userId) ... end)
 
 Taking a lock needs edit rights on the object, costs one action per object, and
 fails if anyone else holds any of the objects named. Releasing needs no rights.
+A transaction can take and release them too, in the same list as the edit they
+are for — see Transactions.
 A lock goes when its object goes or its holder leaves. The server's own edits
 ignore locks. The server can take locks on a player's behalf with
 `Objects:Lock(list, player)`, which is refused the same way if someone else
@@ -586,8 +588,12 @@ edit:Create(Crate, {[Health] = 50}, room.Id)
     :Duplicate(original)             -- a create holding original's values
     :DuplicateGroup(selection)       -- the same, references between them remapped
     :Place(prefab, room.Id)          -- a saved pack, one create per object in it
+    :Lock(selection)                 -- one object or a list, all or none
     :Set(other, "Health", 20)
     :Destroy(stale)
+    :Unlock(selection)
+    :Load(sceneId)                   -- a copy of a scene into the world
+    :Unload(copyId)                  -- and a live copy out of it
 
 local applied, created = edit:Commit()
 ```
@@ -631,10 +637,39 @@ line, and a transaction that cannot be atomic is not one.
 Everything else is the same on both paths: the three phases in the same order,
 a rollback if it throws partway, and one entry in the history.
 
+### Holds, and copies
+
+`Lock` and `Unlock` put taking a hold in the same list as the edit that needs
+it. Locking three objects and moving them used to be two round trips, with the
+lock able to come back refused *after* the edit was built; now it is one packet
+that either gets all three and moves them or does neither. Locks are taken
+before everything else in the transaction and released after — hold these, do
+this, let go. Refused for objects in scenes the client owns, which are never
+held: nobody else can touch them.
+
+`Load` names a scene and `Unload` a live copy, and they are the only way a
+client asks for either — there is no channel of their own. Loading needs the
+**create** verb on that scene and unloading needs **destroy**, because that is
+what they amount to: every object in it made, or every object in it taken away.
+The verb alone: a pack holds whatever it holds, so there is no type to check the
+object lists against, and those lists govern what a role builds by hand.
+
+The copy a load makes is not in what `Commit` hands back. It arrives the way
+created objects do, through the packet announcing it — `Scenes:OnCopyAdded`.
+
+An unload **withdraws** the copy rather than unloading it: out of the
+registries, its folder out of the tree, every object in it suspended, the whole
+thing kept. That is what makes it undoable. Loading it again would read what the
+scene last committed, which is not what was on screen unless somebody had just
+saved; withdrawing it means an undo brings back exactly what was there. The copy
+ends when the step holding it does, the same way a destroyed object does.
+`copy:Unload()` from server code is still final — nobody asked for that one.
+
 ### Ordering
 
-Operations apply creates first, then sets, then destroys, whatever order they
-were declared in. That is what makes a transaction atomic rather than merely
+Operations apply locks first, then loads, then creates, then sets, then
+destroys, then unloads, then the releases — whatever order they were declared
+in. That is what makes a transaction atomic rather than merely
 batched: a create can be taken back by destroying what it made, and a set by
 writing back what it overwrote, but a destroy cannot be taken back at all — so
 nothing irreversible happens until everything reversible has already succeeded.
@@ -655,7 +690,10 @@ Prism.History:OnChange(function() toolbar:Refresh() end)
 
 A step is one committed transaction, one create or destroy, or a run of
 `Object:Set` calls to one property with no pause longer than a second, so a drag
-undoes as one.
+undoes as one. A copy loaded or unloaded by a transaction is part of its step:
+undoing a load withdraws the copy it made, and undoing an unload puts back the
+one it took, objects and values and ids intact. Holds are not recorded — a lock
+is not a change to the world, and taking somebody's hold back is not an undo.
 
 Each stack keeps the last 100 steps. That count is **per player and across every
 scene** — editing two rooms does not give you two hundred steps, because what

@@ -67,6 +67,35 @@ Pedro's to make before or while building.
 
 ## Done
 
+- [x] **Holds and copies are operations.** `Lock`, `Unlock`, `Load` and
+      `Unload` joined create, set and destroy, so the things a player does that
+      a transaction could not carry now go in the list with everything else.
+
+      Locks were two round trips: take them, then send the edit, with the hold
+      able to come back refused after the edit was built. Now they are taken
+      before everything else in the transaction and released after, and the plan
+      refuses the lot if any of them is somebody else's -- so it either gets all
+      three and moves them or does neither.
+
+      Load and Unload were not player actions at all; no channel existed for
+      either. Loading asks for the create verb on that scene and unloading for
+      destroy, since that is what they amount to -- every object in it made, or
+      every object in it taken away. The verb alone: a pack holds whatever it
+      holds, so there is no type to check a role's object lists against, and
+      those lists go on governing what it builds by hand. One action each,
+      whatever the size of the scene.
+
+      Unloading withdraws the copy rather than ending it -- out of the
+      registries, folder out of the tree, every object in it suspended, the
+      whole thing kept -- which is what makes it undoable. Loading it again
+      would read what the scene last committed rather than what was on screen.
+      So a copy suspends the way an object does, one level up, and `World.Place`
+      exists to put a folder back where it was rather than where a new one would
+      go. `copy:Unload` from server code stays final: nobody asked for that one.
+
+      Holds are not recorded in the history. A lock is not a change to the
+      world, and taking back somebody's hold is not an undo.
+
 - [x] **A transaction is not only a way to talk to the server.** One whose
       objects are all in scenes the client owns applies on the spot: the same
       builder, the same operations, the same three phases and the same rollback,

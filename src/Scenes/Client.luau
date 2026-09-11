@@ -298,6 +298,74 @@ const function __commit(self: SceneInstance)
     self.Owner.Data = __instance_serialize(self)
 end
 
+-- A copy withdrawn from the world rather than unloaded, and kept whole. The
+-- server's twin; see Scenes/Server for why a player asking for a copy to go
+-- gets this rather than the real thing. Nothing is announced, because nothing
+-- in a scene this client owns ever is.
+const function __instance_suspend(self: any): boolean
+    if self.Suspended then
+        return false
+    end
+
+    const Owner = self.Owner
+    if not Owner or Owner.Instances[self.Id] ~= self then
+        return false
+    end
+
+    self.Suspended = Objects.SuspendInstance(self.Id)
+    Owner.Instances[self.Id] = nil
+
+    if self.Folder then
+        self.Parent = self.Folder.Parent
+        self.Folder.Parent = nil
+    end
+
+    Notify(CopyRemoved, self.Id, self.Scene)
+    return true
+end
+
+const function __instance_revive(self: any): boolean
+    const Held = self.Suspended
+    if not Held then
+        return false
+    end
+
+    const Owner = self.Owner
+    if not Owner or not Owned[self.Scene] then
+        -- Its scene has been destroyed while it was away.
+        return false
+    end
+
+    self.Suspended = nil
+    Owner.Instances[self.Id] = self
+
+    if self.Folder then
+        World.Place(self.Folder, self.Scene, self.Parent)
+        self.Parent = nil
+    end
+
+    -- Filed before its objects, which file themselves back into it, and told
+    -- before them for the reason a load tells of its copy first.
+    Notify(CopyAdded, self.Id, self.Scene, nil)
+    Objects.ReviveInstance(Held)
+    return true
+end
+
+const function __instance_dispose(self: any)
+    const Held = self.Suspended
+    if not Held then
+        return
+    end
+
+    self.Suspended = nil
+    Objects.DisposeInstance(Held)
+
+    if self.Folder then
+        self.Folder:Destroy()
+        self.Folder = nil
+    end
+end
+
 const function __instance_unload(self: SceneInstance)
     const Owner = self.Owner
     if Owner then
@@ -341,6 +409,9 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     Instance_.Serialize = __instance_serialize
     Instance_.Commit = __commit
     Instance_.Unload = __instance_unload
+    Instance_.Suspend = __instance_suspend
+    Instance_.Revive = __instance_revive
+    Instance_.Dispose = __instance_dispose
 
     Owner.Instances[Instance_.Id] = Instance_
 
@@ -439,6 +510,7 @@ const function __destroy(self: any)
     __unload(self)
 
     Owned[self.Id] = nil
+    Objects.TrackLocalScene(self.Id, false)
     OwnedByName[self.Name] = nil
     self.Data = nil
 end
@@ -473,6 +545,7 @@ function Scenes.new(Config: SceneConfig): LocalScene?
     Scene.Destroy = __destroy
 
     Owned[Identifier] = Scene
+    Objects.TrackLocalScene(Identifier, true)
     OwnedByName[Config.Name] = Scene
 
     return Scene :: any

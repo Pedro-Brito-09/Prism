@@ -46,9 +46,22 @@ const LIMIT = 100
 -- drag sets every frame; two edits a few seconds apart are two actions.
 const MERGE_WINDOW = 1
 
+-- A copy appearing and going is a step like any other, and the same act in
+-- opposite directions: undoing a load withdraws the copy it made, undoing an
+-- unload puts back the one it took. Both are suspends, so what comes back is
+-- what was there -- objects, values, ids and all -- rather than what the scene
+-- last committed.
+--
+-- Holds are not here. A lock is not a change to the world, and an undo that
+-- took somebody's hold back would be taking back something they may still be
+-- using.
 type Entry = {
-    Kind: "Set" | "Create" | "Destroy",
-    Target: Types.Object,
+    Kind: "Set" | "Create" | "Destroy" | "Load" | "Unload",
+
+    -- One or the other: an object for the first three, a live copy for the two
+    -- below them.
+    Target: Types.Object?,
+    Copy: any?,
 
     Property: number?,
     Before: any,
@@ -120,8 +133,20 @@ const function Clear(Step: Step)
     end
 
     for _, Entry in Step.Entries do
-        if Entry.Kind ~= "Set" and Entry.Target.Suspended then
-            Objects.Dispose(Entry.Target)
+        const Copy = Entry.Copy
+        if Copy then
+            -- A copy this step was holding against an undo that will now never
+            -- come. Its objects end here, and the folder they were in.
+            if Copy.Suspended then
+                Copy:Dispose()
+            end
+
+            continue
+        end
+
+        const Target = Entry.Target
+        if Target and Entry.Kind ~= "Set" and Target.Suspended then
+            Objects.Dispose(Target)
         end
     end
 
@@ -187,7 +212,7 @@ end
 --=============================================================================
 
 const function Present(Entry: Entry, Forward: boolean): boolean
-    return (Entry.Kind == "Create") == Forward
+    return (Entry.Kind == "Create" or Entry.Kind == "Load") == Forward
 end
 
 const function Ends(Entry: Entry, Forward: boolean): (any, any)
@@ -230,7 +255,18 @@ const function ApplyLocal(Step: Step, Forward: boolean): boolean
     end
 
     for _, Entry in Ordered(Step.Entries, Forward) do
-        const Obj = Entry.Target
+        const Copy = Entry.Copy
+        if Copy then
+            if Present(Entry, Forward) then
+                Copy:Revive()
+            else
+                Copy:Suspend()
+            end
+
+            continue
+        end
+
+        const Obj = Entry.Target :: Types.Object
 
         if Entry.Kind == "Set" then
             const Prop = if Obj.Destroyed then nil else Obj.Properties[Entry.Property :: number]
@@ -470,6 +506,14 @@ Transactions.OnApplied(function(Record): boolean
                 table.insert(Entries, {Kind = "Destroy" :: "Destroy", Target = Obj})
             end
         end
+    end
+
+    for _, Live in Record.Loaded do
+        table.insert(Entries, {Kind = "Load" :: "Load", Copy = Live})
+    end
+
+    for _, Live in Record.Withdrew do
+        table.insert(Entries, {Kind = "Unload" :: "Unload", Copy = Live})
     end
 
     if #Entries == 0 then

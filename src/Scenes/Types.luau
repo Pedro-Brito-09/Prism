@@ -58,6 +58,18 @@ export type SceneInstance = {
 
     Objects: {[ObjectTypes.RuntimeId]: ObjectTypes.Object},
 
+    -- Withdrawn from the world but kept whole, and holding the objects it took
+    -- with it: out of the registries, folder out of the tree, every object in
+    -- it suspended. What a player asking for a copy to go gets, as against
+    -- Unload, which is final -- a copy cannot be rebuilt from its scene the way
+    -- it was, because loading reads what the scene last committed rather than
+    -- what was on screen.
+    Suspended: {ObjectTypes.Object}?,
+
+    -- Where the folder was parented while it was live, so a copy a game loaded
+    -- into PlayerGui or into a Model of its own goes back there.
+    Parent: Instance?,
+
     -- The one crossing between the two identities, and deliberately scoped to a
     -- copy: a persistent id names an object here, but names one in every other
     -- live copy of the same scene too.
@@ -89,6 +101,14 @@ export type SceneInstance = {
     Commit: (self: SceneInstance) -> (),
 
     Unload: (self: SceneInstance) -> (),
+
+    -- Out of the world, kept, and back again. True when it went; false when it
+    -- was already away, or when its scene has been unregistered since and there
+    -- is nothing to come back to. Dispose is the end of a suspended copy: its
+    -- objects for good, and the folder they were in.
+    Suspend: (self: SceneInstance) -> boolean,
+    Revive: (self: SceneInstance) -> boolean,
+    Dispose: (self: SceneInstance) -> (),
 }
 
 export type Scene = {

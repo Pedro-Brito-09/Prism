@@ -476,6 +476,46 @@ Objects.ReachOf = ReachOf
 
 -- Destroys everything a scene instance holds without a packet per object. The
 -- caller sends one naming the instance instead.
+-- Every object of one copy withdrawn at once, and kept. The copy itself is
+-- withdrawn around them -- see Scenes/Server -- so nothing here announces:
+-- one packet says the copy is gone, which is all a client needs, and a removal
+-- per object would be the flood the chunked paths exist to avoid.
+--
+-- The list comes back because the copy tables empty as this runs: each object
+-- unfiles itself on the way out, which is what makes them findable nowhere
+-- while they are away. Whatever holds the copy holds this beside it.
+function Objects.SuspendInstance(Instance_: any): {Object}
+    const Held = {}
+    for _, Obj in table.clone(Instance_.Objects) do
+        if Objects.Suspend(Obj, false) then
+            table.insert(Held, Obj)
+        end
+    end
+
+    table.clear(Instance_.Objects)
+    table.clear(Instance_.ByLocal)
+    return Held
+end
+
+-- The other direction, once the copy is back in place: silent again, and the
+-- caller announces the lot in one go.
+function Objects.ReviveInstance(Held: {Object}): {Object}
+    const Back = {}
+    for _, Obj in Held do
+        if Objects.Revive(Obj, false) then
+            table.insert(Back, Obj)
+        end
+    end
+
+    return Back
+end
+
+function Objects.DisposeInstance(Held: {Object})
+    for _, Obj in Held do
+        Objects.Dispose(Obj)
+    end
+end
+
 function Objects.DropInstance(Instance_: any)
     for _, Obj in table.clone(Instance_.Objects) do
         Teardown(Obj, false)
@@ -593,6 +633,10 @@ end
 -- Asked by the shared transaction builder, which decides what committing means
 -- from the answer and must be able to ask either side.
 function Objects:IsLocalCopy(_Live: Types.SceneInstanceId): boolean
+    return false
+end
+
+function Objects:IsLocalScene(_Scene: Types.SceneIdentifier): boolean
     return false
 end
 

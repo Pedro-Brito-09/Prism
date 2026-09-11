@@ -40,6 +40,7 @@ const Compressor = require("../Compressor")
 const ObjectTypes = require("../Objects/Types")
 const Objects = require("../Objects/Server")
 const Audience = require("../Scenes/Audience")
+const Scenes = require("../Scenes/Server")
 const Network = require("./Network")
 const Logger = require("../Logger")
 
@@ -68,9 +69,22 @@ const MERGE_WINDOW = 1
 -- Create and Destroy carry the same thing and differ only in which direction
 -- means "in the world" -- undoing a create and redoing a destroy are the same
 -- act on the same object.
+-- A copy appearing and going is a step like any other, and the same act in
+-- opposite directions: undoing a load withdraws the copy it made, undoing an
+-- unload puts back the one it took. Both are suspends, so what comes back is
+-- what was there -- objects, values, ids and all -- rather than what the scene
+-- last committed.
+--
+-- Holds are not here. A lock is not a change to the world, and an undo that
+-- took somebody's hold back would be taking back something they may still be
+-- using.
 type Entry = {
-    Kind: "Set" | "Create" | "Destroy",
-    Target: Object,
+    Kind: "Set" | "Create" | "Destroy" | "Load" | "Unload",
+
+    -- One or the other: an object for the first three, a live copy for the two
+    -- below them.
+    Target: Object?,
+    Copy: any?,
 
     Property: PropertyTypes.PropertyIdentifier?,
     Before: any,
@@ -197,8 +211,20 @@ const function Clear(Step: Step)
     end
 
     for _, Entry in Step.Entries do
-        if Entry.Kind ~= "Set" and Entry.Target.Suspended then
-            Objects.Dispose(Entry.Target)
+        const Copy = Entry.Copy
+        if Copy then
+            -- A copy this step was holding against an undo that will now never
+            -- come. Its objects end here, and the folder they were in.
+            if Copy.Suspended then
+                Copy:Dispose()
+            end
+
+            continue
+        end
+
+        const Target = Entry.Target
+        if Target and Entry.Kind ~= "Set" and Target.Suspended then
+            Objects.Dispose(Target)
         end
     end
 
@@ -240,7 +266,7 @@ end
 -- applied in this direction. Undoing a create takes it away; undoing a destroy
 -- brings it back; redoing does the opposite of each.
 const function Present(Entry: Entry, Forward: boolean): boolean
-    return (Entry.Kind == "Create") == Forward
+    return (Entry.Kind == "Create" or Entry.Kind == "Load") == Forward
 end
 
 const function Ends(Entry: Entry, Forward: boolean): (any, any)
@@ -274,7 +300,28 @@ end
 -- it takes back what it still can and leaves the rest alone.
 const function Allowed(Plr: Player, Step: Step, Forward: boolean): boolean
     for _, Entry in Step.Entries do
-        const Obj = Entry.Target
+        const Copy = Entry.Copy
+        if Copy then
+            -- Putting a copy back is loading it and taking it away is
+            -- unloading it, so each asks for what the operation asked for.
+            const Owner = Scenes:GetById(Copy.Scene)
+            const Rights = if Owner then Owner:GetRights(Plr) else nil
+            if not Rights then
+                return false
+            end
+
+            if Present(Entry, Forward) then
+                if not Rights.CanCreate then
+                    return false
+                end
+            elseif not Rights.CanDestroy then
+                return false
+            end
+
+            continue
+        end
+
+        const Obj = Entry.Target :: Object
 
         if not Audience.Sees(Plr, Obj.Scene) then
             return false
@@ -353,7 +400,18 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
     const Changes: {{Object: Object, Property: PropertyTypes.PropertyIdentifier, Value: buffer}} = {}
 
     for _, Entry in Ordered(Step.Entries, Forward) do
-        const Obj = Entry.Target
+        const Copy = Entry.Copy
+        if Copy then
+            if Present(Entry, Forward) then
+                Copy:Revive()
+            else
+                Copy:Suspend()
+            end
+
+            continue
+        end
+
+        const Obj = Entry.Target :: Object
 
         if Entry.Kind == "Set" then
             const Prop = if Obj.Suspended then nil else Obj.Properties[Entry.Property :: number]
@@ -565,6 +623,14 @@ Transactions.OnApplied(function(Plr: Player, Record): boolean
                 table.insert(Entries, {Kind = "Destroy" :: "Destroy", Target = Obj})
             end
         end
+    end
+
+    for _, Live in Record.Loaded do
+        table.insert(Entries, {Kind = "Load" :: "Load", Copy = Live})
+    end
+
+    for _, Live in Record.Withdrew do
+        table.insert(Entries, {Kind = "Unload" :: "Unload", Copy = Live})
     end
 
     if #Entries == 0 then

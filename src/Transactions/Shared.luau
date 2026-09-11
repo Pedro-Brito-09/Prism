@@ -370,6 +370,99 @@ function Shared.factory(
         return self
     end
 
+    -- Taking and releasing a hold, in the list with the edit that needs it.
+    -- One object or several, and several is the point: a lock is all or none,
+    -- so naming three of them in one transaction is the only way to be sure of
+    -- getting all three before anything moves.
+    --
+    -- Refused for objects in scenes this client owns. Nothing there is anybody
+    -- else's to touch, so there is no hold to take -- and a transaction that
+    -- carried one would be asking the server about an object it has never
+    -- heard of.
+    const function Holding(
+        self: Transaction,
+        Targets: Types.ObjectReference | {Types.ObjectReference},
+        Kind: "Lock" | "Unlock"
+    ): Transaction
+        const List = if type(Targets) == "table" and (Targets :: any).RuntimeId == nil
+            then Targets :: {Types.ObjectReference}
+            else {Targets :: Types.ObjectReference}
+
+        for _, Target in List do
+            const Obj = Resolve(Target)
+            if not Obj or Obj.Destroyed then
+                Reject(self, `Cannot {string.lower(Kind)} an object that is not here.`)
+                continue
+            end
+
+            if Obj.Local then
+                Reject(self, `{Obj.Name} belongs to a scene this client owns, which nobody else can touch and nothing can hold.`)
+                continue
+            end
+
+            if not Claim(self, false, Obj.Name) then
+                return self
+            end
+
+            table.insert(self.Operations, {
+                Kind = Kind :: any,
+                Target = Obj.RuntimeId,
+            })
+        end
+
+        return self
+    end
+
+    const function __lock(self: Transaction, Targets: any): Transaction
+        return Holding(self, Targets, "Lock")
+    end
+
+    const function __unlock(self: Transaction, Targets: any): Transaction
+        return Holding(self, Targets, "Unlock")
+    end
+
+    -- A copy of a scene into the world. The scene is named, not the copy: the
+    -- copy does not exist yet, and which one it turns out to be is the far
+    -- end's to decide -- it arrives through the packet announcing it, the way
+    -- a created object does.
+    const function __load(self: Transaction, Scene: ObjectTypes.SceneIdentifier): Transaction
+        if type(Scene) ~= "number" then
+            Reject(self, `Cannot load {tostring(Scene)}: a scene is named by its id.`)
+            return self
+        end
+
+        if not Claim(self, Objects:IsLocalScene(Scene), `scene {Scene}`) then
+            return self
+        end
+
+        table.insert(self.Operations, {
+            Kind = "Load" :: "Load",
+            Scene = Scene,
+        })
+
+        return self
+    end
+
+    -- A live copy out of the world. Withdrawn rather than unloaded, so an undo
+    -- brings back what was in it rather than what its scene last saved.
+    const function __unload(self: Transaction, Instance_: ObjectTypes.SceneInstanceId): Transaction
+        if type(Instance_) ~= "number" then
+            Reject(self, `Cannot unload {tostring(Instance_)}: a copy is named by its id.`)
+            return self
+        end
+
+        if not Claim(self, Objects:IsLocalCopy(Instance_), `copy {Instance_}`) then
+            return self
+        end
+
+        table.insert(self.Operations, {
+            Kind = "Unload" :: "Unload",
+            Instance = Instance_,
+        })
+
+        return self
+    end
+
     const function __commit(self: Transaction): (boolean, {ObjectTypes.RuntimeId})
         if self.Rejected > 0 then
             Logger:Warn(`Refusing to commit a transaction: {self.Rejected} of its operations could not be built.`)
@@ -394,6 +487,10 @@ function Shared.factory(
         Transaction.Duplicate = __duplicate
         Transaction.DuplicateGroup = __duplicate_group
         Transaction.Place = __place
+        Transaction.Lock = __lock
+        Transaction.Unlock = __unlock
+        Transaction.Load = __load
+        Transaction.Unload = __unload
         Transaction.Set = __set
         Transaction.Destroy = __destroy
         Transaction.Commit = __commit
