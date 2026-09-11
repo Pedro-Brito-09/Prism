@@ -254,6 +254,10 @@ client either half can replicate first. The stored id is kept in all three, so
 the link comes back on its own when the target does. To read the raw id, go
 through the property: `button:GetProperty("Target").Value`.
 
+`Objects:Resolve(copyId, localId)` answers the same question from a raw id, for
+a caller holding one that did not come off a property — the crossing itself,
+scoped to a copy because that is the only scope a local id answers in.
+
 `Constraints.Types` says what the property may point at, by object type id or
 registered name. It's checked when the target actually resolves; an id naming
 nothing is always allowed, because refusing one would make a pack restorable
@@ -390,6 +394,27 @@ when the placement should undo as a single step:
 ```lua
 Prism.Transactions.new():Place(prefab, sandbox.Id):Commit()
 ```
+
+### Setting a copy aside
+
+A copy can leave the world without being unloaded:
+
+```lua
+room:Suspend()     -- out of the registries, folder out of the tree, objects held
+room:Revive()      -- back exactly as it was
+room:Dispose()     -- the end of a suspended copy: its objects, and its folder
+```
+
+This is what an unload in a transaction does, and why undoing one can bring the
+copy back with what was in it rather than what its scene last committed. A game
+can use it directly for the same reason — a room set aside and brought back is
+the room that left, down to the values on its objects and anything parented to
+its folder. `Unload` stays the final one.
+
+Objects have the same three: `Objects.Suspend(object)`, `Objects.Revive(object)`
+and `Objects.Dispose(object)`, with `Objects.Retire(player, object)` for the
+suspend-and-offer that a player's destroy goes through. See History for what
+holds them in between.
 
 ### Saving
 
@@ -1086,9 +1111,9 @@ StarterPlayer
 Both suites reach the harness with `require("./Harness")`, so it has to be a
 sibling of each one rather than living in a shared folder.
 
-Then use **Test > Play** with one player. The server creates three integration
-fixtures and intentionally keeps them alive so the client can validate both
-live delivery and late-join replay. A failed test prints its group and
+Then use **Test > Play** with one player. The server creates a set of
+integration fixtures and intentionally keeps them alive so the client can
+validate both live delivery and late-join replay. A failed test prints its group and
 assertion, then fails the corresponding script.
 
 The database tests write to real DataStore and MemoryStore keys, so they need
