@@ -6,11 +6,132 @@ Agreed work, in the order it makes sense to build it. Ticked when it lands on
 Nothing here waits on Studio. The suites in `tests/` are written alongside the
 work and left unrun on purpose — the framework gets played through in one pass
 once it is structurally finished, so a ticked item means the work landed and
-reads right, never that it was run with a player in it.
+reads right, never that it was run with a player in it. Do not suggest running
+them; that pass is Pedro's call and comes after the queue below is empty.
+
+## How the work is done
+
+Read this before picking anything up. It is how every item under Done landed.
+
+- **One branch per item, off `main`.** `feat/…` for features, `fix/…` for
+  fixes, `docs/…` for roadmap-only changes. Merge back with `git merge --no-ff`
+  and a message of `Merge branch '<branch>'`, then push `main` and the branch.
+  Ask Pedro before merging or pushing.
+- **Each item lands with its docs.** `README.md` is the API reference and is
+  updated in the same commit as the code. On this file, the item moves from
+  Queued to the top of Done, rewritten as what was built and the decisions
+  taken, not what was planned.
+- **Tests are written, not run.** `tests/Server.server.luau` holds server tests
+  and the fixtures the client checks; `tests/Client.client.luau` holds the
+  client half. A server change the client should observe gets a fixture on the
+  server — the existing ones are triggered by the client writing a marker
+  (`"EvictPulse"`, `"UnregisterPulse"`, ...) on the editable fixture.
+- **There is no Luau tooling on this machine.** Nothing type checks or runs
+  the code, so reread edited functions and grep for every caller of anything
+  whose signature changed — the network layer errors on a wrong argument
+  count, so a channel's callers matter most. New channels go at the end of
+  `src/Channels.luau`, never reordered.
+- **Code style.** `--!strict`, `const` for anything not reassigned, PascalCase
+  names, and comments that say why a thing is the way it is — usually what
+  went wrong before, or what the obvious alternative would have broken.
+  Match the density of the file being edited.
+- **Commits** are `type(scope): what changed` with a body explaining why, and
+  end with the co-author line the harness asks for.
 
 ## Queued
 
-Nothing queued.
+In the order to build them. Each is described well enough to start without
+the conversation that produced it; anything marked *Ask* is a decision that is
+Pedro's to make before or while building.
+
+- [ ] **Object references.** Next up. Nothing lets one object point at
+      another: the property types are Text, Number, Bool, Color, Vector,
+      CFrame, Enum and CustomEnum (`src/Properties/Types.luau`), so a button
+      cannot be wired to a door or a path node to the next. The README
+      already claims "the references inside the pack remapped together"
+      under Scenes and object identity — it is wrong today and has to become
+      true or be removed.
+
+      The intended shape: a new property type, `Object`, whose stored value
+      is the target's **local id** — the low half of its persistent id — so it
+      survives a save exactly as the pack's own ids do (see `src/Handles.luau`
+      and the `PersistentId` notes in `Objects/Types.luau`). It resolves
+      through the copy holding the object (`copy:Find(localId)`), which is what
+      makes two loaded copies of one room each point at their own door. A
+      target that is destroyed reads as nil; the stored id stays, so an undo
+      that brings the target back restores the link. `Get` on such a
+      property should hand back the live object rather than the number, or
+      there should be a separate resolving accessor — *Ask* which.
+
+      Where it touches: value encoding for the new type (`Compressor`,
+      `Codecs`, `Properties/Types` validation — `IsValid` and `FixValue`),
+      replication of values (the id is plain data, so nothing new on the
+      wire beyond the type tag), `Properties.Display`, and permissions (an
+      `Object` property is written like any other). Links cannot drive an
+      instance property from it; say so at registration.
+
+      Duplicating has to remap: `Objects:Duplicate` and a transaction's
+      `Duplicate` (`Objects/Shared.Snapshot`, `Transactions/Shared`) copy the
+      stored id, so a duplicated button still points at the *original* door —
+      correct for one object, wrong for a group duplicated together. A group
+      duplicate should remap references that point inside the group and keep
+      the rest. *Ask* whether group duplication belongs in this item or in
+      prefab placement below.
+
+      Constraints: a reference only names objects in the same copy.
+      Cross-copy and cross-scene references are out of scope — the id would
+      mean nothing after either scene is loaded somewhere else. *Ask* whether
+      a type should be able to restrict what an `Object` property may point at
+      (`Constraints = {Types = {Door}}`), which is the natural first
+      constraint.
+
+- [ ] **Object added / removed signals on the server.** The client has
+      `Objects:OnAdded` / `OnRemoved` (`src/Objects/Client.luau`, built on
+      `src/Listeners.luau`); the server has neither, so server scripts that
+      drive objects — a spinner reading its speed — have to poll
+      `GetWorkspace()`. Mirror the client: fire added at the end of
+      `Construct` in `src/Objects/Server.luau` once the object is filed in the
+      workspace and its copy, and removed at the end of `Teardown`. Note that
+      a scene load builds objects with `Announce = false` and announces them
+      in bulk; the signal is about the object existing, not about packets, so
+      it fires either way. Small; README gets a line beside the client's.
+
+- [ ] **Placing a prefab into an existing copy.** A pack loads only as a whole
+      new copy today (`Read` in `src/Scenes/Server.luau`, which restores each
+      object under its saved local id). Pasting a saved group of objects into
+      a level being edited needs the opposite: fresh local ids minted by the
+      target copy's scene, and — once object references exist — references
+      inside the pack remapped to the new ids. Server side first
+      (`copy:Place(pack)` or similar, returning the new objects), then a
+      transaction step so a client can place one through create rights, then
+      the client-owned-scene equivalent. Undo should see a placement as one
+      step; recording it as a transaction gives that for free. Depends on
+      object references for the remapping.
+
+- [ ] **Small edges left open.** Each is a decision as much as a fix — *Ask*
+      before doing any of them.
+      - **A retired id can be claimed again by `CustomId`.** `IdPool` never
+        hands a released id out on its own when recycling is off, but
+        `Claim(id)` with an explicit id only checks `Used`, so unregistering a
+        property and registering a new one with `CustomId` set to the old id
+        reuses it — the corruption the comment in `src/IdPool.luau` warns
+        about. Fix is a retired set checked by explicit claims; the question
+        is whether re-registering the *same* thing under its old id is a
+        legitimate workflow worth an escape hatch.
+      - **Evicting a scene's last admitted player makes it public**, and
+        reveals it to everyone including the player just evicted, because an
+        empty list means public. Documented in the README; a private flag
+        separate from the list would remove the edge.
+      - **Locks outlive the rights that took them.** A player evicted or
+        stripped of edit rights keeps their locks, and nobody else can edit
+        those objects until they release, leave, or the server calls
+        `Objects:Unlock`. Releasing a player's locks in a scene when they are
+        withdrawn from it (`Withdraw` in `src/Scenes/Server.luau`) or lose edit
+        rights on it (`Permissions:GrantOn` / `RevokeOn`) would close it.
+      - **Creates and destroys in client-owned scenes are not undoable**, and
+        neither is a lone `Object:Destroy`; `History` only records
+        transactions and single sets. Local scene creates could be recorded
+        from `Objects:OnAdded` / `OnRemoved` filtered to `Local` objects.
 
 ## Done
 
