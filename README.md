@@ -106,19 +106,34 @@ counts as `"Admitted"`, with a warning.
 It's refused while any object of the type is live, and it releases the
 properties the type was holding. Like property ids, the id is never reused.
 
-On the client, `Objects:OnAdded` and `Objects:OnRemoved` fire for every object
-that appears or goes: replicated ones, ones in scenes the client owns, and ones
-it draws for an opened copy. An added object is already filed, so `Objects:Get`
-finds it. A removed one is already torn down and reports `Destroyed`, but still
-carries its ids. Both return a disconnect function. `OnAdded` is also handed
-whether the object was **restored** — read back from a pack under the id it was
-saved with, rather than created by anyone.
+`Objects:OnAdded` and `Objects:OnRemoved` fire on **both sides** for every
+object that appears or goes, so neither a panel nor a server script has to poll
+`GetWorkspace()` to notice one.
 
 ```lua
-local stop = Prism.Objects:OnAdded(function(object)
+local stop = Prism.Objects:OnAdded(function(object, restored)
     outliner:Add(object)
 end)
 ```
+
+On the server that is every object created, restored by a scene load, revived
+from a suspend, destroyed, suspended, or taken away with the copy that held it.
+On the client it is every object replicated to it, built in a scene it owns, or
+drawn for an opened copy.
+
+An added object is already filed, so `Objects:Get` and `copy:Find` both answer
+for it. A removed one is already torn down and reports `Destroyed`, but still
+carries its ids. Both return a disconnect function.
+
+`OnAdded` is also handed whether the object was **restored** — read back from a
+pack under the id it was saved with, rather than created by anyone. Loading a
+level is one of these per object and is not the same event as somebody placing
+one; the history uses exactly this distinction to keep a level load out of the
+undo stack.
+
+The signals are not the packets. A scene load builds its objects silently and
+sends them in one batch afterwards; `OnAdded` fires either way, because it is
+about the object existing rather than about anybody being told.
 
 ### Locks
 

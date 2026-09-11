@@ -45,6 +45,37 @@ const Locks: {[RuntimeId]: {UserId: number, Holder: any}} = {}
 -- as the new one.
 const Ids = IdPool.new(nil, false)
 
+-- Every object appearing here and going, however it came and however it went:
+-- created, restored by a scene load, revived from a suspend, destroyed,
+-- suspended, or taken away with the copy that held it. Server scripts that
+-- drive objects -- a spinner reading its speed -- used to poll GetWorkspace to
+-- notice any of it.
+--
+-- The client's twin, down to the argument: Restored says the object came back
+-- from a pack under the id it was saved with, which is a copy reading itself in
+-- rather than anything anyone did. It is the difference between an editor
+-- listing a new object and an editor listing a level.
+--
+-- Deliberately not the same thing as the packet that announces an object. A
+-- scene load builds its objects silently and sends them in bulk afterwards;
+-- these fire either way, because they are about the object existing rather than
+-- about anybody being told.
+const Added: {(Obj: Object, Restored: boolean) -> ()} = {}
+const Removed: {(Obj: Object) -> ()} = {}
+
+-- Fired once the object is filed in the workspace and in its copy, so a
+-- listener can look it up either way straight off.
+function Objects:OnAdded(Callback: (Obj: Object, Restored: boolean) -> ()): () -> ()
+    return Listeners.Watch(Added, Callback, "objects appearing")
+end
+
+-- Fired once the object has left both, so it already reports Destroyed and is
+-- nowhere to be found. It still carries its ids, which is what a listener needs
+-- to drop whatever it was keeping for it.
+function Objects:OnRemoved(Callback: (Obj: Object) -> ()): () -> ()
+    return Listeners.Watch(Removed, Callback, "objects going")
+end
+
 -- Whether an object's data goes to every player or only to the ones its scene
 -- admits. A type that is somehow not registered answers Admitted, which sends
 -- nothing to anybody not already owed everything.
@@ -168,6 +199,10 @@ const function Withdraw(self: Object, Announce: boolean)
     self.GetProperty = Shared.Destroyed.GetProperty
     self.OnChange = Shared.Destroyed.OnChange
     self.Destroy = Shared.Destroyed.Destroy
+
+    -- Last, so a listener is handed an object that is already gone from
+    -- everywhere it can be looked up rather than one halfway out.
+    Listeners.Notify(Removed, self)
 end
 
 -- The part that cannot be taken back: the values go, the part goes, and with
@@ -614,7 +649,7 @@ end
 -- together with the instance and a client that only ever sees the part -- never
 -- the reference sent beside the object -- can still find its owner. None at all
 -- in an opened copy, whose parts each admitted client draws.
-const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: boolean)
+const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: boolean, Restored: boolean?)
     -- Already holding one means this object has been here before and was
     -- withdrawn rather than destroyed: its part was parented out of the world
     -- and kept, so it goes back rather than being cloned again. Cloning would
@@ -681,6 +716,9 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
             Inst
         )
     end
+
+    -- After the packet, and fired whether or not there was one.
+    Listeners.Notify(Added, Obj, Restored == true)
 end
 
 -- InitialValues are applied before the links are wired and before the broadcast.
@@ -800,7 +838,9 @@ const function Construct(
     Obj.Properties = Props
     Obj.Names = Shared.BuildNameMap(Ref.Properties, Props)
 
-    Enter(Obj, Ref, Instance_, Announce)
+    -- Restored when it was given the id it was saved under, which is a copy
+    -- reading its pack rather than anybody creating anything.
+    Enter(Obj, Ref, Instance_, Announce, LocalId ~= nil)
     return Obj :: any
 end
 

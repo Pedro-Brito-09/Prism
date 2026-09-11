@@ -44,20 +44,9 @@ In the order to build them. Each is described well enough to start without
 the conversation that produced it; anything marked *Ask* is a decision that is
 Pedro's to make before or while building.
 
-- [ ] **Object added / removed signals on the server.** Next up. The client has
-      `Objects:OnAdded` / `OnRemoved` (`src/Objects/Client.luau`, built on
-      `src/Listeners.luau`); the server has neither, so server scripts that
-      drive objects — a spinner reading its speed — have to poll
-      `GetWorkspace()`. Mirror the client: fire added at the end of
-      `Construct` in `src/Objects/Server.luau` once the object is filed in the
-      workspace and its copy, and removed at the end of `Teardown`. Note that
-      a scene load builds objects with `Announce = false` and announces them
-      in bulk; the signal is about the object existing, not about packets, so
-      it fires either way. Small; README gets a line beside the client's.
-
-- [ ] **Placing a prefab into an existing copy.** A pack loads only as a whole
-      new copy today (`Read` in `src/Scenes/Server.luau`, which restores each
-      object under its saved local id). Pasting a saved group of objects into
+- [ ] **Placing a prefab into an existing copy.** Next up. A pack loads only as
+      a whole new copy today (`Read` in `src/Scenes/Server.luau`, which restores
+      each object under its saved local id). Pasting a saved group of objects into
       a level being edited needs the opposite: fresh local ids minted by the
       target copy's scene, and references inside the pack remapped to the new
       ids — the same remap `Objects:DuplicateGroup` does, over a pack rather
@@ -89,6 +78,17 @@ Pedro's to make before or while building.
         rights on it (`Permissions:GrantOn` / `RevokeOn`) would close it.
 
 ## Done
+
+- [x] **Object added / removed signals on the server.** `Objects:OnAdded` and
+      `OnRemoved`, mirroring the client's down to the `Restored` argument, so a
+      server script driving objects no longer polls `GetWorkspace`. They hang
+      off `Enter` and `Withdraw` rather than off `Construct` and `Teardown`,
+      which is where the item expected them: those two are now the only places
+      an object joins or leaves the world, so a revived object announces itself
+      exactly as a newly built one does and a suspended one goes exactly as a
+      destroyed one does -- which is the whole point of a signal about
+      existing rather than about packets. A scene load still fires one per
+      object while sending them in a single batch.
 
 - [x] **A step holds what it took.** History moved to where the objects are:
       the server keeps per-player stacks for its own scenes, the client keeps
