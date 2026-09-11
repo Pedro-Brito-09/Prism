@@ -64,13 +64,9 @@ function Properties.Unretain(Identifier: PropertyIdentifier)
 end
 
 function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
-    const Requested = if Config.CustomId ~= nil
-        then IdPool.Normalize(Config.CustomId, "property")
-        else nil
-
-    const Identifier = Ids:Claim(Requested)
+    const Identifier = Ids:Claim()
     if not Identifier then
-        Logger:Warn(`There's already a property registered with id {Requested}.`)
+        Logger:Warn("The property id pool is exhausted.")
         return
     end
 

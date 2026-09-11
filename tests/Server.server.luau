@@ -648,15 +648,17 @@ T:Test("a CustomEnum property validates and round trips", function()
     T:Eq(Back.Parent, "TestShapes", "parent preserved")
 end)
 
-T:Test("refuses a duplicate custom id", function()
-    const Taken = Properties:Register({
-        Name = "TestDuplicate",
-        Type = "Bool",
-        DefaultValue = false,
-        CustomId = TitleId,
-    })
+T:Test("ids are the pool's to give, never the caller's to ask for", function()
+    -- There is no way to name the id a registration gets. An explicit claim
+    -- only ever checked whether an id was in use now, not whether it had been,
+    -- so asking for a retired one was a way to make every saved record carrying
+    -- it decode as something else.
+    const First = Properties:Register({Name = "TestPoolA", Type = "Bool", DefaultValue = false})
+    const Second = Properties:Register({Name = "TestPoolB", Type = "Bool", DefaultValue = false})
 
-    T:Eq(Taken, nil, "duplicate refused")
+    T:Ok(First and Second, "both registered")
+    T:Ok(First ~= Second, "under ids of their own")
+    T:Ok(First ~= TitleId and Second ~= TitleId, "and never one already spoken for")
 end)
 
 T:Test("instances start at the registry default", function()
@@ -1230,18 +1232,13 @@ T:Test("objects land in the default scene when none is named", function()
     T:Eq(Live:Find(Obj.LocalId), nil, "and lets go on destroy")
 end)
 
-T:Test("refuses a duplicate name and a duplicate id", function()
+T:Test("refuses a duplicate name", function()
     const First = Scenes.new({Name = "TestDuplicate"})
     T:Ok(First, "registered")
 
     T:Eq(Scenes.new({Name = "TestDuplicate"}), nil, "same name refused")
 
-    const Fixed = Scenes.new({Name = "TestFixedId", CustomId = 4242})
-    T:Eq(Fixed.Id, 4242, "custom id honoured")
-    T:Eq(Scenes.new({Name = "TestFixedIdAgain", CustomId = 4242}), nil, "same id refused")
-
     First:Destroy()
-    Fixed:Destroy()
 end)
 
 T:Test("local ids are per scene, so two scenes reuse the same numbers", function()
@@ -1534,19 +1531,31 @@ T:Test("a scene that has admitted nobody is public", function()
     T:Ok(Scene:IsPublic(), "public by default")
     T:Ok(Scene:Admits(1), "so it admits anyone")
 
+    -- A list on a public scene is inert: privacy is a flag now, not something
+    -- read off the list, so admitting somebody does not close the scene.
     Scene:Admit(1)
-    T:Ok(not Scene:IsPublic(), "one admission makes it private")
+    T:Ok(Scene:IsPublic(), "still public")
+    T:Ok(Scene:Admits(2), "and still everybody's")
+
+    Scene:SetPrivate(true)
+    T:Ok(not Scene:IsPublic(), "closed")
     T:Ok(Scene:Admits(1), "to the one admitted")
     T:Ok(not Scene:Admits(2), "and to nobody else")
 
+    -- The edge this closes: evicting the last admitted player used to throw the
+    -- scene open, to everybody, including the person just shut out of it.
     Scene:Evict(1)
-    T:Ok(Scene:IsPublic(), "evicting the last makes it public again")
+    T:Ok(not Scene:IsPublic(), "evicting the last leaves it closed")
+    T:Ok(not Scene:Admits(1), "admitting nobody at all")
+
+    Scene:SetPrivate(false)
+    T:Ok(Scene:IsPublic(), "and opening it is its own act")
 
     Scene:Destroy()
 end)
 
 T:Test("admission takes a player or a user id, and belongs to the scene", function()
-    const Scene = Scenes.new({Name = "TestAdmitted", Admitted = {1, 2}})
+    const Scene = Scenes.new({Name = "TestAdmitted", Private = true, Admitted = {1, 2}})
     T:Eq(#Scene:GetAdmitted(), 2, "admitted as it was registered")
 
     Scene:Admit(2)
@@ -2166,6 +2175,73 @@ T:Test("a lock keeps everyone else's edits off an object", function()
         Default:Revoke(Plr)
         Permissions:Revoke(Plr)
     end
+end)
+
+T:Test("a hold does not need a player", function()
+    const Scene = Scenes.new({Name = "HolderRoom"}) :: any
+    const Copy = Scene:Load()
+    const Door = Copy:Create(BareId)
+    const Tool = {}
+
+    -- Anything at all. The server holding an object while it animates one used
+    -- to mean inventing a player to hold it with.
+    T:Ok(Objects:Lock({Door}, Tool), "held by a table standing for nobody")
+    T:Ok(Objects:IsLocked(Door), "held")
+    T:Eq(Objects:GetLock(Door), nil, "by nobody with a user id")
+    T:Eq(Objects:GetHolder(Door), Tool, "by that")
+
+    T:Ok(Objects.LockedAgainst(Door, Ghost(-7000)), "against everybody else")
+    T:Ok(not Objects.LockedAgainst(Door, Tool), "and not against itself")
+
+    T:Ok(Objects:Unlock({Door}, Tool), "released by the same holder")
+    T:Ok(not Objects:IsLocked(Door), "free")
+
+    Scene:Destroy()
+end)
+
+T:Test("a hold by a user id and by the player it names are one hold", function()
+    const Scene = Scenes.new({Name = "HolderIdRoom"}) :: any
+    const Copy = Scene:Load()
+    const Door = Copy:Create(BareId)
+
+    T:Ok(Objects:Lock({Door}, -7001), "held by a bare user id")
+    T:Eq(Objects:GetLock(Door), -7001, "which is who has it")
+    T:Ok(not Objects.LockedAgainst(Door, Ghost(-7001)), "the same person either way")
+    T:Ok(Objects.LockedAgainst(Door, Ghost(-7002)), "and somebody else is somebody else")
+
+    Objects:Unlock({Door})
+    Scene:Destroy()
+end)
+
+T:Test("a hold goes with the admission it was taken under", function()
+    const Scene = Scenes.new({Name = "HolderEvicted", Private = true, Admitted = {-7003}}) :: any
+    const Copy = Scene:Load()
+    const Door = Copy:Create(BareId)
+
+    T:Ok(Objects:Lock({Door}, -7003), "held")
+
+    Scene:Evict(-7003)
+
+    -- Shut out of the room while still holding something in it is a way to stop
+    -- everybody else working without being able to work yourself.
+    T:Ok(not Objects:IsLocked(Door), "and let go when they were shut out")
+
+    Scene:Destroy()
+end)
+
+T:Test("a hold goes with the right that took it", function()
+    const Scene = Scenes.new({Name = "HolderRevoked"}) :: any
+    const Copy = Scene:Load()
+    const Door = Copy:Create(BareId)
+    const Plr = Ghost(-7004)
+
+    Scene:Grant(Plr, "TestBulk")
+    T:Ok(Objects:Lock({Door}, Plr), "held while they could edit")
+
+    Scene:Revoke(Plr)
+    T:Ok(not Objects:IsLocked(Door), "and let go when they no longer could")
+
+    Scene:Destroy()
 end)
 
 --=============================================================================
@@ -3587,11 +3663,11 @@ ReferenceButton:Set(TargetId, ReferenceDoor)
 -- checks it is sent the first object and neither the second nor the scene's
 -- name. The player is admitted to the second as they arrive, and evicted from
 -- it when the client writes the evict marker on the editable fixture.
-const HiddenCopy = Scenes.new({Name = "FixtureHidden", Admitted = {1}}):Load()
+const HiddenCopy = Scenes.new({Name = "FixtureHidden", Private = true, Admitted = {1}}):Load()
 HiddenCopy:Create(BareId, {[TitleId] = "FixtureHiddenScenery"})
 HiddenCopy:Create(PrivateId, {[TitleId] = "FixtureHiddenPrivate"})
 
-const AdmittedScene = Scenes.new({Name = "FixtureAdmitted", Admitted = {1}})
+const AdmittedScene = Scenes.new({Name = "FixtureAdmitted", Private = true, Admitted = {1}})
 const AdmittedCopy = AdmittedScene:Load()
 AdmittedCopy:Create(BareId, {[TitleId] = "FixtureAdmittedScenery"})
 AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmittedPrivate"})
@@ -3599,7 +3675,7 @@ AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmittedPrivate"})
 -- A copy the server opened rather than loaded, holding an object whose template
 -- replicates. The server builds no part for it; the test player, admitted as
 -- they arrive, draws one.
-const OpenedScene = Scenes.new({Name = "FixtureOpened", Admitted = {1}})
+const OpenedScene = Scenes.new({Name = "FixtureOpened", Private = true, Admitted = {1}})
 OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
 
 -- A property and a type the client watches go. Registered here so they reach

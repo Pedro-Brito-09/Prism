@@ -16,25 +16,21 @@ export type IdPool = {
     Used: {[number]: true},
     Free: {[number]: true},
 
-    Claim: (self: IdPool, Id: number?) -> number?,
+    Claim: (self: IdPool) -> number?,
     Release: (self: IdPool, Id: number) -> (),
     IsUsed: (self: IdPool, Id: number) -> boolean,
 }
 
 const IdPool = {}
 
-const function __claim(self: IdPool, Id: number?): number?
-    if Id then
-        if self.Used[Id] then
-            return nil
-        end
-
-        self.Used[Id] = true
-        self.Free[Id] = nil
-        self.Counter = math.max(self.Counter, Id)
-        return Id
-    end
-
+-- The pool hands out ids and is never told which one to hand out. It used to
+-- take one, for registries that wanted to pin an id, and that was a way to
+-- reuse a retired one: an explicit claim only checked whether the id was in use
+-- now, not whether it had ever been. Unregister a Number property called Plays,
+-- register a Number called Rating under its old id, and every saved record
+-- applies its Plays value as a Rating -- the types match, so nothing detects
+-- it. Not being able to ask is what makes that unreachable.
+const function __claim(self: IdPool): number?
     const Reused = next(self.Free)
     if Reused then
         self.Free[Reused] = nil
@@ -89,29 +85,6 @@ function IdPool.new(Max: number?, Recycle: boolean?): IdPool
     self.Release = __release
     self.IsUsed = __is_used
     return self :: IdPool
-end
-
--- Shared validation for user supplied ids. Rejects non integers, negatives and
--- anything past the u16 the wire format uses, all of which used to reach
--- buffer.writeu16 and either throw or silently wrap.
-function IdPool.Normalize(Value: any, Kind: string, Max: number?): number?
-    const Number = tonumber(Value)
-    if not Number then
-        Logger:Warn(`Custom {Kind} id must be an integer, got {Value}. Using the next free id instead.`)
-        return nil
-    end
-
-    const Floored = math.floor(Number)
-    if Floored ~= Number then
-        Logger:Warn(`Custom {Kind} id must be an integer, got {Number}. Using {Floored} instead.`)
-    end
-
-    if Floored < 1 or Floored > (Max or 65535) then
-        Logger:Warn(`Custom {Kind} id must be between 1 and {Max or 65535}, got {Floored}. Using the next free id instead.`)
-        return nil
-    end
-
-    return Floored
 end
 
 return IdPool

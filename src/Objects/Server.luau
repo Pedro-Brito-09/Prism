@@ -38,7 +38,15 @@ const Workspace: {[RuntimeId]: Object} = {}
 
 -- Who holds each locked object: the holder's user id, and the connection the
 -- lock was taken on, which is what lets it go with the player who took it.
-const Locks: {[RuntimeId]: {UserId: number, Holder: any}} = {}
+-- Who holds each locked object. The holder is whatever was handed in -- a
+-- Player, a table standing in for one, a module, a string naming a tool -- and
+-- UserId is filled in only where that resolves to a person, which is the part a
+-- client can be told about.
+--
+-- A hold used to require a player, so the server holding an object meant
+-- inventing a fake one. Nothing about a hold needs a person: it says this is
+-- being worked on, leave it alone.
+const Locks: {[RuntimeId]: {UserId: number?, Holder: any}} = {}
 -- Never recycled, for the same reason property ids are not: a registry id is
 -- written into every saved object as its Parent, so handing the same id to a
 -- different object type later makes every stored object of the old type decode
@@ -255,13 +263,9 @@ const function ToRegistryPayload(Registry: ObjectRegistry)
 end
 
 function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
-    const Requested = if Config.CustomId ~= nil
-        then IdPool.Normalize(Config.CustomId, "object")
-        else nil
-
-    const Identifier = Ids:Claim(Requested)
+    const Identifier = Ids:Claim()
     if not Identifier then
-        Logger:Warn(`There's already an object registered with id {Requested}.`)
+        Logger:Warn("The object type id pool is exhausted.")
         return
     end
 
@@ -1197,9 +1201,17 @@ end
 -- The most one request may name, for the same reason a transaction has a cap.
 const MAX_LOCKS = 1024
 
+-- The person a holder stands for, or nil where it stands for nobody. A bare
+-- number is a user id, the way it is everywhere else a person is named -- Admit,
+-- Evict and Grant all take a Player or a user id -- so releasing what somebody
+-- holds works from either.
 const function UserIdOf(Who: any): number?
     if typeof(Who) == "Instance" and Who:IsA("Player") then
         return (Who :: Player).UserId
+    end
+
+    if type(Who) == "number" then
+        return Who
     end
 
     if type(Who) == "table" and type(Who.UserId) == "number" then
@@ -1211,41 +1223,59 @@ end
 
 -- Who holds what, to the players each object's scene admits. Zero means free.
 const function AnnounceLocks(Changed: {Object})
-    const ByScene: {[Types.SceneIdentifier]: {Ids: {RuntimeId}, Holders: {number}}} = {}
+    const ByScene: {[Types.SceneIdentifier]: {Ids: {RuntimeId}, Holders: {number}, Held: {boolean}}} = {}
 
     for _, Obj in Changed do
         local Batch = ByScene[Obj.Scene]
         if not Batch then
-            Batch = {Ids = {}, Holders = {}}
+            Batch = {Ids = {}, Holders = {}, Held = {}}
             ByScene[Obj.Scene] = Batch
         end
 
         const Held = Locks[Obj.RuntimeId]
         table.insert(Batch.Ids, Obj.RuntimeId)
-        table.insert(Batch.Holders, if Held then Held.UserId else 0)
+
+        -- Zero where the holder is not a person. Held is what says whether
+        -- there is a hold, so zero is a user id nobody has rather than a way of
+        -- saying free.
+        table.insert(Batch.Holders, if Held then Held.UserId or 0 else 0)
+        table.insert(Batch.Held, Held ~= nil)
     end
 
     for Scene, Batch in ByScene do
-        Audience.Fire(Network.LocksChanged, Scene, "Admitted", Batch.Ids, Batch.Holders)
+        Audience.Fire(Network.LocksChanged, Scene, "Admitted", Batch.Ids, Batch.Holders, Batch.Held)
     end
 end
 
 -- Takes every object named for Who, or none of them: an object someone else
 -- holds refuses the lot, so a multi-object drag never ends up half held.
 -- Taking one Who already holds is not a refusal.
-function Objects:Lock(List: {Object}, Who: any): boolean
+-- Whether two holders are the same one. By user id where both resolve to a
+-- person, so a Player and a table standing in for the same player are one
+-- holder; by identity otherwise, which is what lets anything at all hold an
+-- object.
+const function SameHolder(Held: {UserId: number?, Holder: any}, Who: any): boolean
     const UserId = UserIdOf(Who)
-    if not UserId then
+    if UserId and Held.UserId then
+        return Held.UserId == UserId
+    end
+
+    return Held.Holder == Who
+end
+
+function Objects:Lock(List: {Object}, Who: any): boolean
+    if Who == nil then
         return false
     end
 
     for _, Obj in List do
         const Held = Locks[Obj.RuntimeId]
-        if Obj.Destroyed or (Held and Held.UserId ~= UserId) then
+        if Obj.Destroyed or (Held and not SameHolder(Held, Who)) then
             return false
         end
     end
 
+    const UserId = UserIdOf(Who)
     for _, Obj in List do
         Locks[Obj.RuntimeId] = {UserId = UserId, Holder = Who}
     end
@@ -1258,7 +1288,6 @@ end
 -- server releasing anyone's. Answers false if any named object is held by
 -- someone else, which stays theirs; the rest are released regardless.
 function Objects:Unlock(List: {Object}, Who: any?): boolean
-    const UserId = if Who ~= nil then UserIdOf(Who) else nil
     const Released = {}
     local All = true
 
@@ -1268,7 +1297,7 @@ function Objects:Unlock(List: {Object}, Who: any?): boolean
             continue
         end
 
-        if Who ~= nil and Held.UserId ~= UserId then
+        if Who ~= nil and not SameHolder(Held, Who) then
             All = false
             continue
         end
@@ -1285,16 +1314,54 @@ function Objects:Unlock(List: {Object}, Who: any?): boolean
 end
 
 -- The user id holding an object, or nil when it is free.
+-- The user id holding an object, nil when it is free or held by something that
+-- is not a person. GetHolder is the whole answer; this is the part a client can
+-- be told and the part a game usually wants.
 function Objects:GetLock(Obj: Object): number?
     const Held = Locks[Obj.RuntimeId]
     return if Held then Held.UserId else nil
 end
 
+function Objects:GetHolder(Obj: Object): any?
+    const Held = Locks[Obj.RuntimeId]
+    return if Held then Held.Holder else nil
+end
+
+function Objects:IsLocked(Obj: Object): boolean
+    return Locks[Obj.RuntimeId] ~= nil
+end
+
+-- Everything one holder has, let go at once. What a player being evicted from a
+-- scene comes down to, and what losing the right to edit one comes down to:
+-- both leave somebody holding objects they may no longer touch, and nobody else
+-- able to touch them either.
+--
+-- Scoped to a scene when one is named, because being shut out of one room is
+-- not being shut out of the others.
+function Objects.ReleaseFor(Who: any, Scene: Types.SceneIdentifier?)
+    const Released = {}
+
+    for Identifier, Held in Locks do
+        if not SameHolder(Held, Who) then
+            continue
+        end
+
+        const Obj = Workspace[Identifier]
+        if Obj and (Scene == nil or Obj.Scene == Scene) then
+            table.insert(Released, Obj)
+        end
+    end
+
+    if #Released > 0 then
+        Objects:Unlock(Released)
+    end
+end
+
 -- Whether someone other than Plr holds the object, which is what every edit
 -- path asks before it lets one through.
-function Objects.LockedAgainst(Obj: Object, Plr: any): boolean
+function Objects.LockedAgainst(Obj: Object, Who: any): boolean
     const Held = Locks[Obj.RuntimeId]
-    return Held ~= nil and Held.UserId ~= UserIdOf(Plr)
+    return Held ~= nil and not SameHolder(Held, Who)
 end
 
 -- The locks among some objects, for a player a scene is being revealed to:
@@ -1362,20 +1429,27 @@ Network.Unlock.OnInvoke = function(Plr: Player, Ids: {RuntimeId}): boolean
 end
 
 -- A lock goes with the connection it was taken on.
+-- A hold goes with whoever had it. Leaving is the obvious way to lose one;
+-- Permissions below is the other, and Scenes calls ReleaseFor when it evicts
+-- somebody.
 Players.PlayerRemoving:Connect(function(Plr: Player)
-    const Released = {}
-    for Identifier, Held in Locks do
-        if Held.Holder == Plr then
-            const Obj = Workspace[Identifier]
-            if Obj then
-                table.insert(Released, Obj)
-            end
-        end
+    Objects.ReleaseFor(Plr)
+end)
+
+-- Rights over a scene changed for somebody. A hold is worth having only where
+-- an edit would be allowed, so one held by a player who may no longer edit
+-- there is a hold nobody benefits from and nobody else can take: they keep the
+-- object to themselves without being able to do anything with it.
+Permissions.OnSceneRights(function(UserId: number, Scene: Types.SceneIdentifier)
+    -- By user id throughout. Asking Players for the person would answer nil for
+    -- anybody not connected, and rights are granted to people who have not
+    -- arrived yet -- Scenes.new takes a whole collaborator list.
+    const Rights = Permissions:GetOn(Scene, UserId)
+    if Rights and Rights.CanEdit then
+        return
     end
 
-    if #Released > 0 then
-        Objects:Unlock(Released)
-    end
+    Objects.ReleaseFor(UserId, Scene)
 end)
 
 Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer): boolean

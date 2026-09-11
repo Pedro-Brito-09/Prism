@@ -254,11 +254,16 @@ const Channels: {Channel} = {
     },
 
     {
-        -- Who holds which object now, to the players a scene admits. A user id
-        -- of zero means free; ids are signed because Studio's test players are
-        -- negative.
+        -- Who holds which object now, to the players a scene admits.
+        --
+        -- Three lists rather than two because a holder need not be a player:
+        -- the server can hold an object while it animates one, and a tool can
+        -- hold one on nobody's behalf. Held says whether there is a hold at
+        -- all, and the user id names who has it -- zero where the holder is not
+        -- a player and there is no id to give. Ids are signed because Studio's
+        -- test players are negative.
         Name = "Objects.LocksChanged",
-        Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.SignedVarint)}, -- RuntimeIds, UserIds
+        Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.SignedVarint), Codecs.Array(Codecs.Bool)},
     },
 
     {
