@@ -10,9 +10,6 @@ reads right, never that it was run with a player in it.
 
 ## Queued
 
-- [ ] **Property display metadata.** `Display = {Category, Order, Description,
-      Hidden, ReadOnly}` on the registry, which already replicates — enough for
-      a property panel to be generated rather than written per property.
 - [ ] **`Duplicate(object)`.** `Objects.new` already accepts initial values.
 - [ ] **Scene history: diff, merge, revert.** Two properties the format already
       has make this reachable rather than speculative. A copy serialises
@@ -30,6 +27,15 @@ reads right, never that it was run with a player in it.
       object can come back under the id it had.
 
 ## Done
+
+- [x] **Property display metadata.** `Display = {Category, Order,
+      Description, Hidden, ReadOnly}` on the registry, filled in at
+      registration and replicated with it — including for custom enum
+      properties, whose payload is built separately. `Properties:Layout(ids)`
+      on either side groups a list by category and sorts it by order, ties
+      kept in the object type's own order, so a panel is generated rather than
+      written per property. `ReadOnly` is presentation only; a property
+      blacklist in Permissions is what refuses the write.
 
 - [x] **Per object locks and presence.** Explicit rather than tied to the
       selection: `Objects:Lock` and `Unlock`, one object or a list, all or

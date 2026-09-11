@@ -28,6 +28,35 @@ Types: `Text`, `Number`, `Bool`, `Color`, `Vector`, `CFrame`, `Enum`, `CustomEnu
 Constraints reject or clamp depending on the constraint: `MinLength` rejects an
 invalid value, `MinValue`/`MaxValue`/`MaxLength` clamp it into range.
 
+`Display` says how a property presents itself in an editor, so a property panel
+can be generated from the registry instead of written by hand for each property.
+It replicates with the registry.
+
+```lua
+local Speed = Prism.Properties:Register({
+    Name = "Speed",
+    Type = "Number",
+    DefaultValue = 1,
+    Display = {Category = "Motion", Order = 2, Description = "Studs a second"},
+})
+
+-- Grouped by category, sorted by Order, hidden properties left out.
+for _, section in Prism.Properties:Layout(Prism.Objects:GetRegistry(object.Parent).Properties) do
+    panel:AddHeader(section.Category)
+    for _, registry in section.Properties do
+        panel:AddField(registry, registry.Display)
+    end
+end
+```
+
+Every field is optional. `Category` defaults to `"General"` and `Order` to 0;
+properties with the same order keep the order the object type lists them in.
+`Hidden` properties are left out of a layout unless you pass `true` as its
+second argument. `ReadOnly` is presentation only: it greys a field out but
+doesn't stop a write. To stop one, put the property in a role's
+`Properties.Blacklist`. A field of the wrong type falls back to its default,
+with a warning.
+
 `Properties:Unregister(id)` drops a property on the server and on every client.
 It's refused while an object type or a database is built on it. The id is never
 handed out again, because saved data names it.

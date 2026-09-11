@@ -97,6 +97,103 @@ const function __destroy<T>(self: Property<T>)
     self.Listeners = nil
 end
 
+--=============================================================================
+-- Display
+--=============================================================================
+
+const DEFAULT_DISPLAY: Types.Display = {
+    Category = "General",
+    Order = 0,
+    Description = nil,
+    Hidden = false,
+    ReadOnly = false,
+}
+
+-- Every field filled in, and a field of the wrong type dropped to its default
+-- with a warning rather than handed to a panel that would draw it wrong.
+function Shared.Display(Config: any, Name: string): Types.Display
+    if Config ~= nil and type(Config) ~= "table" then
+        Logger:Warn(`Property {Name} has a Display that is a {type(Config)}, not a table. Ignored.`)
+        Config = nil
+    end
+
+    const Given = Config or {}
+
+    const function Field(Key: string, Kind: string, Default: any): any
+        const Value = Given[Key]
+        if Value == nil then
+            return Default
+        end
+
+        if type(Value) ~= Kind then
+            Logger:Warn(`Property {Name} has Display.{Key} of type {type(Value)}, expected {Kind}. Ignored.`)
+            return Default
+        end
+
+        return Value
+    end
+
+    return {
+        Category = Field("Category", "string", DEFAULT_DISPLAY.Category),
+        Order = Field("Order", "number", DEFAULT_DISPLAY.Order),
+        Description = Field("Description", "string", nil),
+        Hidden = Field("Hidden", "boolean", DEFAULT_DISPLAY.Hidden),
+        ReadOnly = Field("ReadOnly", "boolean", DEFAULT_DISPLAY.ReadOnly),
+    }
+end
+
+-- Some properties -- usually an object type's list -- as a panel lays them
+-- out: grouped by category, each group sorted by Order, ties kept in the order
+-- they were named. Categories come in the order their first property does, so
+-- the lowest Order anywhere in a category puts it first. Hidden properties are
+-- left out unless asked for, and ids nothing is registered under are skipped.
+function Shared.Layout(
+    Registry: {[PropertyIdentifier]: PropertyRegistry<any>},
+    Ids: {PropertyIdentifier},
+    IncludeHidden: boolean?
+): {Types.Section}
+    const Entries: {{Ref: PropertyRegistry<any>, Display: Types.Display, Index: number}} = {}
+
+    for Index, Id in Ids do
+        const Ref = Registry[Id]
+        if not Ref then
+            continue
+        end
+
+        const Display = Ref.Display or DEFAULT_DISPLAY
+        if Display.Hidden and not IncludeHidden then
+            continue
+        end
+
+        table.insert(Entries, {Ref = Ref, Display = Display, Index = Index})
+    end
+
+    table.sort(Entries, function(A, B)
+        if A.Display.Order ~= B.Display.Order then
+            return A.Display.Order < B.Display.Order
+        end
+
+        return A.Index < B.Index
+    end)
+
+    const Sections: {Types.Section} = {}
+    const ByCategory: {[string]: Types.Section} = {}
+
+    for _, Entry in Entries do
+        const Category = Entry.Display.Category
+        local Section = ByCategory[Category]
+        if not Section then
+            Section = {Category = Category, Properties = {}}
+            ByCategory[Category] = Section
+            table.insert(Sections, Section)
+        end
+
+        table.insert(Section.Properties, Entry.Ref)
+    end
+
+    return Sections
+end
+
 function Shared.new(
     Registry: {[PropertyIdentifier]: PropertyRegistry<any>},
     Reference: PropertyRegistry<any> | PropertyIdentifier

@@ -153,6 +153,23 @@ T:Test("the ready handshake delivered the property registry", function()
     end
 end)
 
+T:Test("display metadata came across with the registry", function()
+    const Speed = FindProperty("TestSpeed")
+    const Spin = FindProperty("TestSpin")
+    T:Ok(Speed and Spin, "the displayed properties arrived")
+
+    if not Speed or not Spin then
+        return
+    end
+
+    const Display = Properties:GetRegistry(Speed).Display
+    T:Eq(Display.Category, "Motion", "category")
+    T:Eq(Display.Description, "Studs a second", "description")
+
+    const Layout = Properties:Layout({Speed, Spin})
+    T:Eq(Layout[1].Properties[1].Id, Spin, "and the client lays it out the same way")
+end)
+
 T:Test("the object registries arrived", function()
     T:Ok(CrateId, "object type arrived")
     T:Ok(BareId, "bare type arrived")

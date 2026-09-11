@@ -41,6 +41,7 @@ const function ToRegistryPayload(Registry: PropertyRegistry<any>): any
         Type = Registry.Type,
         Constraints = Copy,
         DefaultValue = Registry.DefaultValue,
+        Display = Registry.Display,
     }
 end
 
@@ -97,6 +98,10 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     Prop.Constraints = Constraints
     Prop.DefaultValue = Config.DefaultValue
 
+    -- On the registry, which already replicates, so a client builds the same
+    -- panel from the same metadata without being told anything extra.
+    Prop.Display = Shared.Display(Config.Display, Config.Name)
+
     Registered[Identifier] = Prop :: any
     Network.PropertyRegistered:FireAll(ToRegistryPayload(Prop :: any))
     return Identifier
@@ -143,6 +148,11 @@ end
 
 function Properties.new(Reference: PropertyRegistry<any> | PropertyIdentifier): Property<any>
     return Shared.new(Registered, Reference)
+end
+
+-- Some properties as a panel lays them out. See Shared.Layout.
+function Properties:Layout(Ids: {PropertyIdentifier}, IncludeHidden: boolean?): {Types.Section}
+    return Shared.Layout(Registered, Ids, IncludeHidden)
 end
 
 return Properties
