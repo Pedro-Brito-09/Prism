@@ -487,6 +487,37 @@ nothing irreversible happens until everything reversible has already succeeded.
 Two sets on one property are one change by the time it lands, and an object
 destroyed by the same transaction that changed it is announced once, as gone.
 
+## History
+
+Undo and redo, per player, on the client. Each client keeps its own stacks, so
+undo only ever takes back this player's actions.
+
+```lua
+Prism.History:Undo()      -- yields while the reverse transaction flies
+Prism.History:Redo()
+Prism.History:CanUndo()
+Prism.History:OnChange(function() toolbar:Refresh() end)
+```
+
+A step is a committed transaction, or a run of `Object:Set` calls to one
+property with no pause longer than a second, so a drag undoes as one. Undoing
+sends the reverse as a transaction of its own, through the same rights and
+locks as any edit. A create is undone by destroying what it made, a set by
+writing back what it overwrote, and a destroy by making the object again from
+what it held. Objects in scenes the client owns revert on the spot.
+
+If someone else has changed a property since, undo and redo leave that property
+alone and apply the rest of the step. A refused undo stays on the stack. An
+object made again comes back under a new runtime id, and later steps still find
+it. A lone `Object:Destroy` isn't recorded, nor are creates and destroys in
+scenes the client owns; destroy through a transaction to make it undoable. Each
+stack keeps the last 100 steps.
+
+The history is built on two signals you can use yourself:
+`Objects:OnEdited(fn)` fires for this client's own `Object:Set` calls, with the
+values before and after, and `Transactions:OnCommitted(fn)` fires for every
+transaction the server applied, with what it overwrote.
+
 ### On the client
 
 `Commit` yields until the server answers, and applies nothing early. A single

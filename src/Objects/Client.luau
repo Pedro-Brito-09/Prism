@@ -52,6 +52,15 @@ const DrawInto: {[Types.SceneInstanceId]: Folder} = {}
 const Added: {(Obj: Object) -> ()} = {}
 const Removed: {(Obj: Object) -> ()} = {}
 
+-- This client's own edits through Object:Set, with the value either side --
+-- which is what an undo history records. Not changes arriving from the server
+-- or another player, and not a refused set rolling back.
+const Edited: {(Obj: Object, Property: PropertyTypes.PropertyIdentifier, Before: any, After: any) -> ()} = {}
+
+function Objects:OnEdited(Callback: (Obj: Object, Property: PropertyTypes.PropertyIdentifier, Before: any, After: any) -> ()): () -> ()
+    return Listeners.Watch(Edited, Callback, "edits")
+end
+
 -- Fired once the object is filed everywhere it will be, so a listener can look
 -- it up by runtime id or through its copy straight away.
 function Objects:OnAdded(Callback: (Obj: Object) -> ()): () -> ()
@@ -239,6 +248,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         return false
     end
 
+    const Before = Prop.Value
     const Accepted, Changed = Prop:Set(Value)
     if not Accepted then
         return false
@@ -249,6 +259,11 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     if not Changed then
         return true
     end
+
+    -- Told as it is made, like the value is shown. A refusal rolls the value
+    -- back without telling anyone, which leaves an undo of it with nothing to
+    -- do: the property no longer holds what the edit set.
+    Listeners.Notify(Edited, self, Prop.Parent, Before, Prop.Value)
 
     const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
     if not Compressed then
@@ -370,7 +385,13 @@ const function __local_setter(self: Object, Reference: Types.PropertyReference, 
         return false
     end
 
-    return (Prop:Set(Value))
+    const Before = Prop.Value
+    const Accepted, Changed = Prop:Set(Value)
+    if Accepted and Changed then
+        Listeners.Notify(Edited, self, Prop.Parent, Before, Prop.Value)
+    end
+
+    return Accepted
 end
 
 const function __local_destroy(self: Object): boolean

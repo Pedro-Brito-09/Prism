@@ -10,13 +10,19 @@ reads right, never that it was run with a player in it.
 
 ## Queued
 
-- [ ] **Undo / redo.** Transactions are the unit to record, and they already
-      carry the reversal rules: a create is undone by destroying what it made, a
-      set by writing back what it overwrote, and a destroy by neither, which is
-      why it goes last. Identity is no longer the open problem: a resurrected
-      object can come back under the id it had.
+Nothing queued.
 
 ## Done
+
+- [x] **Undo / redo.** `Prism.History` on the client, per player. A step is a
+      committed transaction, or a run of `Object:Set` calls to one property
+      with no pause longer than a second, so a drag undoes as one. Undoing
+      sends the reverse as an untracked transaction through the usual rights
+      and locks; local scenes revert on the spot. A property someone else
+      changed since is skipped and the rest applies. A destroy is undone by
+      making the object again from a snapshot taken as the transaction went,
+      and later steps find it through an alias to its new runtime id. Built on
+      `Objects:OnEdited` and `Transactions:OnCommitted`, both public.
 
 - [x] **`Duplicate(object)`.** `Objects:Duplicate(object, copy?)` on the
       server, into the original's copy unless another is named, with a new

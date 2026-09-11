@@ -993,6 +993,100 @@ end)
 
 --=============================================================================
 
+--=============================================================================
+-- History
+--=============================================================================
+
+T:Describe("History")
+
+const History = Prism.History
+
+T:Test("single sets undo and redo, a run of them as one step", function()
+    const Sandbox = Scenes.new({Name = "ClientHistory"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    History:Clear()
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId, {[TitleId] = "Start"})
+
+    -- Two sets back to back are one drag.
+    Obj:Set(TitleId, "A")
+    Obj:Set(TitleId, "B")
+    T:Ok(History:CanUndo(), "recorded")
+
+    T:Ok(History:Undo(), "undone")
+    T:Eq(Obj:Get(TitleId), "Start", "back to before the run")
+    T:Ok(not History:CanUndo(), "which was one step")
+
+    T:Ok(History:Redo(), "redone")
+    T:Eq(Obj:Get(TitleId), "B", "forward to where the run ended")
+
+    -- A pause ends the run.
+    task.wait(1.1)
+    Obj:Set(TitleId, "C")
+    T:Ok(History:Undo(), "the later edit undone on its own")
+    T:Eq(Obj:Get(TitleId), "B", "leaving the run in place")
+
+    -- A change from elsewhere since is left alone. Setting the property itself
+    -- goes around Object:Set, the way a change arriving from the server does.
+    T:Ok(History:Redo(), "redone again")
+    Obj.Properties[TitleId]:Set("Theirs")
+    T:Ok(History:Undo(), "the undo still goes through")
+    T:Eq(Obj:Get(TitleId), "Theirs", "without writing over it")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
+T:Test("a transaction undoes as its reverse, and redoes", function()
+    if not BareId or not TitleId then
+        T:Ok(false, "no bare registry")
+        return
+    end
+
+    History:Clear()
+    Window()
+
+    const Applied, Created = Transactions.new()
+        :Create(BareId, {[TitleId] = "Undoable"})
+        :Commit()
+
+    T:Ok(Applied, "created")
+
+    const Made = Created[1]
+    T:Eventually(function()
+        return Made and Objects:Get(Made)
+    end, 3, "the object arrived")
+    T:Ok(History:CanUndo(), "and the commit was recorded")
+
+    Window()
+    T:Ok(History:Undo(), "undone")
+    T:Eventually(function()
+        return Objects:Get(Made) == nil
+    end, 3, "the create was taken back")
+
+    Window()
+    T:Ok(History:Redo(), "redone")
+
+    const Again = T:Eventually(function()
+        return FindLiveObject(BareId, TitleId, "Undoable")
+    end, 3, "made again")
+
+    if Again then
+        T:Ok(Again.RuntimeId ~= Made, "under a new runtime id")
+        Window()
+        Again:Destroy()
+    end
+
+    History:Clear()
+end)
+
+--=============================================================================
+
 if not T:Report() then
     error("[ PRISM TEST ] Client suite failed; see the failures above.", 0)
 end

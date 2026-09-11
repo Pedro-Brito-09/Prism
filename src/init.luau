@@ -38,6 +38,10 @@ else
     -- requiring it on the server would pull the client half of the object
     -- pipeline into a server process.
     Prism.Selection = require("@self/Selection")
+
+    -- Client only for the same reason, and because the history it keeps is
+    -- this player's own: it records what this client committed and set.
+    Prism.History = require("@self/History")
 end
 
 Prism.CustomEnum = require("@self/CustomEnum")
