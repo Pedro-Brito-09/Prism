@@ -115,6 +115,13 @@ Pedro's to make before or while building.
       never requires History keeps nothing, so a destroy there is as immediate
       as it ever was.
 
+      A step can also be the game's own: `History:Push` takes the same three
+      verbs and puts them in the same order, so an editor's own actions -- a
+      camera bookmark, a rename in data Prism knows nothing about -- are reached
+      by the same Ctrl+Z, in the place they happened. Either the game's or
+      Prism's, never both in one step. Nothing done inside a custom verb is
+      recorded, or undoing would grow the stack it was shrinking.
+
       Two edges closed with it. A lone `Object:Destroy` is recorded now --
       the channel it comes down is on the side that keeps the stack -- and so
       are creates, destroys and sets in scenes the client owns. A copy reading

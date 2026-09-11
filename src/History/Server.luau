@@ -41,6 +41,7 @@ const ObjectTypes = require("../Objects/Types")
 const Objects = require("../Objects/Server")
 const Audience = require("../Scenes/Audience")
 const Network = require("./Network")
+const Logger = require("../Logger")
 
 export type Object = ObjectTypes.Object
 
@@ -71,9 +72,29 @@ type Entry = {
     After: any,
 }
 
+-- A step the game wrote itself, for the things Prism does not model: a camera
+-- bookmark, a layer renamed in a game's own data, anything an editor wants
+-- Ctrl+Z to reach. Three verbs, the same three every step has, and the game
+-- fills them in.
+--
+-- Clear is optional and is the one worth reading twice: it runs when the step
+-- becomes unreachable -- forked off the redo stack, pushed past the limit, or
+-- the player leaving -- and is where an action that was holding something of
+-- its own lets go of it, exactly as Prism's own steps let go of the objects
+-- they were keeping.
+export type Action = {
+    Undo: () -> (),
+    Redo: () -> (),
+    Clear: (() -> ())?,
+}
+
+-- Either the game's or Prism's, never both. Mixing them would mean deciding
+-- what order a custom verb runs in among entries it knows nothing about, and
+-- an editor that wants both can push two steps.
 type Step = {
     Id: number,
     Entries: {Entry},
+    Custom: Action?,
 
     -- The property a run of single sets is still building, while the step is
     -- on top and recent enough to keep merging into.
@@ -83,6 +104,11 @@ type Step = {
 type Shelf = {
     Undo: {Step},
     Redo: {Step},
+
+    -- One step at a time for this player. Prism's own entries never yield, but
+    -- a custom action is the game's code and may; a second undo starting
+    -- meanwhile would reverse a step the first has not finished with.
+    Busy: boolean?,
 
     -- Step ids are per player and only climb. The client names the step it
     -- believes is on top, and an id that has been reused would let a stale
@@ -96,10 +122,18 @@ type Shelf = {
 -- moved on without them.
 const Shelves: {[Player]: Shelf} = {}
 
+-- Set while a step is being applied, so nothing done in the course of reversing
+-- one is recorded as a new action. Prism's own entries reach past the recorders
+-- anyway -- they write to properties and objects directly -- but a custom
+-- action is the game's code, free to use the ordinary API, and every edit it
+-- made while undoing would otherwise land on the stack on top of the step doing
+-- the undoing.
+local Applying = false
+
 const function ShelfFor(Plr: Player): Shelf
     local Shelf = Shelves[Plr]
     if not Shelf then
-        Shelf = {Undo = {}, Redo = {}, Next = 1}
+        Shelf = {Undo = {}, Redo = {}, Next = 1, Busy = false}
         Shelves[Plr] = Shelf
     end
 
@@ -141,6 +175,22 @@ end
 -- recorded after an undo revived it, and that undo is what moved the first step
 -- onto the redo stack, where the new action clears it.
 const function Clear(Step: Step)
+    const Custom = Step.Custom
+    if Custom then
+        -- The game's, so it is allowed to throw without taking the stack with
+        -- it: this runs while a new action is being recorded or a player is
+        -- leaving, and neither is a good moment to fail.
+        if Custom.Clear then
+            const Ok, Err = pcall(Custom.Clear)
+            if not Ok then
+                Logger:Warn(`A custom history action failed to clear: {Err}`)
+            end
+        end
+
+        Step.Custom = nil
+        return
+    end
+
     for _, Entry in Step.Entries do
         if Entry.Kind ~= "Set" and Entry.Target.Suspended then
             Objects.Dispose(Entry.Target)
@@ -257,6 +307,32 @@ const function Allowed(Plr: Player, Step: Step, Forward: boolean): boolean
 end
 
 const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
+    const Custom = Step.Custom
+    if Custom then
+        -- One action, so one unit of the budget: the game decides what it does,
+        -- and this side has no way to weigh it.
+        if not Permissions:Consume(Plr, 1) then
+            return false
+        end
+
+        -- Recording is off while it runs. A custom verb is free to move objects
+        -- around through the ordinary API, and every one of those would
+        -- otherwise be recorded as a fresh action on top of the step being
+        -- reversed -- a stack that grows every time it is undone.
+        Applying = true
+        const Ok, Err = pcall(if Forward then Custom.Redo else Custom.Undo)
+        Applying = false
+
+        if not Ok then
+            -- Left where it was, like any other refusal, so the player can try
+            -- again once whatever the action needed is there.
+            Logger:Warn(`A custom history action failed and was left on the stack: {Err}`)
+            return false
+        end
+
+        return true
+    end
+
     if not Allowed(Plr, Step, Forward) then
         return false
     end
@@ -266,6 +342,8 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
     if not Permissions:Consume(Plr, #Step.Entries) then
         return false
     end
+
+    Applying = true
 
     const Changes: {{Object: Object, Property: PropertyTypes.PropertyIdentifier, Value: buffer}} = {}
 
@@ -311,6 +389,8 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
         end
     end
 
+    Applying = false
+
     if #Announced > 0 then
         Objects.AnnounceChanged(Announced)
     end
@@ -318,9 +398,9 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
     return true
 end
 
-const function Move(Plr: Player, From: {Step}, To: {Step}, Forward: boolean, Named: number?): boolean
+const function Move(Plr: Player, Shelf: Shelf, From: {Step}, To: {Step}, Forward: boolean, Named: number?): boolean
     const Step = From[#From]
-    if not Step then
+    if not Step or Shelf.Busy then
         return false
     end
 
@@ -333,7 +413,20 @@ const function Move(Plr: Player, From: {Step}, To: {Step}, Forward: boolean, Nam
         return false
     end
 
-    if not Apply(Plr, Step, Forward) then
+    -- Wrapped, and not only to answer the caller: Apply turns recording off
+    -- while it runs, and an error escaping it would leave this player's edits
+    -- going unrecorded for the rest of the session.
+    Shelf.Busy = true
+    const Ok, Result = pcall(Apply, Plr, Step, Forward)
+    Shelf.Busy = false
+    Applying = false
+
+    if not Ok then
+        Logger:Warn(`A history step failed to apply and was left on the stack: {Result}`)
+        return false
+    end
+
+    if not Result then
         return false
     end
 
@@ -356,12 +449,33 @@ end
 -- channel below, which lands here.
 function History:Undo(Plr: Player): boolean
     const Shelf = Shelves[Plr]
-    return if Shelf then Move(Plr, Shelf.Undo, Shelf.Redo, false) else false
+    return if Shelf then Move(Plr, Shelf, Shelf.Undo, Shelf.Redo, false) else false
 end
 
 function History:Redo(Plr: Player): boolean
     const Shelf = Shelves[Plr]
-    return if Shelf then Move(Plr, Shelf.Redo, Shelf.Undo, true) else false
+    return if Shelf then Move(Plr, Shelf, Shelf.Redo, Shelf.Undo, true) else false
+end
+
+-- An action of the game's own, on this player's stack, in the order their own
+-- edits are in: undoing reaches it exactly where it happened. For the things
+-- Prism does not model -- a camera bookmark, a rename in a game's own data --
+-- so that Ctrl+Z means one thing in an editor rather than two.
+--
+-- Push it as the action happens; Undo and Redo are how to take it back and do
+-- it again, and Clear, if it holds anything, is where that goes when the step
+-- can no longer be reached. It costs one action of the player's budget to
+-- reverse, because there is no way from here to know what it does.
+function History:Push(Plr: Player, Action: Action): boolean
+    if type(Action) ~= "table" or type(Action.Undo) ~= "function" or type(Action.Redo) ~= "function" then
+        Logger:Warn("A custom history action needs an Undo and a Redo function.")
+        return false
+    end
+
+    const Shelf = ShelfFor(Plr)
+    Push(Plr, Shelf, {Id = Shelf.Next, Entries = {}, Custom = Action})
+    Shelf.Next += 1
+    return true
 end
 
 function History:CanUndo(Plr: Player): boolean
@@ -410,6 +524,10 @@ end
 -- packet, one permission pass, one thing to take back. Taking the record means
 -- taking the objects its destroys suspended, so this answers true.
 Transactions.OnApplied(function(Plr: Player, Record): boolean
+    if Applying then
+        return false
+    end
+
     const Entries: {Entry} = {}
     local Creates = 0
 
@@ -457,6 +575,10 @@ end)
 -- A single set, and a run of them to one property merged into one step, so a
 -- drag undoes as the drag it was rather than as a hundred frames.
 Objects.OnPlayerEdited(function(Plr, Obj, Property, Before, After)
+    if Applying then
+        return
+    end
+
     const Now = os.clock()
     const Shelf = ShelfFor(Plr)
     const Top = Shelf.Undo[#Shelf.Undo]
@@ -499,7 +621,11 @@ end)
 -- went through neither a transaction nor a set, so the client's history never
 -- saw it. Claiming it here is what keeps the object.
 Objects.OnRetired(function(Plr, Obj): boolean
-    if not Plr then
+    -- Nothing is kept while a step is being applied. A custom action that
+    -- destroys something as part of undoing is destroying it for good, because
+    -- the step it is part of is the thing that would have to bring it back and
+    -- that step is already busy being that.
+    if not Plr or Applying then
         return false
     end
 
@@ -515,12 +641,12 @@ end)
 
 Network.Undo.OnInvoke = function(Plr: Player, Step: number): boolean
     const Shelf = Shelves[Plr]
-    return if Shelf then Move(Plr, Shelf.Undo, Shelf.Redo, false, Step) else false
+    return if Shelf then Move(Plr, Shelf, Shelf.Undo, Shelf.Redo, false, Step) else false
 end
 
 Network.Redo.OnInvoke = function(Plr: Player, Step: number): boolean
     const Shelf = Shelves[Plr]
-    return if Shelf then Move(Plr, Shelf.Redo, Shelf.Undo, true, Step) else false
+    return if Shelf then Move(Plr, Shelf, Shelf.Redo, Shelf.Undo, true, Step) else false
 end
 
 Network.Forget:Connect(function(Plr: Player, RedoOnly: boolean)

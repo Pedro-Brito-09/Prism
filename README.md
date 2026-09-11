@@ -635,6 +635,46 @@ cannot come back, and that entry is skipped.
 On the server, `Prism.History` takes the player: `History:Undo(player)`,
 `Redo`, `CanUndo`, `CanRedo`, `Clear(player)`.
 
+### Actions of your own
+
+Not everything an editor does is an object. Push a step of your own and it sits
+in the same order, so one Ctrl+Z reaches it where it happened:
+
+```lua
+Prism.History:Push({
+    Undo = function() camera:GoTo(before) end,
+    Redo = function() camera:GoTo(after) end,
+})
+```
+
+The same three verbs every step has. `Clear` is optional and is the one to read
+twice: it runs when the step can no longer be reached — forked off the redo
+stack, pushed past the limit, or the player leaving — and is where an action
+holding something of its own lets go of it, exactly as Prism's own steps
+finally destroy the objects they were keeping.
+
+```lua
+local snapshot = Terrain:CopyRegion(region)
+
+Prism.History:Push({
+    Undo = function() Terrain:PasteRegion(snapshot, corner, true) end,
+    Redo = function() Terrain:Clear(region) end,
+    Clear = function() snapshot:Destroy() end,
+})
+```
+
+A step is either yours or Prism's, never both — mixing them would mean deciding
+where your verb runs among entries it knows nothing about, and two pushes say it
+plainly. Pushing one forks the redo stack like any other new action. An `Undo`
+or `Redo` that throws leaves the step on the stack to be tried again, and
+nothing you do inside either one is recorded as a new action.
+
+On the server it takes the player — `History:Push(player, action)` — and costs
+one action of their budget to reverse, since nothing here can weigh what it
+does. A client-side push covers the client's half of the order; there is no way
+to hand the server a function, so an action that has to run there is pushed
+there.
+
 The history is built on signals you can use yourself: `Objects:OnEdited(fn)` on
 the client for its own `Object:Set` calls, `Objects:OnPlayerEdited(fn)` on the
 server for a player's, `Transactions:OnCommitted(fn)` on the client and

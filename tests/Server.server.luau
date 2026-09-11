@@ -2945,6 +2945,113 @@ T:Test("clearing ends everything the stacks were holding", function()
     Scene:Destroy()
 end)
 
+T:Test("an action of the game's own takes its place in the order", function()
+    const Scene, Copy = Room("HistoryCustom")
+    const Plr = Editor(-6008, Scene)
+    const Door = Copy:Create(DoorId, {[TitleId] = "Start"})
+
+    -- Pushed as the action happens, so it starts where the action left it.
+    local Where = "after"
+    T:Ok(History:Push(Plr, {
+        Undo = function()
+            Where = "before"
+        end,
+
+        Redo = function()
+            Where = "after"
+        end,
+    }), "pushed")
+
+    -- An edit after it, so the custom step is not the one on top: undoing has
+    -- to reach the edit first and the action second, in the order they happened.
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = "Edited", Type = "Text"},
+    } :: any), "edited")
+
+    T:Ok(History:Undo(Plr), "the edit undone")
+    T:Eq(Door:Get(TitleId), "Start", "the edit went back")
+    T:Eq(Where, "after", "and the action has not been reached yet")
+
+    T:Ok(History:Undo(Plr), "the action undone")
+    T:Eq(Where, "before", "its Undo ran")
+
+    T:Ok(History:Redo(Plr), "redone")
+    T:Eq(Where, "after", "its Redo ran")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a custom action clears when nothing can reach it", function()
+    const Scene = Scenes.new({Name = "HistoryCustomClear"})
+    const Plr = Editor(-6009, Scene)
+
+    local Held = true
+    History:Push(Plr, {
+        Undo = function() end,
+        Redo = function() end,
+        Clear = function()
+            Held = false
+        end,
+    })
+
+    T:Ok(Held, "held while the step is reachable")
+
+    History:Clear(Plr)
+    T:Ok(not Held, "and let go when it is not")
+
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a custom action that throws stays on the stack", function()
+    const Scene = Scenes.new({Name = "HistoryCustomThrow"})
+    const Plr = Editor(-6010, Scene)
+
+    History:Push(Plr, {
+        Undo = function()
+            error("no")
+        end,
+
+        Redo = function() end,
+    })
+
+    T:Ok(not History:Undo(Plr), "refused")
+    T:Ok(History:CanUndo(Plr), "and left where it was, to be tried again")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("what a custom action does while undoing is not a new step", function()
+    const Scene, Copy = Room("HistoryCustomQuiet")
+    const Plr = Editor(-6011, Scene)
+    const Door = Copy:Create(DoorId, {[TitleId] = "Start"})
+
+    History:Push(Plr, {
+        Undo = function()
+            -- The ordinary API, from inside a reversal. Recording this would
+            -- put a step on top of the one being undone, and the stack would
+            -- grow every time it was emptied.
+            Transactions.Apply(Plr, {
+                {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = "Moved", Type = "Text"},
+            } :: any)
+        end,
+
+        Redo = function() end,
+    })
+
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(Door:Get(TitleId), "Moved", "what it did landed")
+    T:Ok(not History:CanUndo(Plr), "and was not recorded as a step of its own")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
 T:Test("a step past the limit lets go of what it held", function()
     const Scene, Copy = Room("HistoryLimit")
     const Plr = Editor(-6006, Scene)

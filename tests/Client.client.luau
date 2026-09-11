@@ -1261,6 +1261,78 @@ T:Test("a local scene loading its own pack is not a step", function()
     History:Clear()
 end)
 
+T:Test("an action of the game's own sits in the same order", function()
+    const Sandbox = Scenes.new({Name = "ClientHistoryCustom"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId, {[TitleId] = "Start"})
+    History:Clear()
+
+    -- Pushed as the action happens, so it starts where the action left it.
+    local Where = "after"
+    local Held = true
+
+    T:Ok(History:Push({
+        Undo = function()
+            Where = "before"
+        end,
+
+        Redo = function()
+            Where = "after"
+        end,
+
+        Clear = function()
+            Held = false
+        end,
+    }), "pushed")
+
+    -- An edit after it, so the action is not the one on top.
+    Obj:Set(TitleId, "Edited")
+
+    T:Ok(History:Undo(), "the edit undone")
+    T:Eq(Obj:Get(TitleId), "Start", "the edit went back")
+    T:Eq(Where, "after", "and the action has not been reached yet")
+
+    T:Ok(History:Undo(), "the action undone")
+    T:Eq(Where, "before", "its Undo ran")
+
+    T:Ok(History:Redo(), "and redone")
+    T:Eq(Where, "after", "its Redo ran")
+
+    T:Ok(Held, "still holding what it holds")
+    History:Clear()
+    T:Ok(not Held, "and let go when nothing can reach it")
+
+    Sandbox:Destroy()
+end)
+
+T:Test("a custom action that throws stays on the stack", function()
+    History:Clear()
+
+    T:Ok(History:Push({
+        Undo = function()
+            error("no")
+        end,
+
+        Redo = function() end,
+    }), "pushed")
+
+    T:Ok(not History:Undo(), "refused")
+    T:Ok(History:CanUndo(), "and left where it was")
+
+    History:Clear()
+end)
+
+T:Test("a custom action needs both verbs", function()
+    History:Clear()
+    T:Ok(not History:Push({Undo = function() end} :: any), "refused without a Redo")
+    T:Ok(not History:CanUndo(), "and nothing was recorded")
+end)
+
 T:Test("a transaction is a step the server keeps", function()
     if not BareId or not TitleId then
         T:Ok(false, "no bare registry")

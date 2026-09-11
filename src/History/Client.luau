@@ -23,6 +23,7 @@
 const Objects = require("../Objects/Client")
 const Network = require("./Network")
 const Listeners = require("../Listeners")
+const Logger = require("../Logger")
 const Types = require("../Objects/Types")
 
 const History = {}
@@ -45,8 +46,18 @@ type Entry = {
     After: any,
 }
 
+-- A step the game wrote itself, for the things Prism does not model. The
+-- server's twin; see History/Server for what each verb is for.
+export type Action = {
+    Undo: () -> (),
+    Redo: () -> (),
+    Clear: (() -> ())?,
+}
+
+-- Either the game's or Prism's, never both.
 type Step = {
     Entries: {Entry},
+    Custom: Action?,
     Run: {Target: Types.RuntimeId, Property: number, At: number}?,
 }
 
@@ -83,6 +94,22 @@ local Busy = false
 -- object it did not remove. See History/Server, which reasons the same way over
 -- the same shape.
 const function Clear(Step: Step)
+    const Custom = Step.Custom
+    if Custom then
+        -- The game's, so it is allowed to throw without taking the stack with
+        -- it: this runs while a new action is being recorded, which is no
+        -- moment to fail.
+        if Custom.Clear then
+            const Ok, Err = pcall(Custom.Clear)
+            if not Ok then
+                Logger:Warn(`A custom history action failed to clear: {Err}`)
+            end
+        end
+
+        Step.Custom = nil
+        return
+    end
+
     for _, Entry in Step.Entries do
         if Entry.Kind ~= "Set" and Entry.Target.Suspended then
             Objects.Dispose(Entry.Target)
@@ -178,6 +205,21 @@ end
 const function ApplyLocal(Step: Step, Forward: boolean): boolean
     Applying = true
 
+    const Custom = Step.Custom
+    if Custom then
+        const Ok, Err = pcall(if Forward then Custom.Redo else Custom.Undo)
+        Applying = false
+
+        if not Ok then
+            -- Left where it was, like any other refusal, so it can be tried
+            -- again once whatever the action needed is there.
+            Logger:Warn(`A custom history action failed and was left on the stack: {Err}`)
+            return false
+        end
+
+        return true
+    end
+
     for _, Entry in Ordered(Step.Entries, Forward) do
         const Obj = Entry.Target
 
@@ -259,6 +301,24 @@ end
 
 function History:Redo(): boolean
     return Move(RedoOrder, UndoOrder, true)
+end
+
+-- An action of the game's own, in the order the player's own edits are in, so
+-- undoing reaches it exactly where it happened. For the things Prism does not
+-- model -- a tool's own state, a panel's own data -- so that Ctrl+Z means one
+-- thing in an editor rather than two.
+--
+-- Push it as the action happens; Undo and Redo are how to take it back and do
+-- it again, and Clear, if it holds anything, is where that goes when the step
+-- can no longer be reached.
+function History:Push(Action: Action): boolean
+    if type(Action) ~= "table" or type(Action.Undo) ~= "function" or type(Action.Redo) ~= "function" then
+        Logger:Warn("A custom history action needs an Undo and a Redo function.")
+        return false
+    end
+
+    Push({Entries = {}, Custom = Action})
+    return true
 end
 
 function History:CanUndo(): boolean
