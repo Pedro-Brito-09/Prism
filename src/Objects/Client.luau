@@ -99,8 +99,14 @@ end
 
 -- Who holds each locked object, by runtime id, as the server last said. Told
 -- only for scenes this player is admitted to.
-const Locks: {[RuntimeId]: number} = {}
-const LockChanged: {(RuntimeId: RuntimeId, UserId: number?) -> ()} = {}
+-- Which objects are held, and by whom where that is a person. A holder need
+-- not be one -- the server can hold an object while it animates it -- so being
+-- held and being held by somebody are two different questions and get two
+-- tables' worth of answer: an entry here means held, and its value is the user
+-- id or nil.
+const Locks: {[RuntimeId]: true} = {}
+const Holders: {[RuntimeId]: number} = {}
+const LockChanged: {(RuntimeId: RuntimeId, UserId: number?, Held: boolean) -> ()} = {}
 
 const function Named(Refs: Object | {Object}): {Object}
     return if (Refs :: any).RuntimeId ~= nil then {Refs :: Object} else Refs :: {Object}
@@ -149,14 +155,20 @@ function Objects:Unlock(Refs: Object | {Object}): boolean
     return Ok and Released == true
 end
 
--- The user id holding an object, or nil when it is free -- or when this player
--- is not admitted to its scene, and so is not told.
+-- The user id holding an object, or nil when it is free, when the holder is not
+-- a person, or when this player is not admitted to its scene and so is not told.
+-- IsLocked answers the other half: whether anything holds it at all.
 function Objects:GetLock(Ref: Object | RuntimeId): number?
-    return Locks[if type(Ref) == "number" then Ref else Ref.RuntimeId]
+    return Holders[if type(Ref) == "number" then Ref else Ref.RuntimeId]
 end
 
--- Fired with a runtime id and the user id now holding it, nil once free.
-function Objects:OnLockChanged(Callback: (RuntimeId: RuntimeId, UserId: number?) -> ()): () -> ()
+function Objects:IsLocked(Ref: Object | RuntimeId): boolean
+    return Locks[if type(Ref) == "number" then Ref else Ref.RuntimeId] == true
+end
+
+-- Fired with a runtime id, the user id now holding it -- nil for nobody or for
+-- a holder that is not a person -- and whether it is held at all.
+function Objects:OnLockChanged(Callback: (RuntimeId: RuntimeId, UserId: number?, Held: boolean) -> ()): () -> ()
     return Listeners.Watch(LockChanged, Callback, "locks")
 end
 
@@ -167,7 +179,8 @@ function Objects.ForgetLocks(Scene: Types.SceneIdentifier)
         const Obj = Workspace[Identifier]
         if not Obj or Obj.Scene == Scene then
             Locks[Identifier] = nil
-            Listeners.Notify(LockChanged, Identifier, nil)
+            Holders[Identifier] = nil
+            Listeners.Notify(LockChanged, Identifier, nil, false)
         end
     end
 end
@@ -412,6 +425,7 @@ const function Withdraw(Obj: Object)
 
     -- Its removal is the only news a listener needs; no lock change follows.
     Locks[Obj.RuntimeId] = nil
+    Holders[Obj.RuntimeId] = nil
 
     -- Out of the scene copy before out of the workspace, so a copy walking its
     -- own objects while they are torn down never sees one that is already gone
@@ -1184,11 +1198,16 @@ end)
 -- Kept by runtime id rather than on the object, so a lock that arrives ahead of
 -- its object -- the reveal sends locks before it streams objects -- is still
 -- there when the object lands.
-Network.LocksChanged:Connect(function(Ids: {RuntimeId}, Holders: {number})
+Network.LocksChanged:Connect(function(Ids: {RuntimeId}, Who: {number}, Held: {boolean})
     for Index, Identifier in Ids do
-        const Holder = Holders[Index]
-        Locks[Identifier] = if Holder ~= 0 then Holder else nil
-        Listeners.Notify(LockChanged, Identifier, Locks[Identifier])
+        const IsHeld = Held[Index] == true
+        const UserId = Who[Index]
+
+        -- Zero is nobody rather than free: Held is what says free.
+        Locks[Identifier] = if IsHeld then true else nil
+        Holders[Identifier] = if IsHeld and UserId ~= 0 then UserId else nil
+
+        Listeners.Notify(LockChanged, Identifier, Holders[Identifier], IsHeld)
     end
 end)
 

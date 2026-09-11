@@ -7,13 +7,16 @@ export type SceneIdentifier = Handles.SceneIdentifier
 export type PersistentId = Handles.PersistentId
 
 export type SceneConfig = {
-    CustomId: SceneIdentifier?,
     Name: string,
 
+    -- Server only. Whether the scene is anybody's to see. Public unless this
+    -- says otherwise, and it has to be said here rather than after the fact:
+    -- registering a scene has already told everyone present its name.
+    Private: boolean?,
+
     -- Server only. Who the scene admits from the moment it exists, by Player or
-    -- user id. Admitting after registering is too late for a scene that should
-    -- never have been public: registering it has already told everyone present
-    -- its name.
+    -- user id. Only means anything on a private scene -- a public one is
+    -- everybody's, and a list on it is inert.
     Admitted: {Player | number}?,
 
     -- Server only. Rights over the scene from the moment it exists: Player or
@@ -151,9 +154,20 @@ export type Scene = {
 -- one that has admitted anybody is told to them and to nobody else -- its name,
 -- its copies and its objects alike.
 export type ServerScene = Scene & {
+    -- Whether the scene is anybody's to see. A private scene is told to the
+    -- players it admits and to nobody else; a public one is everybody's, and
+    -- its admitted list is inert.
+    --
+    -- A flag rather than something read off the list. Privacy used to mean "has
+    -- admitted somebody", which made evicting the last player throw the scene
+    -- open -- to everyone, including the player just evicted -- at exactly the
+    -- moment somebody was locking it down. It also left no way to say the one
+    -- thing a level editor most wants at the start: closed, and nobody in it
+    -- yet.
+    Private: boolean,
+
     -- User ids. The scene's rather than anyone's session, so it outlives
-    -- whoever is connected: dropping an entry when its player left would leave
-    -- a private scene with an empty list, and an empty list means public.
+    -- whoever is connected.
     Admitted: {[number]: true},
 
     -- A live copy the server holds the data of and builds no parts for. Every
@@ -169,6 +183,11 @@ export type ServerScene = Scene & {
     Admits: (self: ServerScene, Who: Player | number) -> boolean,
     GetAdmitted: (self: ServerScene) -> {number},
     IsPublic: (self: ServerScene) -> boolean,
+
+    -- Closing a scene or opening it, after it has been registered. Closing
+    -- takes it away from everyone it does not admit; opening hands it to
+    -- everybody.
+    SetPrivate: (self: ServerScene, Private: boolean) -> (),
 
     -- Rights over this scene, by user id. Not admission: admission decides
     -- what a player is sent, and these decide what they may change. Session

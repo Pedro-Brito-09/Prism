@@ -40,32 +40,45 @@ Read this before picking anything up. It is how every item under Done landed.
 
 ## Queued
 
-In the order to build them. Each is described well enough to start without
-the conversation that produced it; anything marked *Ask* is a decision that is
-Pedro's to make before or while building.
+Nothing. Everything agreed is on `main`, which makes the next thing the one the
+note at the top of this file has been holding: the framework gets played through
+in one pass, with a player in it, and the suites in `tests/` are run for the
+first time. That pass is Pedro's call.
 
-- [ ] **Small edges left open.** Each is a decision as much as a fix — *Ask*
-      before doing any of them.
-      - **A retired id can be claimed again by `CustomId`.** `IdPool` never
-        hands a released id out on its own when recycling is off, but
-        `Claim(id)` with an explicit id only checks `Used`, so unregistering a
-        property and registering a new one with `CustomId` set to the old id
-        reuses it — the corruption the comment in `src/IdPool.luau` warns
-        about. Fix is a retired set checked by explicit claims; the question
-        is whether re-registering the *same* thing under its old id is a
-        legitimate workflow worth an escape hatch.
-      - **Evicting a scene's last admitted player makes it public**, and
-        reveals it to everyone including the player just evicted, because an
-        empty list means public. Documented in the README; a private flag
-        separate from the list would remove the edge.
-      - **Locks outlive the rights that took them.** A player evicted or
-        stripped of edit rights keeps their locks, and nobody else can edit
-        those objects until they release, leave, or the server calls
-        `Objects:Unlock`. Releasing a player's locks in a scene when they are
-        withdrawn from it (`Withdraw` in `src/Scenes/Server.luau`) or lose edit
-        rights on it (`Permissions:GrantOn` / `RevokeOn`) would close it.
+New work goes here, described well enough to start without the conversation that
+produced it, with anything that is a decision marked *Ask*.
 
 ## Done
+
+- [x] **The last three edges.** All of what was left under *Small edges*.
+
+      **Custom ids are gone.** `CustomId` came off every config and the pool no
+      longer takes an id at all. An explicit claim checked only whether an id
+      was in use now, not whether it ever had been, so naming a retired one was
+      a way to make every saved record still carrying it decode as something
+      else. Not being able to ask is what makes that unreachable.
+
+      **Privacy is a flag.** `Private` on the scene, rather than "has admitted
+      somebody". Reading it off the list meant evicting the last player threw
+      the scene open -- to everyone, including the person just shut out -- at
+      the moment somebody was locking it down, and it left no way to say the one
+      thing a level editor wants at the start: closed, with nobody in it yet.
+      `SetPrivate` closes and opens one after the fact; an admitted list on a
+      public scene is inert and warns.
+
+      **A hold goes with whoever had it, and need not belong to a player.**
+      Leaving already released them; being evicted from a scene or losing edit
+      rights on it did not, so a player could sit there holding objects they
+      could no longer touch and nobody else could either. Both release now --
+      eviction directly, rights through a signal Permissions fires, since
+      Objects requires Permissions and the pair cannot require each other.
+
+      And a holder is now anything at all: a Player, a user id, a module, a
+      string naming a tool. The server holding an object while it animates one
+      used to mean inventing a player to hold it with. Two holders are the same
+      one when they name the same person, and by identity otherwise. The
+      presence packet carries whether a thing is held apart from who holds it,
+      because those stopped being the same question.
 
 - [x] **Holds and copies are operations.** `Lock`, `Unlock`, `Load` and
       `Unload` joined create, set and destroy, so the things a player does that

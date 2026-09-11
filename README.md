@@ -147,14 +147,27 @@ if Prism.Objects:Lock(selected) then   -- one object or a list: all or none
     Prism.Objects:Unlock(selected)
 end
 
+Prism.Objects:IsLocked(object)         -- held by anyone at all
 Prism.Objects:GetLock(object)          -- the holder's user id, or nil
-Prism.Objects:OnLockChanged(function(runtimeId, userId) ... end)
+Prism.Objects:OnLockChanged(function(runtimeId, userId, held) ... end)
 ```
 
 Taking a lock needs edit rights on the object, costs one action per object, and
 fails if anyone else holds any of the objects named. Releasing needs no rights.
 A transaction can take and release them too, in the same list as the edit they
 are for — see Transactions.
+
+**A holder need not be a player.** `Objects:Lock(list, holder)` takes a Player, a
+user id, or anything else at all — a module, a table, a string naming a tool —
+so the server can hold an object while it animates one without inventing a
+player to hold it with. `GetHolder` gives back whatever it was; `GetLock` gives
+the user id where the holder is a person and nil where it isn't, which is why
+`IsLocked` exists to answer the other half.
+
+A hold goes when whoever had it does. Leaving releases them, and so does being
+**evicted from the scene** or **losing edit rights on it** — all three leave
+somebody holding objects they can no longer touch and nobody else able to touch
+them either.
 A lock goes when its object goes or its holder leaves. The server's own edits
 ignore locks. The server can take locks on a player's behalf with
 `Objects:Lock(list, player)`, which is refused the same way if someone else
@@ -443,16 +456,28 @@ join replay exists to avoid.
 
 ### Who hears about a scene
 
-Every scene is public until it admits someone. After that, only the players it
-admits are told its name or sent objects whose type has
+A scene is public unless you say otherwise. A **private** one tells only the
+players it admits its name, and sends them alone the objects whose type has
 `Replicate = "Admitted"`.
 
 ```lua
-local Workshop = Prism.Scenes.new({Name = "Workshop", Admitted = {ownerUserId}})
+local Workshop = Prism.Scenes.new({
+    Name = "Workshop",
+    Private = true,
+    Admitted = {ownerUserId},
+})
+
 Workshop:Admit(player)        -- a Player or a user id
 Workshop:Evict(otherUserId)
 Workshop:Admits(player)       -- true if admitted, or if the scene is public
+Workshop:SetPrivate(false)    -- open it to everybody, or close it again
 ```
+
+Privacy is a flag, not something read off the list. An admitted list on a public
+scene does nothing and says so with a warning. Being able to state it outright
+is what lets a scene be **closed with nobody in it yet** — the state a level
+editor starts in — and it is what stops evicting the last person from throwing
+the scene open to everyone, the evicted included.
 
 Admitting someone sends them the scene's name and its admitted-only objects,
 down the chunked path a joining player receives. Evicting someone takes those
@@ -465,16 +490,12 @@ type replicates to everyone, which is the default. The client needs the copy to
 file those objects under. What leaks is that a copy of scene N exists: a copy id
 and a scene id, with no name and no admitted-only objects.
 
-Two consequences of an empty list meaning public:
+A scene that should never be public says `Private = true` in `Scenes.new`.
+Closing it afterwards works, but it is too late for the moment it was
+registered: that packet has already told everyone its name.
 
-- Admitting the first player to a public scene hides it from everyone else.
-- Evicting the last player makes it public again, and it is revealed to
-  everyone, including the player you evicted. Admit the next person before
-  evicting the last.
-
-A scene that should never be public names its admitted in `Scenes.new`.
-Admitting afterwards is too late, because registering the scene has already told
-everyone its name.
+Evicting the last admitted player leaves the scene closed and admitting nobody,
+which is a state it can sit in perfectly well.
 
 A player who isn't admitted can't edit a scene either. Their edits are refused
 as though its objects didn't exist.

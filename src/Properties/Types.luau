@@ -131,7 +131,6 @@ export type PropertyRegistry<T = PropertyType> = {
 }
 
 export type PropertyConfig<T = PropertyType> = {
-    CustomId: number?,
     Name: string,
     Type: T,
     Constraints: ConstraintsFor<T>?,

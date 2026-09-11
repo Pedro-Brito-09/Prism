@@ -29,6 +29,7 @@ const Players = game:GetService("Players")
 const SceneRegistry = require("../Scenes/Registry")
 const Network = require("./Network")
 const Shared = require("./Shared")
+const Listeners = require("../Listeners")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
@@ -101,8 +102,26 @@ const function SendGlobal(UserId: number)
     end
 end
 
+-- Anything that changes one player's rights over one scene. Objects listens,
+-- because a hold is worth having only where an edit would be allowed: a player
+-- stripped of the right to edit a scene would otherwise go on holding objects
+-- there that nobody, themselves included, could do anything with.
+--
+-- Synchronous, so the release happens before whatever changed the rights
+-- carries on. Permissions cannot ask Objects itself -- Objects requires
+-- Permissions, and the pair would be a cycle -- so it says, and Objects listens.
+const RightsChanged: {(UserId: number, Scene: number) -> ()} = {}
+
+function Permissions.OnSceneRights(Callback: (UserId: number, Scene: number) -> ()): () -> ()
+    return Listeners.Watch(RightsChanged, Callback, "scene rights")
+end
+
 -- Nil rights say the player holds nothing on the scene any more.
 const function SendScene(Scene: any, UserId: number)
+    for _, Callback in RightsChanged do
+        Callback(UserId, Scene.Id)
+    end
+
     const Plr = Players:GetPlayerByUserId(UserId)
     if not Plr then
         return

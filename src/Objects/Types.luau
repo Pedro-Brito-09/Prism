@@ -66,7 +66,6 @@ export type ObjectRegistry = {
 }
 
 export type ObjectConfig = {
-    CustomId: ObjectIdentifier?,
     Name: string,
     Properties: {PropertyTypes.PropertyIdentifier},
 

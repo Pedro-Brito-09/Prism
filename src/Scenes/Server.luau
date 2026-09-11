@@ -575,11 +575,9 @@ const function __destroy(self: Scene)
     -- The id is not released: see the pool above.
 end
 
--- Admitting someone to a public scene makes it private, and everyone else
--- present is told it is gone. Evicting the last makes it public again, and
--- everyone is told about it -- the evicted included, because an empty list
--- means public. Admit the next person before evicting the last to keep a scene
--- closed while its list changes hands.
+-- Admitting and evicting change who is told about a private scene. On a public
+-- one they change nothing that anybody can see: everyone is already owed all of
+-- it, and the list sits there until the scene is closed.
 const function __admit(self: Scene, Who: Player | number)
     const UserId = Audience.Resolve(Who)
     if not UserId then
@@ -607,12 +605,21 @@ const function __evict(self: Scene, Who: Player | number)
     end
 
     self.Admitted[UserId] = nil
+
+    -- What they were holding in this scene goes with their admission. Shut out
+    -- of a room, still holding three things in it, is a way to stop everybody
+    -- else working without being able to work yourself.
+    Objects.ReleaseFor(UserId, self.Id)
     Reconcile(self)
 end
 
 const function __admits(self: Scene, Who: Player | number): boolean
+    if not self.Private then
+        return true
+    end
+
     const UserId = Audience.Resolve(Who)
-    return UserId ~= nil and (next(self.Admitted) == nil or self.Admitted[UserId] == true)
+    return UserId ~= nil and self.Admitted[UserId] == true
 end
 
 const function __get_admitted(self: Scene): {number}
@@ -625,7 +632,20 @@ const function __get_admitted(self: Scene): {number}
 end
 
 const function __is_public(self: Scene): boolean
-    return next(self.Admitted) == nil
+    return not self.Private
+end
+
+-- Closing a scene takes it away from everyone it does not admit; opening it
+-- hands it to everybody. Either way the reconcile below is what actually moves
+-- it, the same as admitting or evicting somebody.
+const function __set_private(self: Scene, Private: boolean)
+    const Wanted = Private == true
+    if self.Private == Wanted then
+        return
+    end
+
+    self.Private = Wanted
+    Reconcile(self)
 end
 
 -- Rights live in Permissions, which keeps them on the scene; these are the
@@ -659,13 +679,9 @@ function Scenes.new(Config: SceneConfig): Scene?
         return nil
     end
 
-    const Requested = if Config.CustomId ~= nil
-        then IdPool.Normalize(Config.CustomId, "scene", Handles.MAX_SCENE)
-        else nil
-
-    const Identifier = Ids:Claim(Requested)
+    const Identifier = Ids:Claim()
     if not Identifier then
-        Logger:Warn(`There's already a scene registered with id {Requested}.`)
+        Logger:Warn("The scene id pool is exhausted.")
         return nil
     end
 
@@ -676,8 +692,10 @@ function Scenes.new(Config: SceneConfig): Scene?
     Scene.Data = nil
     Scene.Instances = {}
 
-    -- Filled before the scene is announced, so a scene that should never be
-    -- public never is, not even for the packet that registers it.
+    -- Set before the scene is announced, so a scene that should never be public
+    -- never is, not even for the packet that registers it.
+    Scene.Private = Config.Private == true
+
     Scene.Admitted = {}
     for _, Who in Config.Admitted or {} do
         const UserId = Audience.Resolve(Who)
@@ -686,6 +704,12 @@ function Scenes.new(Config: SceneConfig): Scene?
         else
             Logger:Warn(`Scene {Config.Name} admits a Player or a user id, not a {typeof(Who)}.`)
         end
+    end
+
+    -- Said rather than silently ignored: a list on a public scene is inert, and
+    -- somebody writing one has almost certainly meant to close the scene.
+    if not Scene.Private and next(Scene.Admitted) ~= nil then
+        Logger:Warn(`Scene {Config.Name} admits people but is not private, so the list does nothing. Pass Private = true to close it.`)
     end
 
     Scene.Rights = {}
@@ -699,6 +723,7 @@ function Scenes.new(Config: SceneConfig): Scene?
     Scene.Admit = __admit
     Scene.Evict = __evict
     Scene.Admits = __admits
+    Scene.SetPrivate = __set_private
     Scene.GetAdmitted = __get_admitted
     Scene.IsPublic = __is_public
     Scene.Grant = __grant
@@ -890,6 +915,7 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
     -- edit if the game has said what a pusher holds.
     const Scene = Scenes.fromBuffer({
         Name = Name,
+        Private = true,
         Admitted = {Plr.UserId},
         Rights = if PushRole then {[Plr.UserId] = PushRole} else nil,
     }, Compressor:CompressScene(Highest, Packed))
