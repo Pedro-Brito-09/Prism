@@ -44,48 +44,7 @@ In the order to build them. Each is described well enough to start without
 the conversation that produced it; anything marked *Ask* is a decision that is
 Pedro's to make before or while building.
 
-- [ ] **Object references.** Next up. Nothing lets one object point at
-      another: the property types are Text, Number, Bool, Color, Vector,
-      CFrame, Enum and CustomEnum (`src/Properties/Types.luau`), so a button
-      cannot be wired to a door or a path node to the next. The README
-      already claims "the references inside the pack remapped together"
-      under Scenes and object identity — it is wrong today and has to become
-      true or be removed.
-
-      The intended shape: a new property type, `Object`, whose stored value
-      is the target's **local id** — the low half of its persistent id — so it
-      survives a save exactly as the pack's own ids do (see `src/Handles.luau`
-      and the `PersistentId` notes in `Objects/Types.luau`). It resolves
-      through the copy holding the object (`copy:Find(localId)`), which is what
-      makes two loaded copies of one room each point at their own door. A
-      target that is destroyed reads as nil; the stored id stays, so an undo
-      that brings the target back restores the link. `Get` on such a
-      property should hand back the live object rather than the number, or
-      there should be a separate resolving accessor — *Ask* which.
-
-      Where it touches: value encoding for the new type (`Compressor`,
-      `Codecs`, `Properties/Types` validation — `IsValid` and `FixValue`),
-      replication of values (the id is plain data, so nothing new on the
-      wire beyond the type tag), `Properties.Display`, and permissions (an
-      `Object` property is written like any other). Links cannot drive an
-      instance property from it; say so at registration.
-
-      Duplicating has to remap: `Objects:Duplicate` and a transaction's
-      `Duplicate` (`Objects/Shared.Snapshot`, `Transactions/Shared`) copy the
-      stored id, so a duplicated button still points at the *original* door —
-      correct for one object, wrong for a group duplicated together. A group
-      duplicate should remap references that point inside the group and keep
-      the rest. *Ask* whether group duplication belongs in this item or in
-      prefab placement below.
-
-      Constraints: a reference only names objects in the same copy.
-      Cross-copy and cross-scene references are out of scope — the id would
-      mean nothing after either scene is loaded somewhere else. *Ask* whether
-      a type should be able to restrict what an `Object` property may point at
-      (`Constraints = {Types = {Door}}`), which is the natural first
-      constraint.
-
-- [ ] **Object added / removed signals on the server.** The client has
+- [ ] **Object added / removed signals on the server.** Next up. The client has
       `Objects:OnAdded` / `OnRemoved` (`src/Objects/Client.luau`, built on
       `src/Listeners.luau`); the server has neither, so server scripts that
       drive objects — a spinner reading its speed — have to poll
@@ -100,13 +59,13 @@ Pedro's to make before or while building.
       new copy today (`Read` in `src/Scenes/Server.luau`, which restores each
       object under its saved local id). Pasting a saved group of objects into
       a level being edited needs the opposite: fresh local ids minted by the
-      target copy's scene, and — once object references exist — references
-      inside the pack remapped to the new ids. Server side first
+      target copy's scene, and references inside the pack remapped to the new
+      ids — the same remap `Objects:DuplicateGroup` does, over a pack rather
+      than over live objects. Server side first
       (`copy:Place(pack)` or similar, returning the new objects), then a
       transaction step so a client can place one through create rights, then
       the client-owned-scene equivalent. Undo should see a placement as one
-      step; recording it as a transaction gives that for free. Depends on
-      object references for the remapping.
+      step; recording it as a transaction gives that for free.
 
 - [ ] **Small edges left open.** Each is a decision as much as a fix — *Ask*
       before doing any of them.
@@ -128,12 +87,56 @@ Pedro's to make before or while building.
         `Objects:Unlock`. Releasing a player's locks in a scene when they are
         withdrawn from it (`Withdraw` in `src/Scenes/Server.luau`) or lose edit
         rights on it (`Permissions:GrantOn` / `RevokeOn`) would close it.
+      - **Undoing a destroy does not restore what pointed at it.** A stored
+        reference survives its target being destroyed, so a copy loaded again
+        from the same pack comes back wired. `History` undoes a destroy by
+        creating the object again, and a create mints a *new* local id — so
+        everything that pointed at the old one stays dangling. Fixing it means
+        letting a create name the local id it comes back under, which a client
+        must not be able to do freely: the id has to be one that scene retired,
+        held for it. The question is whether undo is worth that channel.
       - **Creates and destroys in client-owned scenes are not undoable**, and
         neither is a lone `Object:Destroy`; `History` only records
         transactions and single sets. Local scene creates could be recorded
         from `Objects:OnAdded` / `OnRemoved` filtered to `Local` objects.
 
 ## Done
+
+- [x] **Object references.** A ninth property type, `Object`, holding the
+      target's local id and nothing else, so a reference is written exactly as
+      the pack's own ids are and survives a save without anything rewriting it.
+      It resolves through the copy holding the object that points, never
+      through a scene or the workspace: load one room twice and each copy's
+      button works that copy's own door. `Get` hands back the live object,
+      `Set` takes an object or an id, and the raw id stays readable through
+      `GetProperty`. Nil covers three cases deliberately not told apart —
+      nothing pointed at, target destroyed, target not built yet — because a
+      copy builds its objects one at a time and a client can receive either
+      half first. A reference only ever names an object in the same copy;
+      anything else is refused, which is also why cross-scene references are
+      out of scope.
+
+      `Constraints = {Types = {Door}}` restricts what a property may point at,
+      by type id or name. It is checked in `Objects/Shared` rather than in
+      `Properties:IsValid`, because a property knows its value and not which
+      object carries it, and what an id names depends on the copy asking.
+      Checked only when the target resolves: a dangling id is always allowed,
+      or a pack would be restorable in only one order. A `Links` entry naming
+      a reference is dropped at registration — an `Object` is a Luau number, so
+      the type check would have passed and driven a part with an id meaning
+      nothing outside its copy.
+
+      Duplicating one object copies the reference as it stands, which is right
+      for a lever that should keep working its own door. `DuplicateGroup` on
+      both sides, and on a transaction, duplicates several as one thing:
+      references pointing inside the group follow the copies, references
+      pointing outside it are left alone. Doing that through a transaction
+      needed something new on the wire, because the ids of the new objects are
+      minted at the far end after the packet was written — so a create can
+      carry `References`, naming the operation whose object it points at
+      instead of an id, resolved once every create has run and before any of
+      them is announced. It is also the only way to create two objects already
+      wired to each other in one transaction.
 
 - [x] **Undo / redo.** `Prism.History` on the client, per player. A step is a
       committed transaction, or a run of `Object:Set` calls to one property

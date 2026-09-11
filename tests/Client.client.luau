@@ -994,6 +994,136 @@ end)
 --=============================================================================
 
 --=============================================================================
+-- References
+--=============================================================================
+
+T:Describe("References")
+
+const DoorId = FindObjectType("TestDoor")
+const ButtonId = FindObjectType("TestButton")
+const TargetId = FindProperty("TestTarget")
+const DoorOnlyId = FindProperty("TestDoorOnly")
+
+T:Test("a replicated reference resolves to the object it names", function()
+    if not DoorId or not ButtonId or not TargetId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Door = WaitFor("reference door", function()
+        return FindLiveObject(DoorId, TitleId, "FixtureReferenceDoor")
+    end)
+
+    const Button = WaitFor("reference button", function()
+        return FindLiveObject(ButtonId, TitleId, "FixtureReferenceButton")
+    end)
+
+    if not Door or not Button then
+        T:Ok(false, "fixtures never arrived")
+        return
+    end
+
+    -- The id came across as a plain number inside the object, and this side
+    -- resolved it through its own index of the same copy.
+    T:Eq(Button:GetProperty(TargetId).Value, Door.LocalId, "the id came across")
+    T:Eq(Button:Get(TargetId), Door, "and reads back as the door")
+    T:Eq(Door.InstanceId, Button.InstanceId, "both in the copy the server put them in")
+end)
+
+T:Test("a reference in a local scene behaves as it does on the server", function()
+    if not DoorId or not ButtonId or not TargetId or not DoorOnlyId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Sandbox = Scenes.new({Name = "ClientReferences"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "Button"})
+
+    T:Ok(Button:Set(TargetId, Door), "takes the object")
+    T:Eq(Button:Get(TargetId), Door, "and hands it back")
+    T:Eq(Button:GetProperty(TargetId).Value, Door.LocalId, "storing the local id")
+
+    T:Ok(not Button:Set(DoorOnlyId, Button), "a constrained reference refuses the wrong type")
+    T:Ok(Button:Set(DoorOnlyId, Door), "and takes the right one")
+
+    Door:Destroy()
+    T:Eq(Button:Get(TargetId), nil, "a destroyed target reads as nothing")
+    T:Ok(Button:GetProperty(TargetId).Value ~= 0, "while the id stays")
+
+    Sandbox:Destroy()
+end)
+
+T:Test("a reference survives a local commit and reload", function()
+    if not DoorId or not ButtonId or not TargetId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Sandbox = Scenes.new({Name = "ClientReferencesSaved"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "Button"})
+    Button:Set(TargetId, Door)
+
+    Copy:Commit()
+    Copy:Unload()
+
+    const Reloaded = Sandbox:Load()
+    const Back = Reloaded:Find(Button.LocalId)
+
+    T:Ok(Back, "the button came back")
+
+    if Back then
+        T:Eq(Back:Get(TargetId), Reloaded:Find(Door.LocalId), "still pointing at the door")
+    end
+
+    Sandbox:Destroy()
+end)
+
+T:Test("a group duplicate remaps what points inside it", function()
+    if not DoorId or not ButtonId or not TargetId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Sandbox = Scenes.new({Name = "ClientReferencesGroup"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "Button"})
+    Button:Set(TargetId, Door)
+
+    const Alone = Objects:Duplicate(Button)
+    T:Eq(Alone:Get(TargetId), Door, "one on its own keeps the original target")
+
+    const Made = Objects:DuplicateGroup({Button, Door})
+    T:Eq(#Made, 2, "both were made")
+
+    if #Made == 2 then
+        T:Eq(Made[1]:Get(TargetId), Made[2], "and the copy points at the copy")
+        T:Eq(Button:Get(TargetId), Door, "the original is untouched")
+    end
+
+    Sandbox:Destroy()
+end)
+
+--=============================================================================
 -- History
 --=============================================================================
 

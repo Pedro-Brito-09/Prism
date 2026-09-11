@@ -226,6 +226,18 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?)
     elseif Type == "CustomEnum" then
         Wire = WIRE_BYTES
         Payload = NamedNumber(Value.Parent, Value.Id)
+    elseif Type == "Object" then
+        -- The target's local id and nothing else. Unsigned, because a local id
+        -- is, and a varint so the ids a hand built scene actually uses cost one
+        -- byte. Nothing is resolved on the way in or out: a pack is read with
+        -- no world to resolve against, and a reference means whatever the copy
+        -- reading it says it means -- which is exactly what lets two copies of
+        -- one room each point at their own door.
+        Wire = WIRE_VARINT
+        const Target = Value :: number
+        const Size = Varint.Measure(Target)
+        Payload = buffer.create(Size)
+        Varint.Write(Payload, 0, Target)
     else
         Logger:Error(`Tried compressing unsupported value type: {Type}`)
     end
@@ -322,6 +334,9 @@ function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number
         end
 
         return Registered:GetById(Id) or CustomEnum.UNKNOWN, Consumed, Type
+    elseif Type == "Object" then
+        const Value, Read = Varint.Read(Buf, Body)
+        return Value, 1 + Read, Type
     end
 
     return nil, 1 + SkipValue(Buf, Body, Wire), Type
@@ -713,8 +728,15 @@ end
 -- [/th][varint version][varint count][operations...]
 --
 --   create   [1][varint object type][varint scene copy][varint count][properties...]
+--                [varint count][varint property id][varint operation]...
 --   set      [2][varint runtime id][varint property id][tag][value]
 --   destroy  [3][varint runtime id]
+--
+-- A create's second list is its references: Object properties pointing at
+-- something this same transaction creates, which cannot be written as values
+-- because the ids they will hold are minted at the far end. Each entry names
+-- the property and the operation whose new object it points at. Empty for
+-- almost every create ever written, and one byte when it is.
 --
 -- The only format here that is never written to disk. It lives beside the ones
 -- that are because it is the same problem -- tagged values authored by a peer
@@ -770,6 +792,23 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         const Buffers = {}
         const Size, Count = WriteValues(Buffers, Operation.Properties)
 
+        -- Sorted, like the values above and for the same reason: the same
+        -- transaction has to produce the same bytes every time it is written.
+        const Referenced = {}
+        if Operation.References then
+            for PropertyId in Operation.References do
+                table.insert(Referenced, PropertyId)
+            end
+
+            table.sort(Referenced)
+        end
+
+        local ReferenceSize = Varint.Measure(#Referenced)
+        for _, PropertyId in Referenced do
+            ReferenceSize += Varint.Measure(PropertyId)
+                + Varint.Measure((Operation.References :: any)[PropertyId])
+        end
+
         const PrefixSize = 1
             + Varint.Measure(Operation.Object)
             + Varint.Measure(Operation.Instance)
@@ -782,7 +821,18 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         At += Varint.Write(Prefix, At, Operation.Instance)
         Varint.Write(Prefix, At, Count)
 
-        return Concat("", Prefix, Buffers, Size)
+        -- After the values rather than in the prefix, so a reader walks the
+        -- properties with the count it already has and finds this where the
+        -- record ends.
+        const Tail = buffer.create(ReferenceSize)
+        local Cursor = Varint.Write(Tail, 0, #Referenced)
+        for _, PropertyId in Referenced do
+            Cursor += Varint.Write(Tail, Cursor, PropertyId)
+            Cursor += Varint.Write(Tail, Cursor, (Operation.References :: any)[PropertyId])
+        end
+
+        table.insert(Buffers, Tail)
+        return Concat("", Prefix, Buffers, Size + ReferenceSize)
     elseif Operation.Kind == "Set" then
         const Registry = Properties:GetRegistry(Operation.Property)
         if not Registry then
@@ -880,11 +930,35 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
                 end
             end
 
+            const Referenced, ReferencedRead = Varint.Read(CompressedTransaction, Offset)
+            Offset += ReferencedRead
+
+            local References: {[PropertyTypes.PropertyIdentifier]: number}? = nil
+            for _ = 1, Referenced do
+                const PropertyId, PropertyRead = Varint.Read(CompressedTransaction, Offset)
+                Offset += PropertyRead
+
+                const Operation, OperationRead = Varint.Read(CompressedTransaction, Offset)
+                Offset += OperationRead
+
+                -- Kept whatever the property turns out to be. Unlike a value,
+                -- which can be dropped and leave a readable record behind, a
+                -- reference is a claim about another operation in this same
+                -- transaction: the receiver checks it against the list it
+                -- decoded and refuses the transaction if it does not hold.
+                if not References then
+                    References = {}
+                end
+
+                (References :: any)[PropertyId] = Operation
+            end
+
             table.insert(Operations, {
                 Kind = "Create" :: "Create",
                 Object = Object,
                 Instance = Live,
                 Properties = Values,
+                References = References,
             })
         elseif Kind == TransactionTypes.Kinds.Set then
             const Target, TargetRead = Varint.Read(CompressedTransaction, Offset)

@@ -1,6 +1,7 @@
 const CustomEnum = require("../CustomEnum")
+const Handles = require("../Handles")
 
-export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum"
+export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum" | "Object"
 export type PropertyIdentifier = number
 
 export type TextConstraints = {
@@ -44,6 +45,15 @@ export type CustomEnumConstraints = {
     Blacklist: {CustomEnum.RegisteredOption<any> | CustomEnum.OptionId}?,
 }
 
+-- What an Object property may point at, by object type id or registered name.
+-- Unlike every other constraint here, this one cannot be checked from the value
+-- alone: the value is a local id, and what it names depends on which copy is
+-- asking. Objects/Shared.Reference is where it is enforced, against the copy
+-- holding the object being written. IsValid checks the number and nothing more.
+export type ObjectConstraints = {
+    Types: {number | string}?,
+}
+
 type PropertyValues = {
     Text: string,
     Number: number,
@@ -53,6 +63,9 @@ type PropertyValues = {
     CFrame: CFrame,
     Enum: EnumItem,
     CustomEnum: CustomEnum.RegisteredOption<any>,
+
+    -- The target's local id, not the object. See Objects/Shared.
+    Object: number,
 }
 
 type PropertyConstraints = {
@@ -64,6 +77,7 @@ type PropertyConstraints = {
     CFrame: nil,
     Enum: EnumConstraints,
     CustomEnum: CustomEnumConstraints,
+    Object: ObjectConstraints,
 }
 
 type function GetFromMap(Map, Key)
@@ -162,6 +176,7 @@ Types.Map = {
     CFrame = "CFrame",
     Enum = "EnumItem",
     CustomEnum = "table",
+    Object = "number",
 }
 
 Types.Ids = {
@@ -173,6 +188,7 @@ Types.Ids = {
     CFrame = 5,
     Enum = 6,
     CustomEnum = 7,
+    Object = 8,
 }
 
 const F32_MAX = 3.4028235e+38
@@ -209,6 +225,22 @@ function Types:IsValid<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraints
 
     if Type == "CustomEnum" and (Value :: any).__type ~= "CustomEnumOption" then
         return false
+    end
+
+    -- A reference is a local id, so the same bounds a local id has. Whole,
+    -- because it indexes a scene's object table; zero, because a reference
+    -- pointing at nothing still has to be a number the format can write.
+    --
+    -- Whether the id names anything, and whether what it names is an allowed
+    -- type, is not decided here: both need the copy holding the object, and a
+    -- property does not know which object carries it. An id naming nothing is
+    -- valid in any case -- a pack restores its objects one at a time, so a
+    -- button is read back before the door it points at exists.
+    if Type == "Object" then
+        const TypedValue = (Value :: any) :: number
+        return TypedValue >= 0
+            and TypedValue <= Handles.MAX_LOCAL
+            and TypedValue % 1 == 0
     end
 
     if Constraints then
@@ -344,14 +376,34 @@ function Types:GetTypeId(Type: PropertyType): number?
     return Types.Ids[Type]
 end
 
+-- Lossy, and more so since Object joined: a reference is a Luau number exactly
+-- as a Number is, so this cannot tell them apart and never could -- the
+-- difference is what the registry says the property is, not what the value
+-- looks like. Ordered by type id so the ambiguity resolves the same way every
+-- run, to the older and broader of the two. Iterating Types.Map directly left
+-- it to hash order, which meant a plain 5 answered Number or Object depending
+-- on nothing at all.
 local ReverseMap;
 function Types:GetTypeFromValue(Value: any): PropertyType?
     const TypeOf = typeof(Value)
     if not ReverseMap then
-        const Map = {}
-        for i, v in Types.Map do
-            Map[v] = i
+        const Names = {}
+        for Name in Types.Map do
+            table.insert(Names, Name)
         end
+
+        table.sort(Names, function(Left: string, Right: string): boolean
+            return Types.Ids[Left] < Types.Ids[Right]
+        end)
+
+        const Map = {}
+        for _, Name in Names do
+            const Luau = Types.Map[Name]
+            if Map[Luau] == nil then
+                Map[Luau] = Name
+            end
+        end
+
         ReverseMap = Map
     end
 

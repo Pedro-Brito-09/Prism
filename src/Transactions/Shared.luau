@@ -126,6 +126,88 @@ function Shared.factory(
         return __create(self, Obj.Parent, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
     end
 
+    -- Several objects duplicated as one thing. Each is a create, exactly as a
+    -- single duplicate is, so the same rights are asked for -- and then the
+    -- references between them are rewritten to name the creates rather than the
+    -- originals, because the ids of the new objects do not exist yet on this
+    -- side and will not until the far end has minted them.
+    --
+    -- A reference that points outside the group keeps its id: duplicating a
+    -- lever without the door it works should leave it working that same door.
+    const function __duplicate_group(
+        self: Transaction,
+        Targets: {Types.ObjectReference},
+        Live: ObjectTypes.SceneInstanceId?
+    ): Transaction
+        const Sources: {ObjectTypes.Object} = {}
+
+        for _, Target in Targets do
+            const Obj = Resolve(Target)
+            if not Obj or Obj.Destroyed then
+                Reject(self, "Cannot duplicate an object that is not here.")
+                continue
+            end
+
+            if Obj.Local then
+                Reject(self, `{Obj.Name} belongs to a scene this client owns; duplicate it with Objects:DuplicateGroup.`)
+                continue
+            end
+
+            table.insert(Sources, Obj)
+        end
+
+        -- Which operation makes the duplicate of each original. Read back from
+        -- the list rather than counted, because a create the builder refused
+        -- adds nothing to it and every index after would be wrong.
+        const MadeBy: {[ObjectTypes.Object]: number} = {}
+
+        for _, Obj in Sources do
+            const Before = #self.Operations
+            __create(self, Obj.Parent, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
+
+            if #self.Operations > Before then
+                MadeBy[Obj] = #self.Operations
+            end
+        end
+
+        for Source, Index in MadeBy do
+            const Operation = self.Operations[Index] :: Types.CreateOperation
+
+            for PropertyId, Value in Operation.Properties do
+                const Prop = Source:GetProperty(PropertyId)
+                if not Prop or Prop.Type ~= "Object" then
+                    continue
+                end
+
+                -- Read against the original's copy, which is where the id it
+                -- holds means what it was written to mean.
+                const Pointed = Objects:Resolve(Source.InstanceId, Value)
+                if not Pointed then
+                    continue
+                end
+
+                const Instead = MadeBy[Pointed]
+                if not Instead then
+                    continue
+                end
+
+                if not Operation.References then
+                    Operation.References = {}
+                end
+
+                (Operation.References :: any)[PropertyId] = Instead
+
+                -- And not as a value as well. The id is the original target's,
+                -- so sending it would put the wrong object in the property for
+                -- as long as it took the fixup to overwrite it, and would cost
+                -- the bytes to say something already being said.
+                Operation.Properties[PropertyId] = nil
+            end
+        end
+
+        return self
+    end
+
     const function __set(
         self: Transaction,
         Target: Types.ObjectReference,
@@ -144,11 +226,26 @@ function Shared.factory(
             return self
         end
 
+        -- A reference is stored as the target's local id, and a caller holding
+        -- the target holds the object. Resolved here so Set takes the same
+        -- thing Object:Set takes, and so pointing at an object in another copy
+        -- is refused where the objects are still both in hand to be named.
+        local Held = Value
+        if Prop.Type == "Object" then
+            const Target, Why = Objects.Reference(Obj.InstanceId, Prop, Value)
+            if Target == nil then
+                Reject(self, `{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)
+                return self
+            end
+
+            Held = Target
+        end
+
         -- Checked here as well as at the far end, and not because the far end
         -- might not: a value the receiver will refuse costs a round trip and
         -- comes back as a bare false, while this names the property and the
         -- value that could not be held.
-        if not PropertyTypes:IsValid(Prop.Type, Value, Prop.Constraints) then
+        if not PropertyTypes:IsValid(Prop.Type, Held, Prop.Constraints) then
             Reject(self, `{Prop.Name} cannot hold {tostring(Value)}.`)
             return self
         end
@@ -157,7 +254,7 @@ function Shared.factory(
             Kind = "Set" :: "Set",
             Target = Obj.RuntimeId,
             Property = Prop.Parent,
-            Value = Value,
+            Value = Held,
             Type = Prop.Type,
         })
 
@@ -200,6 +297,7 @@ function Shared.factory(
 
         Transaction.Create = __create
         Transaction.Duplicate = __duplicate
+        Transaction.DuplicateGroup = __duplicate_group
         Transaction.Set = __set
         Transaction.Destroy = __destroy
         Transaction.Commit = __commit

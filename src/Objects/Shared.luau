@@ -194,6 +194,17 @@ const function ValidateLinks(
             continue
         end
 
+        -- Said here rather than left to the type check below, which an Object
+        -- would sail past: a reference is a local id, so Luau calls it a
+        -- number and a link would happily drive an IntValue with it. What the
+        -- instance would get is an id that means nothing outside the copy it
+        -- came from, updated whenever the reference changes and pointing at a
+        -- different object the moment the scene is loaded twice.
+        if Registry.Type == "Object" then
+            Logger:Warn(`Object {Name} links {Registry.Name}, which is an Object reference. A reference cannot drive an instance member. Link dropped.`)
+            continue
+        end
+
         const Inst = if Link.Descendant
             then Target:FindFirstChild(Link.Descendant, true)
             else Target
@@ -290,6 +301,147 @@ const function BuildLinks(
     return if Count > 0 then Map else nil
 end
 
+--=============================================================================
+-- References
+--=============================================================================
+
+-- An Object property holds the target's local id -- the low half of its
+-- persistent id -- and nothing else. That is what makes a reference survive a
+-- save: it is written exactly as the pack's own ids are, and the scene stamps
+-- its own id on at load, so every reference inside a pack moves by the same
+-- amount and still names what it named.
+--
+-- A local id only means something inside one copy. Ask a scene loaded twice for
+-- local id 4 and there are two answers, which is the whole point: two loaded
+-- copies of one room each point at their own door. So resolution always goes
+-- through the copy holding the object doing the referring, never through a
+-- scene and never through the workspace.
+--
+-- Each side hands in its own Find, because Shared cannot require the module
+-- that requires it: the server reads the copy's ByLocal, the client its index
+-- of the same thing.
+
+export type Find = (Instance_: Types.SceneInstanceId, Local: number) -> Types.Object?
+
+-- No target. Zero rather than nil, because a property with no value reads as
+-- its default and the format has to write something either way.
+const NO_TARGET = 0
+
+const function AllowedType(Constraints: any, Target: Types.Object): boolean
+    if not Constraints or not Constraints.Types then
+        return true
+    end
+
+    return table.find(Constraints.Types, Target.Parent) ~= nil
+        or table.find(Constraints.Types, Target.Name) ~= nil
+end
+
+-- The live object an Object property points at, or nil. Nil covers three cases
+-- that are deliberately not told apart: the property holds no target, the
+-- target was destroyed, and the target has not been built yet -- a pack
+-- restores its objects one at a time, so a button is read back before the door
+-- it points at exists. The stored id is untouched in all three, so a target
+-- that comes back under the local id it had -- a copy loaded again from the
+-- same pack -- is pointed at again by everything that pointed at it.
+const function ResolveReference(Copy: Types.SceneInstanceId, Value: any, Find: Find): Types.Object?
+    if type(Value) ~= "number" or Value == NO_TARGET then
+        return nil
+    end
+
+    const Target = Find(Copy, Value)
+    if not Target or Target.Destroyed then
+        return nil
+    end
+
+    return Target
+end
+
+-- What to store for a value someone wants to put in an Object property: a live
+-- object, a local id, or nil to clear it. Returns nil and a reason when the
+-- value cannot be held, so each caller can refuse the way its layer refuses --
+-- a setter returns false, a transaction refuses the whole list.
+--
+-- The type constraint is checked here rather than in Properties:IsValid because
+-- this is the first layer that can: a property knows its own value, not which
+-- object carries it, and what a local id names depends on which copy is asking.
+-- It is checked only when the target actually resolves. A dangling id is always
+-- allowed -- refusing one would make a pack unrestorable in any order but the
+-- one it happened to be written in.
+--
+-- Takes the copy rather than the object doing the referring, because the object
+-- is not always there to take: Construct applies a create's initial values
+-- before the object they belong to has been assembled, and the copy is what the
+-- ids are read against in either case.
+const function Reference(
+    Copy: Types.SceneInstanceId,
+    Prop: PropertyTypes.Property<any>,
+    Value: any,
+    Find: Find
+): (number?, string?)
+    if Value == nil then
+        return NO_TARGET
+    end
+
+    local Target: number
+
+    if type(Value) == "number" then
+        Target = Value
+    elseif type(Value) == "table" and type((Value :: any).RuntimeId) == "number" then
+        const Other = Value :: Types.Object
+        if Other.Destroyed then
+            return nil, `{Other.Name} has been destroyed`
+        end
+
+        -- The one hard constraint on a reference. A local id from another copy
+        -- would name whatever happens to hold that id here, and after either
+        -- scene is saved and loaded somewhere else it would name nothing at
+        -- all. Cross-copy and cross-scene references are out of scope for the
+        -- same reason.
+        if Other.InstanceId ~= Copy then
+            return nil, `{Other.Name} is in another copy, and a reference only names objects in the copy holding it`
+        end
+
+        Target = Other.LocalId
+    else
+        return nil, `a {typeof(Value)} is neither an object nor a local id`
+    end
+
+    if Target == NO_TARGET then
+        return NO_TARGET
+    end
+
+    const Found = Find(Copy, Target)
+    if Found and not Found.Destroyed and not AllowedType(Prop.Constraints, Found) then
+        return nil, `{Prop.Name} may not point at a {Found.Name}`
+    end
+
+    return Target
+end
+
+-- What a setter hands to Prop:Set, for any property type. Everything but an
+-- Object passes straight through, so a caller does not have to know which kind
+-- it is holding -- there are four setters across the two sides and each one
+-- forgetting this individually is how a reference would come to mean one thing
+-- through a transaction and another through Object:Set.
+const function Accept(
+    Obj: Types.Object,
+    Prop: PropertyTypes.Property<any>,
+    Value: any,
+    Find: Find
+): (boolean, any)
+    if Prop.Type ~= "Object" then
+        return true, Value
+    end
+
+    const Target, Why = Reference(Obj.InstanceId, Prop, Value, Find)
+    if Target == nil then
+        Logger:Warn(`Cannot point {Obj.Name}.{Prop.Name} at that value: {Why}.`)
+        return false, nil
+    end
+
+    return true, Target
+end
+
 -- An object's values as initial values for another of its type, which is what
 -- duplicating one is. The value held, not the default: a property left at its
 -- default has nothing to copy, and the new object starts at that default anyway.
@@ -344,6 +496,11 @@ return {
     BuildLinks = BuildLinks,
     ReleaseLinks = ReleaseLinks,
     Snapshot = Snapshot,
+
+    NO_TARGET = NO_TARGET,
+    ResolveReference = ResolveReference,
+    Reference = Reference,
+    Accept = Accept,
 
     -- Reading or destroying an already destroyed object answers instead of
     -- throwing. The previous noop raised an error, which meant a stale

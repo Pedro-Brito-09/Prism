@@ -345,6 +345,28 @@ T:Test("IsValid checks the underlying type", function()
     T:Ok(not PropertyTypes:IsValid("Number", nil), "nil")
 end)
 
+T:Test("a reference is valid as an id and nothing else", function()
+    T:Ok(PropertyTypes:IsValid("Object", 0), "zero is no target")
+    T:Ok(PropertyTypes:IsValid("Object", 12), "a local id")
+    T:Ok(PropertyTypes:IsValid("Object", Handles.MAX_LOCAL), "the largest one")
+    T:Ok(not PropertyTypes:IsValid("Object", -1), "not negative")
+    T:Ok(not PropertyTypes:IsValid("Object", 1.5), "not fractional")
+    T:Ok(not PropertyTypes:IsValid("Object", Handles.MAX_LOCAL + 1), "not past the id space")
+    T:Ok(not PropertyTypes:IsValid("Object", "4"), "not a string")
+
+    -- What an id names, and whether that is something the property may point
+    -- at, is not a question a value can answer on its own: it needs the copy
+    -- doing the asking. Objects/Shared is where that is settled.
+    T:Ok(PropertyTypes:IsValid("Object", 999999, {Types = {"Nothing"}}), "a dangling id passes here")
+end)
+
+T:Test("a plain number reads back as a Number, not an Object", function()
+    -- Both are Luau numbers, so the reverse map has two candidates for one
+    -- entry and used to pick whichever hash order reached first.
+    T:Eq(PropertyTypes:GetTypeFromValue(5), "Number", "number")
+    T:Eq(PropertyTypes:GetTypeFromValue("hi"), "Text", "and the unambiguous ones still answer")
+end)
+
 T:Test("FixValue clamps numbers into range", function()
     const Constraints = {MinValue = 0, MaxValue = 10}
     T:Eq(PropertyTypes:FixValue("Number", 20, Constraints), 10, "over")
@@ -416,6 +438,17 @@ T:Test("number encoding is chosen by value, not schema", function()
     T:Eq(buffer.len(Compressor:CompressValue("Number", 42)), 2, "small int: tag + 1")
     T:Eq(buffer.len(Compressor:CompressValue("Number", 0.5)), 5, "f32: tag + 4")
     T:Eq(buffer.len(Compressor:CompressValue("Number", 0.1)), 9, "f64: tag + 8")
+end)
+
+T:Test("a reference round trips as the local id it stores", function()
+    T:Eq(ValueRoundTrip("Object", 0, "no target"), 0)
+    T:Eq(ValueRoundTrip("Object", 1, "first id"), 1)
+    T:Eq(ValueRoundTrip("Object", 70000, "past two bytes"), 70000)
+    T:Eq(ValueRoundTrip("Object", Handles.MAX_LOCAL, "the largest local id"), Handles.MAX_LOCAL)
+
+    -- A varint, so an id a hand built scene actually uses costs one byte and
+    -- a reference is no dearer than the number it is.
+    T:Eq(buffer.len(Compressor:CompressValue("Object", 4)), 2, "tag + 1")
 end)
 
 T:Test("other value types round trip", function()
@@ -2361,6 +2394,314 @@ T:Test("a commit costs one action, not one per object", function()
 end)
 
 --=============================================================================
+-- References
+--=============================================================================
+
+T:Describe("References")
+
+-- Registered at load with everything else, so the client receives them too and
+-- checks that a reference resolves on its side as well.
+const TargetId = Properties:Register({
+    Name = "TestTarget",
+    Type = "Object",
+    DefaultValue = 0,
+}) :: number
+
+const DoorOnlyId = Properties:Register({
+    Name = "TestDoorOnly",
+    Type = "Object",
+    DefaultValue = 0,
+    Constraints = {Types = {"TestDoor"}},
+}) :: number
+
+const DoorId = Objects:Register({
+    Name = "TestDoor",
+    Properties = {TitleId},
+}) :: number
+
+const ButtonId = Objects:Register({
+    Name = "TestButton",
+    Properties = {TitleId, TargetId, DoorOnlyId},
+}) :: number
+
+const function Room(Name: string)
+    const Scene = Scenes.new({Name = Name})
+    return Scene, Scene:Load() :: any
+end
+
+T:Test("a reference reads back as the object it names", function()
+    const Scene, Copy = Room("RefRoom")
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "Button"})
+
+    T:Eq(Button:Get(TargetId), nil, "nothing pointed at to begin with")
+
+    T:Ok(Button:Set(TargetId, Door), "takes the object itself")
+    T:Eq(Button:Get(TargetId), Door, "and hands the object back")
+    T:Eq(Button:GetProperty(TargetId).Value, Door.LocalId, "storing its local id")
+
+    T:Ok(Button:Set(TargetId, Door.LocalId), "takes a raw id too")
+    T:Eq(Button:Get(TargetId), Door, "resolving to the same object")
+
+    T:Ok(Button:Set(TargetId, nil), "and clears")
+    T:Eq(Button:GetProperty(TargetId).Value, 0, "to no target")
+
+    Scene:Destroy()
+end)
+
+T:Test("a destroyed target reads as nil and the id stays put", function()
+    const Scene, Copy = Room("RefDangling")
+    const Door = Copy:Create(DoorId)
+    const Button = Copy:Create(ButtonId)
+
+    Button:Set(TargetId, Door)
+    const Stored = Button:GetProperty(TargetId).Value
+
+    Door:Destroy()
+
+    T:Eq(Button:Get(TargetId), nil, "reads as nothing")
+    T:Eq(Button:GetProperty(TargetId).Value, Stored, "but the id is kept")
+
+    Scene:Destroy()
+end)
+
+T:Test("each copy of one scene resolves its own", function()
+    const Scene = Scenes.new({Name = "RefTwice"})
+    const First = Scene:Load() :: any
+
+    const Door = First:Create(DoorId, {[TitleId] = "Door"})
+    const Button = First:Create(ButtonId, {[TitleId] = "Button"})
+    Button:Set(TargetId, Door)
+    First:Commit()
+
+    const Second = Scene:Load() :: any
+
+    const OtherButton = Second:Find(Button.LocalId)
+    const OtherDoor = Second:Find(Door.LocalId)
+
+    T:Ok(OtherButton and OtherDoor, "the second copy restored both")
+    T:Ok(OtherButton ~= Button, "and they are not the same objects")
+
+    T:Eq(Button:Get(TargetId), Door, "the first copy's button points at the first copy's door")
+    T:Eq(OtherButton:Get(TargetId), OtherDoor, "and the second's at the second's")
+
+    Scene:Destroy()
+end)
+
+T:Test("a reference only names objects in the same copy", function()
+    const Scene, Here = Room("RefHere")
+    const Elsewhere = Scene:Load() :: any
+
+    const Door = Elsewhere:Create(DoorId)
+    const Button = Here:Create(ButtonId)
+
+    T:Ok(not Button:Set(TargetId, Door), "refused across copies")
+    T:Eq(Button:GetProperty(TargetId).Value, nil, "and nothing was written")
+
+    Scene:Destroy()
+end)
+
+T:Test("a constrained reference refuses what it may not point at", function()
+    const Scene, Copy = Room("RefConstrained")
+    const Door = Copy:Create(DoorId)
+    const Button = Copy:Create(ButtonId)
+    const Other = Copy:Create(ButtonId)
+
+    T:Ok(Button:Set(DoorOnlyId, Door), "a door is allowed")
+    T:Ok(not Button:Set(DoorOnlyId, Other), "a button is not")
+    T:Eq(Button:Get(DoorOnlyId), Door, "and the refusal changed nothing")
+
+    -- Nothing to check the constraint against, and refusing would make a pack
+    -- restorable only in the order it happened to be written.
+    T:Ok(Button:Set(DoorOnlyId, 999999), "a dangling id is allowed")
+    T:Eq(Button:Get(DoorOnlyId), nil, "and reads as nothing")
+
+    Scene:Destroy()
+end)
+
+T:Test("a reference survives a commit and a reload", function()
+    const Scene = Scenes.new({Name = "RefSaved"})
+    const Copy = Scene:Load() :: any
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "Button"})
+    Button:Set(TargetId, Door)
+
+    Copy:Commit()
+    Copy:Unload()
+
+    const Reloaded = Scene:Load() :: any
+    const Back = Reloaded:Find(Button.LocalId)
+
+    T:Ok(Back, "the button came back")
+    T:Eq(Back:Get(TargetId), Reloaded:Find(Door.LocalId), "still pointing at the door")
+
+    Scene:Destroy()
+end)
+
+T:Test("a link on a reference is refused at registration", function()
+    -- An Object is a number as far as Luau is concerned, so the type check
+    -- would pass and the part would be driven with an id meaning nothing
+    -- outside its copy.
+    const Linked = Objects:Register({
+        Name = "TestLinkedReference",
+        Properties = {TargetId},
+        Instance = Template,
+        Links = {{Property = TargetId, Type = "Attribute", Name = "Target"}},
+    }) :: number
+
+    T:Eq(Objects:GetRegistry(Linked).Links, nil, "the link was dropped")
+    Objects:Unregister(Linked)
+end)
+
+T:Test("duplicating one object keeps its reference, a group remaps it", function()
+    const Scene, Copy = Room("RefDuplicate")
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "Button"})
+    Button:Set(TargetId, Door)
+
+    -- One object on its own: the copy still works the original door, which is
+    -- what duplicating a lever without its door should do.
+    const Alone = Objects:Duplicate(Button)
+    T:Eq(Alone:Get(TargetId), Door, "the lone duplicate keeps the original target")
+
+    const Made = Objects:DuplicateGroup({Button, Door})
+    T:Eq(#Made, 2, "both were made")
+
+    const NewButton, NewDoor = Made[1], Made[2]
+    T:Ok(NewButton ~= Button and NewDoor ~= Door, "new objects")
+    T:Eq(NewButton:Get(TargetId), NewDoor, "and the copy points at the copy")
+    T:Eq(Button:Get(TargetId), Door, "the original is untouched")
+
+    Scene:Destroy()
+end)
+
+T:Test("a group duplicate keeps references pointing outside it", function()
+    const Scene, Copy = Room("RefOutside")
+    const Door = Copy:Create(DoorId)
+    const First = Copy:Create(ButtonId)
+    const Second = Copy:Create(ButtonId)
+
+    First:Set(TargetId, Door)
+    Second:Set(TargetId, Door)
+
+    -- The door is not in the group, so both copies keep working it.
+    const Made = Objects:DuplicateGroup({First, Second})
+
+    T:Eq(Made[1]:Get(TargetId), Door, "first copy still points outside")
+    T:Eq(Made[2]:Get(TargetId), Door, "and so does the second")
+
+    Scene:Destroy()
+end)
+
+T:Test("a transaction can create two objects already wired together", function()
+    const Scene, Copy = Room("RefWired")
+
+    const Applied, Created = Transactions.Apply(nil, {
+        {
+            Kind = "Create",
+            Object = ButtonId,
+            Instance = Copy.Id,
+            Properties = {[TitleId] = "Button"},
+            References = {[TargetId] = 2},
+        },
+
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {[TitleId] = "Door"}},
+    } :: any)
+
+    T:Ok(Applied, "applied")
+    T:Eq(#Created, 2, "two objects")
+
+    const Button = Objects:Get(Created[1])
+    const Door = Objects:Get(Created[2])
+
+    -- The id the door answers to did not exist when the operation naming it
+    -- was written, which is the whole reason a reference names the operation.
+    T:Eq(Button:Get(TargetId), Door, "the button points at the door")
+
+    Scene:Destroy()
+end)
+
+T:Test("a reference to something this transaction does not create is refused", function()
+    const Scene, Copy = Room("RefBadOperation")
+    const Standing = Copy:Create(DoorId, {[TitleId] = "Standing"})
+
+    T:Ok(not Transactions.Apply(nil, {
+        {
+            Kind = "Create",
+            Object = ButtonId,
+            Instance = Copy.Id,
+            Properties = {},
+            References = {[TargetId] = 4},
+        },
+    } :: any), "no operation 4")
+
+    -- A valid operation, and still not something that makes an object.
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = ButtonId, Instance = Copy.Id, Properties = {}, References = {[TargetId] = 2}},
+        {Kind = "Set", Target = Standing.RuntimeId, Property = TitleId, Value = "Moved", Type = "Text"},
+    } :: any), "operation 2 is not a create")
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = ButtonId, Instance = Copy.Id, Properties = {}, References = {[TitleId] = 2}},
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {}},
+    } :: any), "a Text property cannot hold a reference")
+
+    T:Eq(#Copy:GetObjects(), 1, "nothing was created")
+    T:Eq(Standing:Get(TitleId), "Standing", "and the set that rode along never landed")
+
+    Scene:Destroy()
+end)
+
+T:Test("references ride the wire inside the create that carries them", function()
+    const Operations = {
+        {
+            Kind = "Create",
+            Object = ButtonId,
+            Instance = 3,
+            Properties = {[TitleId] = "Button"},
+            References = {[TargetId] = 2},
+        },
+
+        {Kind = "Create", Object = DoorId, Instance = 3, Properties = {}},
+    }
+
+    const Read = Compressor:DecompressTransaction(Compressor:CompressTransaction(Operations :: any))
+
+    T:Eq(Read[1].Properties[TitleId], "Button", "the values still came across")
+    T:Eq(Read[1].References[TargetId], 2, "and the reference with them")
+    T:Eq(Read[2].References, nil, "a create with none carries none")
+
+    -- References are a hash map on the way in and sorted on the way out, for
+    -- the reason the values are: one edit has to write one set of bytes.
+    T:Eq(
+        buffer.tostring(Compressor:CompressTransaction(Operations :: any)),
+        buffer.tostring(Compressor:CompressTransaction(Operations :: any)),
+        "the same operations write the same bytes"
+    )
+end)
+
+T:Test("a transaction duplicates a group with its references remapped", function()
+    const Scene, Copy = Room("RefGroupTransaction")
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "Button"})
+    Button:Set(TargetId, Door)
+
+    const Applied, Created = Transactions.new():DuplicateGroup({Button, Door}):Commit()
+
+    T:Ok(Applied, "applied")
+    T:Eq(#Created, 2, "two objects")
+
+    const NewButton = Objects:Get(Created[1])
+    const NewDoor = Objects:Get(Created[2])
+
+    T:Eq(NewButton:Get(TargetId), NewDoor, "the new button points at the new door")
+    T:Eq(Button:Get(TargetId), Door, "and the originals are untouched")
+
+    Scene:Destroy()
+end)
+
+--=============================================================================
 -- Client integration fixtures
 --=============================================================================
 
@@ -2377,6 +2718,16 @@ EditableFixture:Set(TitleId, "FixtureEditable")
 
 const DestroyFixture = Objects.new(BareId)
 DestroyFixture:Set(TitleId, "FixtureDestroy")
+
+-- A button pointing at a door, both in the default scene so both replicate to
+-- everyone. The client resolves the reference from its own index rather than
+-- from the copy's, and this is what it resolves.
+const ReferenceDoor = Objects.new(DoorId)
+ReferenceDoor:Set(TitleId, "FixtureReferenceDoor")
+
+const ReferenceButton = Objects.new(ButtonId)
+ReferenceButton:Set(TitleId, "FixtureReferenceButton")
+ReferenceButton:Set(TargetId, ReferenceDoor)
 
 -- Two private scenes, each admitting only user id 1, which nobody running this
 -- is, and each holding one object that replicates to everyone and one kept for
@@ -2460,6 +2811,7 @@ T:Test("fixtures are live and carry distinct markers", function()
     T:Eq(EditableFixture:Get(TitleId), "FixtureEditable", "editable fixture")
     T:Eq(DestroyFixture:Get(TitleId), "FixtureDestroy", "destroy fixture")
     T:Ok(DeniedFixture.Instance, "instance-backed fixture")
+    T:Eq(ReferenceButton:Get(TargetId), ReferenceDoor, "reference fixture")
 end)
 
 --=============================================================================

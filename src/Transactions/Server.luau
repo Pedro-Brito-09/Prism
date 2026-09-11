@@ -54,12 +54,34 @@ type PlannedCreate = {
     -- would have picked on its own.
     Instance: any,
     Properties: {[PropertyTypes.PropertyIdentifier]: any},
+
+    -- Object properties pointing at something else this transaction creates,
+    -- by the position of that object in the plan's own create list rather than
+    -- by the operation index the packet named. Resolved to ids once the creates
+    -- have run and the copy has minted them.
+    References: {[PropertyTypes.PropertyIdentifier]: number}?,
 }
 
 type PlannedSet = {
     Object: ObjectTypes.Object,
     Property: PropertyTypes.Property<any>,
     Value: any,
+}
+
+-- One create's reference to another, while the plan is still being built. It
+-- cannot be answered where it is read -- the create it names may be further
+-- down the list, which is how a button is created before its door -- so it is
+-- held with everything needed to check it once the whole list is known.
+type PendingReference = {
+    -- Where in Creates the object doing the pointing is.
+    Create: number,
+
+    Property: PropertyTypes.PropertyIdentifier,
+
+    -- The operation the author named, and the copy the create carrying this
+    -- reference is going into, as the packet wrote it.
+    Operation: number,
+    Instance: number,
 }
 
 type Plan = {
@@ -91,7 +113,17 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
     -- it out of the packet that announces the removals.
     const Doomed: {[ObjectTypes.RuntimeId]: true} = {}
 
-    for _, Operation in Operations do
+    -- Where each create operation ended up in Creates. A reference names an
+    -- operation, because that is what the author could name; everything after
+    -- the plan works in creates, because that is what the apply has in hand.
+    const CreateAt: {[number]: number} = {}
+
+    -- References cannot be checked as they are read: one may name a create
+    -- further down the list, which is how a button is created before the door
+    -- it points at. Held until the whole list is known, then checked together.
+    const Pending: {PendingReference} = {}
+
+    for OperationIndex, Operation in Operations do
         if Operation.Kind == "Create" then
             const Registry = Objects:GetRegistry(Operation.Object)
             if not Registry then
@@ -170,6 +202,44 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 Instance = Live,
                 Properties = Initial,
             })
+
+            CreateAt[OperationIndex] = #Creates
+
+            if Operation.References then
+                for PropertyId, Names in Operation.References do
+                    -- Refused rather than dropped, unlike a value for a
+                    -- property the type does not carry. A value can be left out
+                    -- and leave a coherent object behind; a reference left out
+                    -- leaves an object whose whole reason for being created
+                    -- alongside the others is missing, and nothing downstream
+                    -- can tell.
+                    if not Carried[PropertyId] then
+                        return Refuse(Plr, `{Registry.Name} does not carry property {PropertyId}.`)
+                    end
+
+                    const PropertyRegistry = Properties:GetRegistry(PropertyId)
+                    if not PropertyRegistry then
+                        return Refuse(Plr, `property {PropertyId} is not registered.`)
+                    end
+
+                    if PropertyRegistry.Type ~= "Object" then
+                        return Refuse(Plr, `{PropertyRegistry.Name} is a {PropertyRegistry.Type}, which cannot hold a reference.`)
+                    end
+
+                    -- A reference is a write of that property, so it asks for
+                    -- what writing it through a value would ask for.
+                    if Plr and not Permissions:Can(Plr, "Create", Target, PropertyId) then
+                        return Refuse(Plr, `not allowed to write {PropertyRegistry.Name}.`)
+                    end
+
+                    table.insert(Pending, {
+                        Create = #Creates,
+                        Property = PropertyId,
+                        Operation = Names,
+                        Instance = Operation.Instance,
+                    })
+                end
+            end
         elseif Operation.Kind == "Set" then
             -- An object in a scene the player was never admitted to is not
             -- here, as far as they are concerned. The same goes for destroys.
@@ -204,10 +274,25 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 return Refuse(Plr, `{Prop.Name} cannot hold {tostring(Operation.Value)}.`)
             end
 
+            -- The rest of what an Object property will take, which IsValid
+            -- cannot answer: it sees a number, and whether that number names
+            -- something this property may point at depends on the copy holding
+            -- the object being written. Refused here, where the world has not
+            -- moved, rather than dropped inside the apply.
+            local Value = Operation.Value
+            if Prop.Type == "Object" then
+                const Reference, Why = Objects.Reference(Obj.InstanceId, Prop, Value)
+                if Reference == nil then
+                    return Refuse(Plr, `{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)
+                end
+
+                Value = Reference
+            end
+
             table.insert(Sets, {
                 Object = Obj,
                 Property = Prop,
-                Value = Operation.Value,
+                Value = Value,
             })
         elseif Operation.Kind == "Destroy" then
             const Obj = Objects:Get(Operation.Target)
@@ -230,6 +315,30 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
         else
             return Refuse(Plr, `unknown operation kind {tostring((Operation :: any).Kind)}.`)
         end
+    end
+
+    -- Now that every operation has been read, the references can be answered.
+    for _, Reference in Pending do
+        const Names = CreateAt[Reference.Operation]
+        if not Names then
+            return Refuse(Plr, `a reference names operation {Reference.Operation}, which is not a create in this transaction.`)
+        end
+
+        -- Both creates have to land in the same copy, because a local id means
+        -- nothing outside one. Compared as the packet wrote them: two creates
+        -- of one group carry the same copy, and a caller mixing "this copy" and
+        -- "wherever creates go" is told so rather than guessed at.
+        const Other = Operations[Reference.Operation] :: Types.CreateOperation
+        if Other.Instance ~= Reference.Instance then
+            return Refuse(Plr, "a reference names a create going into another copy.")
+        end
+
+        const Create = Creates[Reference.Create]
+        if not Create.References then
+            Create.References = {}
+        end
+
+        (Create.References :: any)[Reference.Property] = Names
     end
 
     return {
@@ -280,6 +389,36 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
             -- Silent: the objects go out together at the end, down the chunked
             -- path a scene load uses, rather than one packet each.
             table.insert(Created, Objects.new(Create.Object, Create.Properties, Create.Instance, false))
+        end
+
+        -- Every create has run, so every id a reference was waiting on exists.
+        -- Before the announcement rather than after, which is what makes an
+        -- object go out already pointing where it should: a client never sees
+        -- the moment where a duplicated button still names the original door.
+        for Index, Create in Planned.Creates do
+            if not Create.References then
+                continue
+            end
+
+            const Obj = Created[Index]
+            for PropertyId, Names in Create.References do
+                const Prop = Obj.Properties[PropertyId]
+                const Points = Created[Names]
+                if not Prop or not Points then
+                    continue
+                end
+
+                -- Through the same check a set makes, against the objects now
+                -- that they are real. The plan compared what the packet said;
+                -- this compares what was built, and a failure here throws into
+                -- the rollback below rather than leaving half a wiring.
+                const Target, Why = Objects.Reference(Obj.InstanceId, Prop, Points)
+                if Target == nil then
+                    error(`{Obj.Name}.{Prop.Name} cannot point at {Points.Name}: {Why}.`)
+                end
+
+                Prop:Set(Target)
+            end
         end
 
         for _, Set in Planned.Sets do

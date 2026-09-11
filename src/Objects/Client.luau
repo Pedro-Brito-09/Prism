@@ -37,6 +37,11 @@ const ByRuntimeId: {[RuntimeId]: Instance} = setmetatable({}, {__mode = "v"}) ::
 -- editor showing two copies of one room has to keep them apart.
 const ByInstance: {[Types.SceneInstanceId]: {[RuntimeId]: Object}} = {}
 
+-- The same objects by the id a reference names them with, per copy. A local id
+-- is unique only inside one copy, so this is two levels deep for the same
+-- reason instance:Find is scoped to a copy.
+const LocalIds: {[Types.SceneInstanceId]: {[number]: Object}} = {}
+
 -- Which scene each live copy came from. Kept here rather than in Scenes/Client
 -- because an arriving object needs it to work out its own persistent identity,
 -- and Objects cannot require Scenes without a cycle.
@@ -161,9 +166,31 @@ const function Index(Obj: Object)
     end
 
     Held[Obj.RuntimeId] = Obj
+
+    local ByLocal = LocalIds[Obj.InstanceId]
+    if not ByLocal then
+        ByLocal = {}
+        LocalIds[Obj.InstanceId] = ByLocal
+    end
+
+    ByLocal[Obj.LocalId] = Obj
 end
 
 const function Unindex(Obj: Object)
+    const ByLocal = LocalIds[Obj.InstanceId]
+    if ByLocal then
+        -- Only if it is still the one filed there, like the server's Release.
+        -- An object rebuilt under the id a torn down one held must not have the
+        -- loser clear the winner's entry.
+        if ByLocal[Obj.LocalId] == Obj then
+            ByLocal[Obj.LocalId] = nil
+        end
+
+        if next(ByLocal) == nil then
+            LocalIds[Obj.InstanceId] = nil
+        end
+    end
+
     const Held = ByInstance[Obj.InstanceId]
     if not Held then
         return
@@ -173,6 +200,15 @@ const function Unindex(Obj: Object)
     if next(Held) == nil then
         ByInstance[Obj.InstanceId] = nil
     end
+end
+
+-- One object in one copy by the id a reference stores. The server reads its
+-- copy's ByLocal for this; a copy the server owns has no such table on this
+-- side, so the index above is kept for every object the client holds however it
+-- arrived -- replicated, drawn, or built in a scene this client owns.
+const function Find(Copy: Types.SceneInstanceId, Local: number): Object?
+    const ByLocal = LocalIds[Copy]
+    return if ByLocal then ByLocal[Local] else nil
 end
 
 -- Every optimistic set takes a ticket, and only the newest outstanding one for
@@ -233,7 +269,17 @@ const function __getter(self: Object, Reference: Types.PropertyReference): any?
         return nil
     end
 
-    return if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+    const Value = if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+
+    -- The live object rather than the id it is stored as, exactly as on the
+    -- server. Nil while the target has not replicated here yet, which is the
+    -- same nil a destroyed target reads as: the id is kept either way, so the
+    -- link comes back the moment the object does.
+    if Prop.Type == "Object" then
+        return Shared.ResolveReference(self.InstanceId, Value, Find)
+    end
+
+    return Value
 end
 
 -- Applies locally first, then confirms with the server on a separate thread. The
@@ -248,8 +294,17 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         return false
     end
 
+    -- A reference given as the target object, resolved to the id that is
+    -- actually stored before anything is applied or sent. Refused here rather
+    -- than by the server, which would cost a round trip to be told what this
+    -- side already knows.
+    const Holdable, Val = Shared.Accept(self, Prop, Value, Find)
+    if not Holdable then
+        return false
+    end
+
     const Before = Prop.Value
-    const Accepted, Changed = Prop:Set(Value)
+    const Accepted, Changed = Prop:Set(Val)
     if not Accepted then
         return false
     end
@@ -385,8 +440,13 @@ const function __local_setter(self: Object, Reference: Types.PropertyReference, 
         return false
     end
 
+    const Holdable, Val = Shared.Accept(self, Prop, Value, Find)
+    if not Holdable then
+        return false
+    end
+
     const Before = Prop.Value
-    const Accepted, Changed = Prop:Set(Value)
+    const Accepted, Changed = Prop:Set(Val)
     if Accepted and Changed then
         Listeners.Notify(Edited, self, Prop.Parent, Before, Prop.Value)
     end
@@ -508,9 +568,25 @@ const function Construct(
     if InitialValues then
         for PropertyId, Value in InitialValues do
             const Prop = Props[PropertyId]
-            if Prop then
-                Prop:Set(Value)
+            if not Prop then
+                continue
             end
+
+            -- Against the copy the object is going into, as on the server: a
+            -- reference is read against a copy, and the object carrying it does
+            -- not exist yet.
+            if Prop.Type == "Object" then
+                const Target, Why = Shared.Reference(Live.Id, Prop, Value, Find)
+                if Target == nil then
+                    Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
+                    continue
+                end
+
+                Prop:Set(Target)
+                continue
+            end
+
+            Prop:Set(Value)
         end
     end
 
@@ -589,6 +665,57 @@ function Objects:Duplicate(Obj: Object): Object?
     return Construct(Obj.Parent, Shared.Snapshot(Obj), Live, nil)
 end
 
+-- The group form, for scenes this client owns. References that point inside the
+-- group follow the copies; references that point outside it are left as they
+-- are. See the server's DuplicateGroup, which this mirrors -- with no
+-- announcement to batch, because nothing here is replicated.
+function Objects:DuplicateGroup(List: {Object}): {Object}
+    const Sources: {Object} = {}
+    const Made: {Object} = {}
+    const Counterpart: {[Object]: Object} = {}
+
+    for _, Obj in List do
+        if Obj.Destroyed then
+            continue
+        end
+
+        const Live = LocalCopy[Obj]
+        if not Obj.Local or not Live then
+            Logger:Warn(`{Obj.Name} is the server's to duplicate. Use Transactions.new():DuplicateGroup(objects):Commit().`)
+            continue
+        end
+
+        const New = Construct(Obj.Parent, Shared.Snapshot(Obj), Live, nil)
+
+        table.insert(Sources, Obj)
+        table.insert(Made, New)
+        Counterpart[Obj] = New
+    end
+
+    for Index, New in Made do
+        const Source = Sources[Index]
+
+        for PropertyId, Prop in New.Properties do
+            if Prop.Type ~= "Object" then
+                continue
+            end
+
+            const Was = Source.Properties[PropertyId]
+            const Pointed = if Was then Shared.ResolveReference(Source.InstanceId, Was.Value, Find) else nil
+            if not Pointed then
+                continue
+            end
+
+            const Instead = Counterpart[Pointed]
+            if Instead then
+                Prop:Set(Instead.LocalId)
+            end
+        end
+    end
+
+    return Made
+end
+
 -- A tagged part has arrived: file it, and hand it to its object if that object
 -- is already here. The two halves reach a client in either order -- the object
 -- travels over the remote, the part over ordinary replication -- so whichever
@@ -638,6 +765,25 @@ function Objects:Get(RuntimeId: RuntimeId): Object?
     return Workspace[RuntimeId]
 end
 
+-- The object a stored reference names, for a caller holding the raw local id
+-- rather than reading it off a property. Scoped to a copy, because that is the
+-- only scope a local id answers in.
+function Objects:Resolve(Copy: Types.SceneInstanceId, Local: number): Object?
+    return Find(Copy, Local)
+end
+
+-- What may be written into an Object property of an object in this copy, as a
+-- local id, or nil and the reason it may not. The server's twin, so a
+-- transaction built here refuses what the server would refuse -- before the
+-- packet rather than after the round trip.
+function Objects.Reference(
+    Copy: Types.SceneInstanceId,
+    Prop: PropertyTypes.Property<any>,
+    Value: any
+): (number?, string?)
+    return Shared.Reference(Copy, Prop, Value, Find)
+end
+
 -- The two halves of a persistent id, for a caller holding one that did not come
 -- off an object. Objects carry Scene and LocalId already.
 function Objects:Split(Persistent: Types.PersistentId): (Types.SceneIdentifier, number)
@@ -681,6 +827,11 @@ function Objects.DropInstance(Live: Types.SceneInstanceId)
     end
 
     ByInstance[Live] = nil
+
+    -- Emptied by the tearing down above, which unindexes each object, and
+    -- cleared here for the same reason the line above it is: the copy is gone,
+    -- so nothing about it is worth keeping on a maybe.
+    LocalIds[Live] = nil
 end
 
 function Objects:GetRegistered(): {[ObjectIdentifier]: ObjectRegistry}

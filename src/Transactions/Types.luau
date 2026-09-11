@@ -39,6 +39,18 @@ export type CreateOperation = {
     -- the object type does not carry is dropped rather than refused, matching
     -- what restoring a saved object does with one.
     Properties: {[PropertyTypes.PropertyIdentifier]: any},
+
+    -- Object properties whose target is made by this same transaction, as the
+    -- index of the create operation that makes it. They cannot be ordinary
+    -- values: a reference stores the target's local id, and the id an object
+    -- created here will answer to is minted by the copy at the far end -- after
+    -- the packet was written. So the author names the operation instead and the
+    -- receiver fills the id in once every create has run.
+    --
+    -- This is what lets a group of objects be duplicated together with the
+    -- references between them following the copies, and it is also the only way
+    -- to create two objects and wire them to each other in one transaction.
+    References: {[PropertyTypes.PropertyIdentifier]: number}?,
 }
 
 export type SetOperation = {
@@ -103,6 +115,17 @@ export type Transaction = {
     Duplicate: (
         self: Transaction,
         Target: ObjectReference,
+        Instance: ObjectTypes.SceneInstanceId?
+    ) -> Transaction,
+
+    -- The same, for several objects duplicated as one thing: references that
+    -- point at another member of the group follow the copies, and references
+    -- that point outside it are kept as they are. Duplicating the same objects
+    -- one call at a time does not do this -- nothing there knows the calls
+    -- belong together.
+    DuplicateGroup: (
+        self: Transaction,
+        Targets: {ObjectReference},
         Instance: ObjectTypes.SceneInstanceId?
     ) -> Transaction,
 
