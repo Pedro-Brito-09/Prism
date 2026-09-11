@@ -10,15 +10,6 @@ reads right, never that it was run with a player in it.
 
 ## Queued
 
-- [ ] **Scene history: diff, merge, revert.** Two properties the format already
-      has make this reachable rather than speculative. A copy serialises
-      deterministically — objects in local id order, properties in property id
-      order — so two versions of a scene produce comparable bytes instead of
-      whatever hash order gave. And persistent ids survive a save, so a diff can
-      say "this object changed" rather than "an object went and another came".
-      That is the whole basis of a three way merge. `Commit` is the point a
-      version would be recorded at.
-
 - [ ] **Undo / redo.** Transactions are the unit to record, and they already
       carry the reversal rules: a create is undone by destroying what it made, a
       set by writing back what it overwrote, and a destroy by neither, which is
