@@ -172,8 +172,12 @@ const Channels: {Channel} = {
         -- objects it created, in the order the creates were declared. A client
         -- cannot name what it is about to create -- the server mints the id --
         -- so this is the only way it learns what it made.
+        -- The bool is the transaction's Untracked: true keeps it out of this
+        -- player's history. It rides here because the history that would record
+        -- it is the server's, so a client asking to be left out has to say so
+        -- where the recording happens.
         Name = "Transactions.Apply",
-        Args = {Codecs.Buffer}, -- Compressor:CompressTransaction
+        Args = {Codecs.Buffer, Codecs.Bool}, -- Compressor:CompressTransaction, Untracked
         Returns = {Codecs.Bool, Codecs.Array(Codecs.u32)},
     },
 
@@ -255,6 +259,45 @@ const Channels: {Channel} = {
         -- negative.
         Name = "Objects.LocksChanged",
         Args = {Codecs.Array(Codecs.u32), Codecs.Array(Codecs.SignedVarint)}, -- RuntimeIds, UserIds
+    },
+
+    {
+        -- Taking back a step the server holds for this player. The id is the
+        -- step the client believes is on top, not just "undo": the two sides
+        -- keep separate halves of one order -- server scenes here, scenes the
+        -- client owns there -- and naming the step is what makes a disagreement
+        -- about which is on top answerable rather than silently wrong.
+        Name = "History.Undo",
+        Args = {Codecs.Varint}, -- StepId
+        Returns = {Codecs.Bool},
+    },
+
+    {
+        Name = "History.Redo",
+        Args = {Codecs.Varint}, -- StepId
+        Returns = {Codecs.Bool},
+    },
+
+    {
+        -- This player's two stacks, oldest first, whenever either changes. The
+        -- client holds no copy of what a server step does -- only where it sits
+        -- in the order -- so this is what it reconciles its half against, and
+        -- what tells it a step has been dropped past the limit.
+        Name = "History.Changed",
+        Args = {Codecs.Array(Codecs.Varint), Codecs.Array(Codecs.Varint)}, -- Undo, Redo
+    },
+
+    {
+        -- Forget this player's steps: the redo stack alone, or both. Both is
+        -- History:Clear. The redo stack alone is what a new action does, and it
+        -- has to cross the wire because an action in a scene the client owns
+        -- forks a history the server is holding half of -- one order means one
+        -- fork, whichever side the new action happened on.
+        --
+        -- Either way it is where deferred destroys end: a step nobody can reach
+        -- is a step whose objects nothing is keeping.
+        Name = "History.Forget",
+        Args = {Codecs.Bool}, -- RedoOnly
     },
 }
 

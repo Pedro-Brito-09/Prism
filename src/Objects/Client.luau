@@ -54,7 +54,10 @@ const DrawInto: {[Types.SceneInstanceId]: Folder} = {}
 -- Every object appearing here and going, whichever way it came: replicated
 -- from the server, built in a scene this client owns, or drawn for a copy the
 -- server opened. UI used to poll GetWorkspace to notice any of it.
-const Added: {(Obj: Object) -> ()} = {}
+-- Restored says the object came back from a pack under the id it was saved
+-- with -- a copy reading itself in, rather than anything anyone did. A history
+-- would record a step per object in a level without it.
+const Added: {(Obj: Object, Restored: boolean) -> ()} = {}
 const Removed: {(Obj: Object) -> ()} = {}
 
 -- This client's own edits through Object:Set, with the value either side --
@@ -68,7 +71,7 @@ end
 
 -- Fired once the object is filed everywhere it will be, so a listener can look
 -- it up by runtime id or through its copy straight away.
-function Objects:OnAdded(Callback: (Obj: Object) -> ()): () -> ()
+function Objects:OnAdded(Callback: (Obj: Object, Restored: boolean) -> ()): () -> ()
     return Listeners.Watch(Added, Callback, "objects appearing")
 end
 
@@ -365,31 +368,32 @@ const function __destroy(self: Object): boolean
     return Ok and Allowed == true
 end
 
-const function Teardown(Obj: Object)
-    if Obj.Destroyed then
-        return
-    end
-
-    Obj.Destroyed = true
-
+-- Leaving the world, which is not the same as ceasing to exist. Everything here
+-- can be taken back: the object is unfiled, its part goes and anything watching
+-- is told it went, but the table, its values and both its ids survive. A scene
+-- this client owns is the client's to undo in, and an undone destroy has to
+-- bring back the object it took -- under its own local id, or every reference
+-- to it comes back pointing at nothing.
+const function Withdraw(Obj: Object)
     Shared.ReleaseLinks(Obj.Links)
     Obj.Links = nil
-
-    for _, Prop in Obj.Properties do
-        Prop:Destroy()
-    end
 
     if Obj.Instance then
         ByPart[Obj.Instance] = nil
 
-        -- A replicated object's part belongs to the server and goes when the
-        -- server takes it away. A local or drawn one was cloned here and is
-        -- nobody else's to remove.
+        -- A local or drawn part was cloned here, so it is this side's to move:
+        -- out of the world and kept, so an object that comes back comes back
+        -- with the part it had rather than a fresh copy of the template.
+        -- Destroying it is Dispose's, once nothing can bring the object back.
+        --
+        -- A replicated one belongs to the server and goes when the server takes
+        -- it away. There is nothing here to keep and nothing here to destroy,
+        -- so only the reference is dropped.
         if Obj.Local or Obj.Drawn then
-            Obj.Instance:Destroy()
+            Obj.Instance.Parent = nil
+        else
+            Obj.Instance = nil
         end
-
-        Obj.Instance = nil
     end
 
     ByRuntimeId[Obj.RuntimeId] = nil
@@ -422,6 +426,33 @@ const function Teardown(Obj: Object)
     Obj.Destroy = Shared.Destroyed.Destroy
 
     Listeners.Notify(Removed, Obj)
+end
+
+-- The part that cannot be taken back: the values go, the part this side owns
+-- goes, and with them any chance of this object being itself again.
+const function Dispose(Obj: Object)
+    Obj.Suspended = nil
+
+    -- Only ever one this client cloned: a replicated part is the server's and
+    -- Withdraw already let go of the reference to it.
+    if Obj.Instance then
+        Obj.Instance:Destroy()
+        Obj.Instance = nil
+    end
+
+    for _, Prop in Obj.Properties do
+        Prop:Destroy()
+    end
+end
+
+const function Teardown(Obj: Object)
+    if Obj.Destroyed then
+        return
+    end
+
+    Obj.Destroyed = true
+    Withdraw(Obj)
+    Dispose(Obj)
 end
 
 --=============================================================================
@@ -459,7 +490,7 @@ const function __local_destroy(self: Object): boolean
         return false
     end
 
-    Teardown(self)
+    Objects.Retire(self)
     return true
 end
 
@@ -479,6 +510,65 @@ const function File(Obj: any, Order: {PropertyTypes.PropertyIdentifier})
         ByPart[Obj.Instance] = Obj.RuntimeId
         ByRuntimeId[Obj.RuntimeId] = Obj.Instance
     end
+end
+
+-- Everything being in a copy this client owns means: a part cloned from the
+-- template, links wired to it, a place in the copy and in the workspace, and
+-- the signal saying so. The inverse of Withdraw, and written once because an
+-- object coming back from a suspend has to arrive exactly as one just built
+-- does -- anything this did that reviving forgot would show up only as an
+-- undone destroy behaving unlike the object it restored.
+--
+-- The template came with the registry, and is nil if it lives somewhere that
+-- never replicates here. The type still builds objects then; they simply have
+-- no instance, which is what a server side object registered without one does.
+const function Enter(Obj: any, Ref: ObjectRegistry, Live: any, Restored: boolean?)
+    -- Already holding one means this object was withdrawn rather than
+    -- destroyed, and its part was parented out of the world and kept. It goes
+    -- back rather than being cloned again: a clone would only look like the
+    -- part that left.
+    local Inst: Instance? = Obj.Instance
+
+    if Inst then
+        Inst.Parent = Live.Folder
+    else
+        const Template = TemplateOf(Ref)
+        if Template then
+            const Clone = Template:Clone()
+            Clone:SetAttribute(Shared.RuntimeAttribute, Obj.RuntimeId)
+            CollectionService:AddTag(Clone, Shared.ObjectTag)
+
+            -- Into the copy holding it, exactly as on the server: two copies of
+            -- one room have to be able to sit in two places, and the copy's
+            -- folder is what moves them.
+            Clone.Parent = Live.Folder
+
+            Inst = Clone
+        end
+    end
+
+    Obj.Instance = Inst
+
+    -- Wired after the values are in place, so a link starts at the object's own
+    -- value rather than at the registry default and then being corrected.
+    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties)
+    Obj.Set = __local_setter
+    Obj.Destroy = __local_destroy
+
+    Obj.Release = function()
+        Live.Objects[Obj.RuntimeId] = nil
+
+        if Live.ByLocal[Obj.LocalId] == Obj then
+            Live.ByLocal[Obj.LocalId] = nil
+        end
+    end
+
+    File(Obj, Ref.Properties)
+    Live.Objects[Obj.RuntimeId] = Obj
+    Live.ByLocal[Obj.LocalId] = Obj
+    LocalCopy[Obj] = Live
+
+    Listeners.Notify(Added, Obj, Restored == true)
 end
 
 -- The client's own constructor, and deliberately not the server's: no
@@ -544,26 +634,6 @@ const function Construct(
     const RuntimeId = LocalRuntime
     LocalRuntime -= 1
 
-    -- The template came with the registry, and is nil if it lives somewhere
-    -- that never replicates here. The type still builds objects then -- they
-    -- simply have no instance, which is exactly what a server side object
-    -- registered without one does.
-    local Inst: Instance? = nil
-    const Template = TemplateOf(Ref)
-
-    if Template then
-        const Clone = Template:Clone()
-        Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
-        CollectionService:AddTag(Clone, Shared.ObjectTag)
-
-        -- Into the copy holding it, exactly as on the server: two copies of
-        -- one room have to be able to sit in two places, and the copy's model
-        -- is what moves them.
-        Clone.Parent = Live.Folder
-
-        Inst = Clone
-    end
-
     const Props = Shared.BuildProperties(Ref.Properties)
     if InitialValues then
         for PropertyId, Value in InitialValues do
@@ -601,27 +671,12 @@ const function Construct(
     Obj.Local = true
     Obj.Destroyed = false
     Obj.Properties = Props
-    Obj.Instance = Inst
-    -- Wired after the initial values land, so a link starts at the object's own
-    -- value rather than at the registry default and then being corrected.
-    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Props)
-    Obj.Set = __local_setter
-    Obj.Destroy = __local_destroy
 
-    Obj.Release = function()
-        Live.Objects[RuntimeId] = nil
-
-        if Live.ByLocal[Local] == Obj then
-            Live.ByLocal[Local] = nil
-        end
-    end
-
-    File(Obj, Ref.Properties)
-    Live.Objects[RuntimeId] = Obj
-    Live.ByLocal[Local] = Obj
-    LocalCopy[Obj] = Live
-
-    Listeners.Notify(Added, Obj)
+    -- Restored when it was given the id it was saved under, which is a copy
+    -- reading its pack rather than anybody creating anything. A history that
+    -- did not know the difference would record a step for every object in a
+    -- level the moment it loaded.
+    Enter(Obj, Ref, Live, LocalId ~= nil)
     return Obj :: any
 end
 
@@ -714,6 +769,83 @@ function Objects:DuplicateGroup(List: {Object}): {Object}
     end
 
     return Made
+end
+
+--=============================================================================
+-- Retiring
+--=============================================================================
+
+-- The client's half of deferred destruction, and only for scenes it owns: an
+-- object the server holds is destroyed where it lives, and what arrives here is
+-- the packet saying so. See Objects/Server, which this mirrors -- with no
+-- announcement and no permission pass, because a local object is nobody else's.
+
+const Keepers: {(Obj: Object) -> boolean} = {}
+
+-- Synchronous, and answers, for the reason the server's does: the object is
+-- disposed the moment nothing claims it.
+function Objects.OnRetired(Callback: (Obj: Object) -> boolean): () -> ()
+    return Listeners.Watch(Keepers, Callback, "retired objects")
+end
+
+function Objects.Suspend(Obj: Object): boolean
+    if Obj.Destroyed then
+        return false
+    end
+
+    Obj.Destroyed = true
+    Obj.Suspended = true
+    Withdraw(Obj)
+    return true
+end
+
+-- Back into the copy it left, as itself. False when that copy has been
+-- unloaded: its objects are gone, its ids mean nothing, and there is nowhere
+-- for this one to return to.
+function Objects.Revive(Obj: Object): boolean
+    if not Obj.Suspended then
+        return false
+    end
+
+    const Live = LocalCopy[Obj]
+    const Ref = Registered[Obj.Parent]
+    if not Live or not Ref or Live.Owner.Instances[Live.Id] ~= Live then
+        return false
+    end
+
+    if Live.ByLocal[Obj.LocalId] then
+        return false
+    end
+
+    Obj.Suspended = nil
+    Obj.Destroyed = false
+    Enter(Obj, Ref, Live)
+    return true
+end
+
+function Objects.Dispose(Obj: Object)
+    if not Obj.Suspended then
+        return
+    end
+
+    Dispose(Obj)
+end
+
+-- Suspend, offer, and dispose if nobody wanted it back. What Object:Destroy on
+-- a local object comes down to, so a game that never requires History destroys
+-- exactly as immediately as it always did.
+function Objects.Retire(Obj: Object)
+    if not Objects.Suspend(Obj) then
+        return
+    end
+
+    for _, Keeper in Keepers do
+        if Keeper(Obj) then
+            return
+        end
+    end
+
+    Dispose(Obj)
 end
 
 -- A tagged part has arrived: file it, and hand it to its object if that object
@@ -947,7 +1079,10 @@ const function AddObject(
     Obj.Destroy = __destroy
 
     File(Obj, Registry.Properties)
-    Listeners.Notify(Added, Obj)
+
+    -- Never restored: an object arriving from the server is the server's to
+    -- have loaded or created, and either way nothing on this side did it.
+    Listeners.Notify(Added, Obj, false)
 end
 
 -- GetTagged first: parts that replicated before this module loaded never fire

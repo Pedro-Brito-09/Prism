@@ -17,11 +17,18 @@
 -- nothing. A single refusal ends the transaction here, where the world has not
 -- moved yet.
 --
--- Then apply, creates before sets before destroys. That order is what makes the
--- thing atomic rather than merely batched: a create can be taken back by
--- destroying what it made and a set by writing back what it overwrote, but a
--- destroy cannot be taken back at all, so nothing irreversible happens until
--- everything reversible has already succeeded.
+-- Then apply, creates before sets before destroys. That order was originally
+-- what made the thing atomic rather than merely batched: a create could be
+-- taken back by destroying what it made and a set by writing back what it
+-- overwrote, while a destroy could not be taken back at all, so nothing
+-- irreversible happened until everything reversible had already succeeded.
+--
+-- A destroy withdraws its object now rather than ending it -- that is what lets
+-- a history hold it against an undo -- so the roll back reaches the destroys
+-- too and the order is no longer load bearing. It is kept because it is still
+-- the order the operations mean: a transaction that creates an object and sets
+-- a property on it reads that way round, and one that edits an object and then
+-- destroys it should not have the edit land after the removal.
 
 const PropertyTypes = require("../Properties/Types")
 const Permissions = require("../Permissions/Server")
@@ -33,11 +40,40 @@ const Scenes = require("../Scenes/Server")
 const Audience = require("../Scenes/Audience")
 const Network = require("./Network")
 const Shared = require("./Shared")
+const Listeners = require("../Listeners")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
 export type Operation = Types.Operation
 export type Transaction = Types.Transaction
+
+-- A transaction that landed, as the thing that has to be able to reverse it
+-- needs to see it: the list as the author wrote it, the objects it made, the
+-- objects it took away -- suspended rather than destroyed, so they can be put
+-- back -- and what each set overwrote, by operation.
+export type ApplyRecord = {
+    Operations: {Operation},
+    Created: {ObjectTypes.Object},
+    Removed: {ObjectTypes.Object},
+    Before: {[number]: any},
+
+    -- The object each set and destroy resolved to, by operation. Resolving them
+    -- again afterwards would not work: an object this transaction destroyed is
+    -- out of the workspace by the time anyone reads the record, and a set on an
+    -- object the same transaction went on to destroy would find nothing.
+    Targets: {[number]: ObjectTypes.Object},
+}
+
+-- Synchronous, and answers: taking the record means taking the suspended
+-- objects in it, so the answer has to arrive before Apply decides whether to
+-- dispose of them. A spawned listener could not say in time.
+const Recorders: {(Plr: Player, Record: ApplyRecord) -> boolean} = {}
+
+-- What a player's transaction did, offered to whatever records it -- History,
+-- normally. Return true to take it; see ApplyRecord.
+function Transactions.OnApplied(Callback: (Plr: Player, Record: ApplyRecord) -> boolean): () -> ()
+    return Listeners.Watch(Recorders, Callback, "applied transactions")
+end
 
 -- A ceiling on one packet, not on how much work a role may do: the rate budget
 -- is what actually bounds that, and at any sane rate it binds long before this
@@ -66,6 +102,10 @@ type PlannedSet = {
     Object: ObjectTypes.Object,
     Property: PropertyTypes.Property<any>,
     Value: any,
+
+    -- Which operation asked for it, so what the set overwrote can be reported
+    -- back against the list the author wrote rather than against the plan.
+    Index: number,
 }
 
 -- One create's reference to another, while the plan is still being built. It
@@ -88,6 +128,11 @@ type Plan = {
     Creates: {PlannedCreate},
     Sets: {PlannedSet},
     Destroys: {ObjectTypes.Object},
+
+    -- What each set and destroy operation resolved to, kept by operation so the
+    -- record handed out afterwards can name them without looking them up in a
+    -- world they may no longer be in.
+    Targets: {[number]: ObjectTypes.Object},
 }
 
 -- A client is told nothing but false, and is told it silently: a refusal that
@@ -112,6 +157,7 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
     -- operation rather than an invalid one, and dropping the repeat here keeps
     -- it out of the packet that announces the removals.
     const Doomed: {[ObjectTypes.RuntimeId]: true} = {}
+    const Targets: {[number]: ObjectTypes.Object} = {}
 
     -- Where each create operation ended up in Creates. A reference names an
     -- operation, because that is what the author could name; everything after
@@ -289,10 +335,12 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 Value = Reference
             end
 
+            Targets[OperationIndex] = Obj
             table.insert(Sets, {
                 Object = Obj,
                 Property = Prop,
                 Value = Value,
+                Index = OperationIndex,
             })
         elseif Operation.Kind == "Destroy" then
             const Obj = Objects:Get(Operation.Target)
@@ -307,6 +355,8 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             if Plr and not Permissions:Can(Plr, "Destroy", Obj) then
                 return Refuse(Plr, `not allowed to destroy {Obj.Name}.`)
             end
+
+            Targets[OperationIndex] = Obj
 
             if not Doomed[Obj.RuntimeId] then
                 Doomed[Obj.RuntimeId] = true
@@ -345,12 +395,22 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
         Creates = Creates,
         Sets = Sets,
         Destroys = Destroys,
+        Targets = Targets,
     }
 end
 
 -- Plr is who to check against, and nil means the server itself: it authored the
 -- list, so there is no role to consult and no budget to spend.
-function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {ObjectTypes.RuntimeId})
+--
+-- Tracked is false for a transaction that must not become a step in the
+-- author's history -- what History itself applies when it reverses one, and
+-- what a client asks for by committing an Untracked transaction. It is not a
+-- permission: an untracked edit is checked and charged exactly like any other.
+function Transactions.Apply(
+    Plr: Player?,
+    Operations: {Operation},
+    Tracked: boolean?
+): (boolean, {ObjectTypes.RuntimeId})
     if #Operations > MAX_OPERATIONS then
         Refuse(Plr, `{#Operations} operations is past the {MAX_OPERATIONS} a single transaction may carry.`)
         return false, {}
@@ -383,6 +443,12 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
     const Touched: {PropertyTypes.Property<any>} = {}
     const Captured: {[any]: true} = {}
     const Previous: {[any]: any} = {}
+
+    -- The same values again, but by operation rather than by property, which is
+    -- what reversing the list later reads. Two sets on one property both report
+    -- what the property held before the transaction began, because that is what
+    -- undoing the transaction has to put back.
+    const Before: {[number]: any} = {}
 
     const Ok, Err = pcall(function()
         for _, Create in Planned.Creates do
@@ -430,6 +496,8 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
                 table.insert(Touched, Prop)
             end
 
+            Before[Set.Index] = Previous[Prop]
+
             -- The property itself rather than the object's Set, which would
             -- fire a packet per operation. Links are property listeners, so
             -- they still run.
@@ -459,7 +527,11 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
         end
 
         for _, Obj in Planned.Destroys do
-            Objects.Drop(Obj)
+            -- Suspended, not destroyed. What becomes of it is decided below,
+            -- once it is known whether anything is keeping this transaction:
+            -- a player's history keeps the objects its destroys took away, so
+            -- that an undo restores them rather than replacing them.
+            Objects.Suspend(Obj, false)
             table.insert(Removed, Obj)
         end
     end)
@@ -476,12 +548,13 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
             Prop:Set(Previous[Prop])
         end
 
-        -- Except the destroys that had already run. Those cannot be taken back
-        -- -- which is why they go last -- and they still have to reach the
-        -- clients, or every client keeps drawing objects the server no longer
-        -- has.
-        if #Removed > 0 then
-            Objects.AnnounceRemoved(Removed)
+        -- Including the destroys that had already run, which is new: a destroy
+        -- withdraws an object rather than ending it, so the one operation that
+        -- used to be beyond recall is recoverable too. They were never
+        -- announced -- the removals go out in bulk below, and this path does
+        -- not reach that -- so no client ever knew they had gone.
+        for _, Obj in Removed do
+            Objects.Revive(Obj, false)
         end
 
         return false, {}
@@ -509,6 +582,39 @@ function Transactions.Apply(Plr: Player?, Operations: {Operation}): (boolean, {O
         Objects.AnnounceRemoved(Removed)
     end
 
+    -- Offered whole, and only for a player's own tracked transactions: the
+    -- server's belong to nobody and are nobody's to undo. A listener that
+    -- answers true has taken the step, and with it every object suspended
+    -- above -- they are its to revive on an undo and its to dispose of when the
+    -- step falls off the stack.
+    --
+    -- Nothing answering means nothing is holding them, and a destroy that
+    -- nobody can undo is a destroy: they end here, which is what they used to
+    -- do the moment the loop above reached them.
+    local Kept = false
+    if Plr and Tracked ~= false then
+        const Record: ApplyRecord = {
+            Operations = Operations,
+            Created = Created,
+            Removed = Removed,
+            Before = Before,
+            Targets = Planned.Targets,
+        }
+
+        for _, Callback in Recorders do
+            if Callback(Plr, Record) then
+                Kept = true
+                break
+            end
+        end
+    end
+
+    if not Kept then
+        for _, Obj in Removed do
+            Objects.Dispose(Obj)
+        end
+    end
+
     const Identifiers = table.create(#Created)
     for Index, Obj in Created do
         Identifiers[Index] = Obj.RuntimeId
@@ -528,7 +634,7 @@ function Transactions.new(): Transaction
     return New()
 end
 
-Network.Apply.OnInvoke = function(Plr: Player, Compressed: buffer): (boolean, {ObjectTypes.RuntimeId})
+Network.Apply.OnInvoke = function(Plr: Player, Compressed: buffer, Untracked: boolean): (boolean, {ObjectTypes.RuntimeId})
     -- Bytes a client authored: a malformed list is a dropped packet, not an
     -- error thrown out of the remote handler.
     const Ok, Operations = pcall(function()
@@ -539,7 +645,7 @@ Network.Apply.OnInvoke = function(Plr: Player, Compressed: buffer): (boolean, {O
         return false, {}
     end
 
-    return Transactions.Apply(Plr, Operations)
+    return Transactions.Apply(Plr, Operations, not Untracked)
 end
 
 return Transactions

@@ -87,20 +87,51 @@ Pedro's to make before or while building.
         `Objects:Unlock`. Releasing a player's locks in a scene when they are
         withdrawn from it (`Withdraw` in `src/Scenes/Server.luau`) or lose edit
         rights on it (`Permissions:GrantOn` / `RevokeOn`) would close it.
-      - **Undoing a destroy does not restore what pointed at it.** A stored
-        reference survives its target being destroyed, so a copy loaded again
-        from the same pack comes back wired. `History` undoes a destroy by
-        creating the object again, and a create mints a *new* local id — so
-        everything that pointed at the old one stays dangling. Fixing it means
-        letting a create name the local id it comes back under, which a client
-        must not be able to do freely: the id has to be one that scene retired,
-        held for it. The question is whether undo is worth that channel.
-      - **Creates and destroys in client-owned scenes are not undoable**, and
-        neither is a lone `Object:Destroy`; `History` only records
-        transactions and single sets. Local scene creates could be recorded
-        from `Objects:OnAdded` / `OnRemoved` filtered to `Local` objects.
 
 ## Done
+
+- [x] **A step holds what it took.** History moved to where the objects are:
+      the server keeps per-player stacks for its own scenes, the client keeps
+      its own for the scenes it owns, and the client keeps the single order the
+      two make together so one undo takes back the last thing the player did
+      whichever side recorded it. An undo of a server step names the step it
+      means, and a server that disagrees about what is on top says no and sends
+      back its stacks to be reconciled against.
+
+      A destroy is now a *suspend*: the object is withdrawn from the world --
+      unfiled, lock gone, part parented out of it, every client told -- while
+      the table, the values, both ids and the part itself all survive. Undo
+      revives that same object, which is the point: a reference stores a local
+      id, so an object that comes back under its own is pointed at again by
+      everything that pointed at it, where a rebuilt lookalike left every
+      reference dangling. It comes back with the part it had rather than a clone
+      of the template, so whatever the game hung on that part is still there.
+      Undoing a create is the same act in reverse.
+
+      So every step carries Undo, Redo and **Clear**, and Clear is what finally
+      destroys anything the step was keeping. It runs in exactly three places:
+      a new action forking the redo stack the step sat on, the step falling off
+      the end past the limit, and the player leaving or clearing. A game that
+      never requires History keeps nothing, so a destroy there is as immediate
+      as it ever was.
+
+      A step can also be the game's own: `History:Push` takes the same three
+      verbs and puts them in the same order, so an editor's own actions -- a
+      camera bookmark, a rename in data Prism knows nothing about -- are reached
+      by the same Ctrl+Z, in the place they happened. Either the game's or
+      Prism's, never both in one step. Nothing done inside a custom verb is
+      recorded, or undoing would grow the stack it was shrinking.
+
+      Two edges closed with it. A lone `Object:Destroy` is recorded now --
+      the channel it comes down is on the side that keeps the stack -- and so
+      are creates, destroys and sets in scenes the client owns. A copy reading
+      its own pack back is not an action and is not recorded, which is what
+      `Restored` on `Objects:OnAdded` is for. `Transaction.Untracked` rides to
+      the server, because that is where the recording happens now.
+
+      Falling out of it: a transaction that fails partway can roll its destroys
+      back too, so the apply is atomic in the operation that used to be beyond
+      recall.
 
 - [x] **Object references.** A ninth property type, `Object`, holding the
       target's local id and nothing else, so a reference is written exactly as
@@ -138,15 +169,16 @@ Pedro's to make before or while building.
       them is announced. It is also the only way to create two objects already
       wired to each other in one transaction.
 
-- [x] **Undo / redo.** `Prism.History` on the client, per player. A step is a
-      committed transaction, or a run of `Object:Set` calls to one property
-      with no pause longer than a second, so a drag undoes as one. Undoing
-      sends the reverse as an untracked transaction through the usual rights
-      and locks; local scenes revert on the spot. A property someone else
-      changed since is skipped and the rest applies. A destroy is undone by
-      making the object again from a snapshot taken as the transaction went,
-      and later steps find it through an alias to its new runtime id. Built on
-      `Objects:OnEdited` and `Transactions:OnCommitted`, both public.
+- [x] **Undo / redo.** `Prism.History`, per player. A step is a committed
+      transaction, or a run of `Object:Set` calls to one property with no pause
+      longer than a second, so a drag undoes as one. Undoing goes through the
+      usual rights and locks; scenes the client owns revert on the spot. A
+      property someone else changed since is skipped and the rest applies.
+
+      The first version of this kept the stacks on the client and undid a
+      destroy by building the object again from a snapshot, which is what the
+      entry above replaced: a rebuilt object gets a new local id, and a
+      reference to the original comes back pointing at nothing.
 
 - [x] **`Duplicate(object)`.** `Objects:Duplicate(object, copy?)` on the
       server, into the original's copy unless another is named, with a new

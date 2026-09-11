@@ -12,6 +12,7 @@ const Network = require("./Network")
 const Shared = require("./Shared")
 const Handles = require("../Handles")
 const IdPool = require("../IdPool")
+const Listeners = require("../Listeners")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
@@ -117,13 +118,16 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     return true
 end
 
-const function Teardown(self: Object, Announce: boolean)
-    if self.Destroyed then
-        return
-    end
-
-    self.Destroyed = true
-
+-- Leaving the world, which is not the same as ceasing to exist. Everything
+-- here is undoable: the object is unfiled, its part goes, its lock goes and
+-- every client is told it is gone -- but the table, its property values and
+-- both its ids survive, which is what lets a destroy be taken back as the same
+-- object rather than replaced by a lookalike holding the same numbers.
+--
+-- The local id matters most. A reference stores one, and a scene never hands a
+-- local id out twice, so an object that comes back under its own is pointed at
+-- again by everything that was pointing at it.
+const function Withdraw(self: Object, Announce: boolean)
     Shared.ReleaseLinks(self.Links)
     self.Links = nil
 
@@ -131,13 +135,14 @@ const function Teardown(self: Object, Announce: boolean)
     -- needs to drop the lock it knew about.
     Locks[self.RuntimeId] = nil
 
-    for _, Prop in self.Properties do
-        Prop:Destroy()
-    end
-
+    -- Out of the world rather than destroyed, and kept. To every client the two
+    -- are the same thing -- a part with no parent is not in the DataModel, so
+    -- it replicates away exactly as a destroyed one does -- but coming back
+    -- means coming back as the same part, with whatever the game hung on it
+    -- still hanging there. A fresh clone from the template would lose all of
+    -- it. Destroying is Dispose's, once nothing can bring the object back.
     if self.Instance then
-        self.Instance:Destroy()
-        self.Instance = nil
+        self.Instance.Parent = nil
     end
 
     -- Out of the scene before out of the workspace, so a scene walking its own
@@ -163,6 +168,31 @@ const function Teardown(self: Object, Announce: boolean)
     self.GetProperty = Shared.Destroyed.GetProperty
     self.OnChange = Shared.Destroyed.OnChange
     self.Destroy = Shared.Destroyed.Destroy
+end
+
+-- The part that cannot be taken back: the values go, the part goes, and with
+-- them any chance of this object being itself again.
+const function Dispose(self: Object)
+    self.Suspended = nil
+
+    if self.Instance then
+        self.Instance:Destroy()
+        self.Instance = nil
+    end
+
+    for _, Prop in self.Properties do
+        Prop:Destroy()
+    end
+end
+
+const function Teardown(self: Object, Announce: boolean)
+    if self.Destroyed then
+        return
+    end
+
+    self.Destroyed = true
+    Withdraw(self, Announce)
+    Dispose(self)
 end
 
 const function __destroy(self: Object)
@@ -522,6 +552,7 @@ function Objects.Drop(Obj: Object)
     Teardown(Obj, false)
 end
 
+
 function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end
@@ -566,6 +597,90 @@ end
 function Objects:GetRegistryPayload(Identifier: ObjectIdentifier)
     const Registry = Registered[Identifier]
     return if Registry then ToRegistryPayload(Registry) else nil
+end
+
+-- Everything being in the world means: a part of its own, links wired to it, a
+-- place in the copy and in the workspace, and the packet saying so. The inverse
+-- of Withdraw, and written once rather than twice because an object that comes
+-- back from a suspend has to arrive exactly as one that was just built does --
+-- anything this did that reviving forgot would be a difference nobody would
+-- find until an undone destroy behaved unlike the object it restored.
+--
+-- The registry instance is a template. Handing the same one to every object
+-- meant they all drove the same part, and destroying any one of them took the
+-- part away from the rest.
+--
+-- Stamped and tagged before it is parented, so the handle and the tag replicate
+-- together with the instance and a client that only ever sees the part -- never
+-- the reference sent beside the object -- can still find its owner. None at all
+-- in an opened copy, whose parts each admitted client draws.
+const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: boolean)
+    -- Already holding one means this object has been here before and was
+    -- withdrawn rather than destroyed: its part was parented out of the world
+    -- and kept, so it goes back rather than being cloned again. Cloning would
+    -- hand back a part that only looks like the one that left.
+    local Inst: Instance? = Obj.Instance
+
+    if Inst then
+        Inst.Parent = Instance_.Folder
+    elseif Ref.Instance and not Instance_.Opened then
+        const Clone = Ref.Instance:Clone()
+        Clone:SetAttribute(Shared.RuntimeAttribute, Obj.RuntimeId)
+        CollectionService:AddTag(Clone, Shared.ObjectTag)
+
+        -- Into the copy holding it, and nowhere else. Which copy rather than
+        -- which scene, because two copies of one room have to be able to sit
+        -- in two places -- and where that is, is the copy's folder's business
+        -- rather than this object's.
+        Clone.Parent = Instance_.Folder
+
+        Inst = Clone
+    end
+
+    Obj.Instance = Inst
+
+    -- Wired after the values are in place, so a link starts at the object's own
+    -- value rather than at the registry default and then being corrected.
+    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties)
+
+    Obj.Get = __getter
+    Obj.Set = __setter
+    Obj.GetProperty = Shared.GetProperty
+    Obj.OnChange = Shared.OnChange
+    Obj.Destroy = __destroy
+
+    Obj.Release = function()
+        Instance_.Objects[Obj.RuntimeId] = nil
+
+        -- Only if it is still the one filed there. Restoring refuses a
+        -- duplicate, so it always is, but a scene tearing down while another
+        -- rebuilds must not have the loser clear the winner's entry.
+        if Instance_.ByLocal[Obj.LocalId] == Obj then
+            Instance_.ByLocal[Obj.LocalId] = nil
+        end
+    end
+
+    Workspace[Obj.RuntimeId] = Obj
+    Instance_.Objects[Obj.RuntimeId] = Obj
+    Instance_.ByLocal[Obj.LocalId] = Obj
+
+    -- Only the compressed values go out. Firing the live object sent Property
+    -- tables carrying Set/SetDefault functions and links carrying connections,
+    -- neither of which a remote can serialize, so this threw every time.
+    --
+    -- A scene being loaded announces nothing here: its objects go out together
+    -- through the chunked replay path instead of one packet each.
+    if Announce then
+        Audience.Fire(
+            Network.ObjectAdded,
+            Obj.Scene,
+            Ref.Replicate,
+            Obj.RuntimeId,
+            Instance_.Id,
+            Compressor:CompressObject(Obj),
+            Inst
+        )
+    end
 end
 
 -- InitialValues are applied before the links are wired and before the broadcast.
@@ -646,22 +761,6 @@ const function Construct(
     -- part -- never the reference sent beside the object -- can still find its
     -- owner.
     --
-    -- None at all in an opened copy, whose parts each admitted client draws.
-    local Inst: Instance? = nil
-    if Ref.Instance and not Instance_.Opened then
-        const Clone = Ref.Instance:Clone()
-        Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
-        CollectionService:AddTag(Clone, Shared.ObjectTag)
-
-        -- Into the copy holding it, and nowhere else. Which copy rather than
-        -- which scene, because two copies of one room have to be able to sit
-        -- in two places -- and where that is, is the copy's folder's business
-        -- rather than this object's.
-        Clone.Parent = Instance_.Folder
-
-        Inst = Clone
-    end
-
     const Props = Shared.BuildProperties(Ref.Properties)
     if InitialValues then
         for PropertyId, Value in InitialValues do
@@ -700,42 +799,120 @@ const function Construct(
     Obj.Destroyed = false
     Obj.Properties = Props
     Obj.Names = Shared.BuildNameMap(Ref.Properties, Props)
-    Obj.Instance = Inst
-    -- Wired after the initial values land, so a link starts at the object's real
-    -- value rather than the registry default and then being corrected.
-    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Props)
-    Obj.Get = __getter
-    Obj.Set = __setter
-    Obj.GetProperty = Shared.GetProperty
-    Obj.OnChange = Shared.OnChange
-    Obj.Destroy = __destroy
 
-    Obj.Release = function()
-        Instance_.Objects[RuntimeId] = nil
+    Enter(Obj, Ref, Instance_, Announce)
+    return Obj :: any
+end
 
-        -- Only if it is still the one filed there. Restoring refuses a
-        -- duplicate, so it always is, but a scene tearing down while another
-        -- rebuilds must not have the loser clear the winner's entry.
-        if Instance_.ByLocal[Local] == Obj then
-            Instance_.ByLocal[Local] = nil
+--=============================================================================
+-- Retiring
+--=============================================================================
+
+-- A destroy is not always final. One a player asked for is withdrawn from the
+-- world and then offered to whatever might want it back: History keeps it on
+-- that player's stack, so an undo restores that object, under its own local id,
+-- and everything that pointed at it is pointing at it again. Only when nothing
+-- wants it -- a game that never requires History, a step that has fallen off
+-- the end of the stack -- is it disposed, and that is the only point at which
+-- the values are gone.
+--
+-- A destroy the world imposes is still final and immediate: a scene unloading,
+-- a type unregistering, a server script calling Object:Destroy. Nobody asked
+-- for those and there is nothing to take back.
+
+const Keepers: {(Plr: Player?, Obj: Object) -> boolean} = {}
+
+-- A property a player changed through the single set channel, with the value
+-- either side. What a transaction does is told through Transactions.OnApplied
+-- instead, whole rather than one property at a time. Synchronous, like the
+-- keepers below: a history recording these has to see them in the order they
+-- happened, and a spawned callback only mostly does.
+const Edited: {(Plr: Player, Obj: Object, Property: PropertyTypes.PropertyIdentifier, Before: any, After: any) -> ()} = {}
+
+-- This player's own edits, for a history to record. Not the server's, which
+-- belong to nobody and are nobody's to undo.
+function Objects.OnPlayerEdited(
+    Callback: (Plr: Player, Obj: Object, Property: PropertyTypes.PropertyIdentifier, Before: any, After: any) -> ()
+): () -> ()
+    return Listeners.Watch(Edited, Callback, "player edits")
+end
+
+-- Deliberately not Listeners.Notify: a keeper answers, and it answers before
+-- the caller moves on. A callback spawned on a thread of its own could do
+-- neither, and the object would be disposed while the answer was still coming.
+function Objects.OnRetired(Callback: (Plr: Player?, Obj: Object) -> boolean): () -> ()
+    return Listeners.Watch(Keepers, Callback, "retired objects")
+end
+
+-- Out of the world, still itself. True if it went; false if it was already
+-- gone, which makes suspending idempotent the way destroying is.
+function Objects.Suspend(Obj: Object, Announce: boolean?): boolean
+    if Obj.Destroyed then
+        return false
+    end
+
+    Obj.Destroyed = true
+    Obj.Suspended = true
+    Withdraw(Obj, Announce ~= false)
+    return true
+end
+
+-- Back where it was, as itself: the same table, the same runtime id, the same
+-- local id. False when the copy it belonged to has gone, which is the one thing
+-- no undo can work around -- there is nowhere to put it, and its local id means
+-- nothing outside the copy that issued it.
+function Objects.Revive(Obj: Object, Announce: boolean?): boolean
+    if not Obj.Suspended then
+        return false
+    end
+
+    const Instance_ = SceneRegistry.Instances[Obj.InstanceId]
+    const Ref = Registered[Obj.Parent]
+    if not Instance_ or not Ref then
+        return false
+    end
+
+    -- Its id is still its own: a scene's counter only ever climbs, so nothing
+    -- was ever given this id to hold in the meantime.
+    if Instance_.ByLocal[Obj.LocalId] then
+        return false
+    end
+
+    Obj.Suspended = nil
+    Obj.Destroyed = false
+
+    -- Announced unless the caller knows nobody was told it went: a transaction
+    -- that rolls its own destroys back suspended them silently, and an added
+    -- packet for an object no client ever stopped drawing would draw a second.
+    Enter(Obj, Ref, Instance_, Announce ~= false)
+    return true
+end
+
+-- The end of a suspended object. Everything else about it was already done
+-- when it was withdrawn; this is only the values letting go.
+function Objects.Dispose(Obj: Object)
+    if not Obj.Suspended then
+        return
+    end
+
+    Dispose(Obj)
+end
+
+-- Suspend, offer, and dispose if nobody wanted it. The single destroy channel's
+-- path; a transaction suspends its destroys itself, because what claims them is
+-- the record of the whole transaction rather than each object on its own.
+function Objects.Retire(Plr: Player?, Obj: Object, Announce: boolean?)
+    if not Objects.Suspend(Obj, Announce) then
+        return
+    end
+
+    for _, Keeper in Keepers do
+        if Keeper(Plr, Obj) then
+            return
         end
     end
 
-    Workspace[RuntimeId] = Obj
-    Instance_.Objects[RuntimeId] = Obj
-    Instance_.ByLocal[Local] = Obj :: any
-
-    -- Only the compressed values go out. Firing the live object sent Property
-    -- tables carrying Set/SetDefault functions and links carrying connections,
-    -- neither of which a remote can serialize, so this threw every time.
-    --
-    -- A scene being loaded announces nothing here: its objects go out together
-    -- through the chunked replay path instead of one packet each.
-    if Announce then
-        Audience.Fire(Network.ObjectAdded, Instance_.Scene, Ref.Replicate, RuntimeId, Instance_.Id, Compressor:CompressObject(Obj :: any), Inst)
-    end
-
-    return Obj :: any
+    Dispose(Obj)
 end
 
 -- Loaded the first time anything needs it rather than when it registers, so a
@@ -1154,7 +1331,21 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, Prop
         return false
     end
 
-    return Obj:Set(PropId, Value)
+    -- Read before the write and compared after, because a set that changed
+    -- nothing is not a step: a drag issuing one per frame would otherwise fill
+    -- a player's history with entries that undo to themselves.
+    const Before = Prop.Value
+    if not Obj:Set(PropId, Value) then
+        return false
+    end
+
+    if Prop.Value ~= Before then
+        for _, Callback in Edited do
+            Callback(Plr, Obj, PropId, Before, Prop.Value)
+        end
+    end
+
+    return true
 end
 
 Network.Destroy.OnInvoke = function(Plr: Player, Identifier: RuntimeId): boolean
@@ -1175,7 +1366,11 @@ Network.Destroy.OnInvoke = function(Plr: Player, Identifier: RuntimeId): boolean
         return false
     end
 
-    Obj:Destroy()
+    -- Retired rather than destroyed: a player's own destroy is theirs to take
+    -- back, and this is the channel a lone Object:Destroy on the client comes
+    -- down. Nothing keeping it means it is gone as immediately as it used to
+    -- be.
+    Objects.Retire(Plr, Obj, true)
     return true
 end
 

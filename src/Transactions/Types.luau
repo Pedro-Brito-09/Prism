@@ -88,8 +88,10 @@ export type Transaction = {
     -- caller asked for is the one behaviour a transaction must not have.
     Rejected: number,
 
-    -- Client side only. Set by whoever commits it to keep it out of the undo
-    -- history -- which is what History's own undos and redos do.
+    -- Set by whoever commits it to keep it out of the author's undo history.
+    -- It rides to the server, because for a scene the server owns that is where
+    -- the history lives. Not a permission: an untracked edit is checked and
+    -- charged exactly like any other.
     Untracked: boolean?,
 
     -- Every builder call returns the transaction, so a whole edit reads as one
