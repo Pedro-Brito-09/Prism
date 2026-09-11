@@ -190,6 +190,11 @@ const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
 const MAX_RUNTIME_ID = 4294967295
 local LocalRuntime = MAX_RUNTIME_ID
 
+-- The copy each object of a scene this client owns was built in, so it can be
+-- duplicated back into it. Weak keyed: an object nobody holds any more is not
+-- kept alive by this table alone.
+const LocalCopy: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
+
 -- Types already warned about, so a template that cannot be seen here is said
 -- once rather than once per object.
 const WarnedTemplate: {[ObjectIdentifier]: true} = {}
@@ -517,6 +522,7 @@ const function Construct(
     File(Obj, Ref.Properties)
     Live.Objects[RuntimeId] = Obj
     Live.ByLocal[Local] = Obj
+    LocalCopy[Obj] = Live
 
     Listeners.Notify(Added, Obj)
     return Obj :: any
@@ -542,6 +548,24 @@ function Objects.restore(Target: any, Decompressed: any): Object?
     end
 
     return Construct(Decompressed.Parent, Decompressed.Properties, Target, Decompressed.LocalId)
+end
+
+-- A new object of the same type holding the same values, in the same copy of a
+-- scene this client owns. An object the server holds is duplicated by asking
+-- it to, which is a transaction's Duplicate: this module cannot build one,
+-- because Transactions is built on it.
+function Objects:Duplicate(Obj: Object): Object?
+    if Obj.Destroyed then
+        return nil
+    end
+
+    const Live = LocalCopy[Obj]
+    if not Obj.Local or not Live then
+        Logger:Warn(`{Obj.Name} is the server's to duplicate. Use Transactions.new():Duplicate(object):Commit().`)
+        return nil
+    end
+
+    return Construct(Obj.Parent, Shared.Snapshot(Obj), Live, nil)
 end
 
 -- A tagged part has arrived: file it, and hand it to its object if that object

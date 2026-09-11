@@ -15,6 +15,7 @@
 
 const PropertyTypes = require("../Properties/Types")
 const ObjectTypes = require("../Objects/Types")
+const ObjectShared = require("../Objects/Shared")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
@@ -100,6 +101,31 @@ function Shared.factory(
         return self
     end
 
+    -- A create of the object's type holding the object's values, read now --
+    -- when the builder is called, not when the transaction lands -- into the
+    -- copy the original sits in unless another is named. Checked on the far
+    -- end exactly as a create is, rights included.
+    const function __duplicate(
+        self: Transaction,
+        Target: Types.ObjectReference,
+        Live: ObjectTypes.SceneInstanceId?
+    ): Transaction
+        const Obj = Resolve(Target)
+        if not Obj or Obj.Destroyed then
+            Reject(self, "Cannot duplicate an object that is not here.")
+            return self
+        end
+
+        -- A scene this client owns has no copy the server knows, so a create
+        -- aimed at it would only be refused there.
+        if Obj.Local then
+            Reject(self, `{Obj.Name} belongs to a scene this client owns; duplicate it with Objects:Duplicate.`)
+            return self
+        end
+
+        return __create(self, Obj.Parent, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
+    end
+
     const function __set(
         self: Transaction,
         Target: Types.ObjectReference,
@@ -173,6 +199,7 @@ function Shared.factory(
         Transaction.Rejected = 0
 
         Transaction.Create = __create
+        Transaction.Duplicate = __duplicate
         Transaction.Set = __set
         Transaction.Destroy = __destroy
         Transaction.Commit = __commit

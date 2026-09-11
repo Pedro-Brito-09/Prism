@@ -94,6 +94,14 @@ export type Transaction = {
 
     Destroy: (self: Transaction, Target: ObjectReference) -> Transaction,
 
+    -- A Create of the target's type holding the target's values as they are
+    -- when this is called, in the target's own copy unless another is named.
+    Duplicate: (
+        self: Transaction,
+        Target: ObjectReference,
+        Instance: ObjectTypes.SceneInstanceId?
+    ) -> Transaction,
+
     -- Whether the whole list applied, and the runtime ids of what it created, in
     -- the order the creates were declared. On the client this yields until the
     -- server has answered: a created object has no local identity to hand back

@@ -2026,6 +2026,53 @@ T:Test("a transaction is charged one action per operation", function()
     end
 end)
 
+T:Test("an object duplicates into its own copy, values and all", function()
+    const Copy = Scenes.new({Name = "TestDuplicated"}):Load()
+    const Original = Copy:Create(CrateId, {[TitleId] = "Original", [HealthId] = 40})
+    const Twin = Objects:Duplicate(Original)
+
+    T:Ok(Twin and Twin ~= Original, "a new object")
+
+    if not Twin then
+        Copy.Owner:Destroy()
+        return
+    end
+
+    T:Eq(Twin:Get(TitleId), "Original", "holding its text")
+    T:Eq(Twin:Get(HealthId), 40, "and its number")
+    T:Eq(Twin.InstanceId, Copy.Id, "in the same copy")
+    T:Ok(Twin.LocalId ~= Original.LocalId, "under a new local id")
+    T:Ok(Twin.Instance and Twin.Instance ~= Original.Instance, "with a part of its own")
+
+    Twin:Set(TitleId, "Twin")
+    T:Eq(Original:Get(TitleId), "Original", "and nothing shared with the original")
+
+    const Elsewhere = Scenes.new({Name = "TestDuplicatedElsewhere"}):Load()
+    const Moved = Objects:Duplicate(Original, Elsewhere)
+    T:Eq(Moved and Moved.InstanceId, Elsewhere.Id, "or into another copy when named")
+
+    Copy.Owner:Destroy()
+    Elsewhere.Owner:Destroy()
+end)
+
+T:Test("a transaction duplicates as a create", function()
+    const Source = Objects.new(BareId, {[TitleId] = "Source"})
+    const Applied, Created = Transactions.new():Duplicate(Source):Commit()
+
+    T:Ok(Applied, "applied")
+
+    const Made = if Created[1] then Objects:Get(Created[1]) else nil
+    T:Ok(Made, "made one")
+
+    if Made then
+        T:Eq(Made:Get(TitleId), "Source", "holding the source's value")
+        T:Eq(Made.InstanceId, Source.InstanceId, "in the source's copy")
+        Made:Destroy()
+    end
+
+    Source:Destroy()
+end)
+
 --=============================================================================
 -- Locks
 --=============================================================================

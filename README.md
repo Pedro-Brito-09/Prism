@@ -151,6 +151,12 @@ attribute. `Descendant` targets a child instead of the root.
 `Set`, `Get`, `OnChange` and `GetProperty` all take either the property id or
 its name, and a name costs the same as an id to resolve.
 
+`Objects:Duplicate(object, copy?)` makes a new object of the same type holding
+the same values, in the original's copy unless you name another. It gets a new
+local id and a part of its own. On the client this works for objects in scenes
+the client owns; an object the server holds is duplicated with a transaction's
+`Duplicate`, which checks create rights like any other create.
+
 Watch a single property without paying for a signal on every property:
 
 ```lua
@@ -449,6 +455,7 @@ record.
 local edit = Prism.Transactions.new()
 
 edit:Create(Crate, {[Health] = 50}, room.Id)
+    :Duplicate(original)             -- a create holding original's values
     :Set(other, "Health", 20)
     :Destroy(stale)
 

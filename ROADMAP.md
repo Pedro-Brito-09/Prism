@@ -10,7 +10,6 @@ reads right, never that it was run with a player in it.
 
 ## Queued
 
-- [ ] **`Duplicate(object)`.** `Objects.new` already accepts initial values.
 - [ ] **Scene history: diff, merge, revert.** Two properties the format already
       has make this reachable rather than speculative. A copy serialises
       deterministically — objects in local id order, properties in property id
@@ -27,6 +26,13 @@ reads right, never that it was run with a player in it.
       object can come back under the id it had.
 
 ## Done
+
+- [x] **`Duplicate(object)`.** `Objects:Duplicate(object, copy?)` on the
+      server, into the original's copy unless another is named, with a new
+      local id and a part of its own. A transaction's `Duplicate` is a create
+      holding the object's values as they are when it is built, so a client
+      duplicates a server object through the same rights a create needs. On
+      the client, `Objects:Duplicate` covers scenes the client owns.
 
 - [x] **Property display metadata.** `Display = {Category, Order,
       Description, Hidden, ReadOnly}` on the registry, filled in at

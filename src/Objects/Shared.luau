@@ -290,6 +290,20 @@ const function BuildLinks(
     return if Count > 0 then Map else nil
 end
 
+-- An object's values as initial values for another of its type, which is what
+-- duplicating one is. The value held, not the default: a property left at its
+-- default has nothing to copy, and the new object starts at that default anyway.
+const function Snapshot(Obj: Types.Object): {[PropertyTypes.PropertyIdentifier]: any}
+    const Values = {}
+    for PropertyId, Prop in Obj.Properties do
+        if Prop.Value ~= nil then
+            Values[PropertyId] = Prop.Value
+        end
+    end
+
+    return Values
+end
+
 -- Releases every link an object holds. Links belong to the object rather than
 -- to the instance they drive: hanging them off an AncestryChanged handler kept
 -- every instance alive in a strongly keyed pool and never fired at all for an
@@ -329,6 +343,7 @@ return {
     ValidateLinks = ValidateLinks,
     BuildLinks = BuildLinks,
     ReleaseLinks = ReleaseLinks,
+    Snapshot = Snapshot,
 
     -- Reading or destroying an already destroyed object answers instead of
     -- throwing. The previous noop raised an error, which meant a stale
