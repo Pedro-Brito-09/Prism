@@ -76,6 +76,10 @@ export type Transaction = {
     -- caller asked for is the one behaviour a transaction must not have.
     Rejected: number,
 
+    -- Client side only. Set by whoever commits it to keep it out of the undo
+    -- history -- which is what History's own undos and redos do.
+    Untracked: boolean?,
+
     -- Every builder call returns the transaction, so a whole edit reads as one
     -- expression.
     Create: (
@@ -107,6 +111,20 @@ export type Transaction = {
     -- server has answered: a created object has no local identity to hand back
     -- before the server has minted one.
     Commit: (self: Transaction) -> (boolean, {ObjectTypes.RuntimeId}),
+}
+
+-- A committed transaction as the client saw it go: what it created, the value
+-- each set overwrote and what each destroy took away, by operation index. Read
+-- before the packet went, because after the answer the old values are gone.
+export type CommitRecord = {
+    Transaction: Transaction,
+    Created: {ObjectTypes.RuntimeId},
+    Before: {[number]: any},
+    Removed: {[number]: {
+        Parent: ObjectTypes.ObjectIdentifier,
+        Values: {[PropertyTypes.PropertyIdentifier]: any},
+        Instance: ObjectTypes.SceneInstanceId,
+    }},
 }
 
 return {

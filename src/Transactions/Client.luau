@@ -15,17 +15,52 @@
 
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Client")
+const ObjectShared = require("../Objects/Shared")
 const Network = require("./Network")
 const Shared = require("./Shared")
+const Listeners = require("../Listeners")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
 export type Operation = Types.Operation
 export type Transaction = Types.Transaction
+export type CommitRecord = Types.CommitRecord
 
 const Transactions = {}
+const Committed: {(Record: CommitRecord) -> ()} = {}
+
+-- What reversing the transaction later needs and only now can be read: the
+-- value each set is about to overwrite, and everything each destroy is about to
+-- take away. Once the answer comes, the old values are gone.
+const function Capture(Transaction: Transaction): ({[number]: any}, {[number]: any})
+    const Before = {}
+    const Removed = {}
+
+    for Index, Operation in Transaction.Operations do
+        const Op = Operation :: any
+
+        if Op.Kind == "Set" then
+            const Obj = Objects:Get(Op.Target)
+            const Prop = if Obj then Obj.Properties[Op.Property] else nil
+            Before[Index] = if Prop then Prop.Value else nil
+        elseif Op.Kind == "Destroy" then
+            const Obj = Objects:Get(Op.Target)
+            if Obj then
+                Removed[Index] = {
+                    Parent = Obj.Parent,
+                    Values = ObjectShared.Snapshot(Obj),
+                    Instance = Obj.InstanceId,
+                }
+            end
+        end
+    end
+
+    return Before, Removed
+end
 
 const New = Shared.factory(Objects, function(Transaction: Transaction)
+    const Before, Removed = Capture(Transaction)
+
     -- Writing the packet is inside the pcall as well as sending it. An
     -- operation that cannot be encoded throws rather than being dropped, and
     -- the whole point is that a transaction is never sent four fifths written.
@@ -41,11 +76,28 @@ const New = Shared.factory(Objects, function(Transaction: Transaction)
     -- The objects themselves arrive on their own, through the same broadcast
     -- every other client receives. These are their ids, in the order the
     -- creates were declared, so the caller can find them once they land.
-    return Applied == true, Created or {}
+    const Ids = Created or {}
+
+    if Applied == true then
+        Listeners.Notify(Committed, {
+            Transaction = Transaction,
+            Created = Ids,
+            Before = Before,
+            Removed = Removed,
+        })
+    end
+
+    return Applied == true, Ids
 end)
 
 function Transactions.new(): Transaction
     return New()
+end
+
+-- Every transaction this client commits that the server applied, with what it
+-- overwrote and took away. History is built on this.
+function Transactions:OnCommitted(Callback: (Record: CommitRecord) -> ()): () -> ()
+    return Listeners.Watch(Committed, Callback, "commits")
 end
 
 return Transactions
