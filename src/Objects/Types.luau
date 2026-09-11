@@ -96,6 +96,15 @@ export type Object = {
     Parent: ObjectIdentifier,
     Name: string,
 
+    -- Destroyed, but kept whole so the destroy can be taken back. Set while
+    -- something -- a history step, on either side -- is holding the object
+    -- against an undo. It is out of the world by every measure a caller can
+    -- see: Destroyed is true, it is gone from the workspace and from its copy,
+    -- its part is gone and every client has been told. What survives is the
+    -- table, the property values and both ids, which is what lets it come back
+    -- as itself rather than as a new object holding the same numbers.
+    Suspended: boolean?,
+
     -- Client side only. True when the object belongs to a scene this client
     -- owns, which is what makes its edits apply on the spot: there is nobody to
     -- ask and nothing to roll back to. An editor reads it to know whether an

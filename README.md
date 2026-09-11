@@ -110,7 +110,9 @@ On the client, `Objects:OnAdded` and `Objects:OnRemoved` fire for every object
 that appears or goes: replicated ones, ones in scenes the client owns, and ones
 it draws for an opened copy. An added object is already filed, so `Objects:Get`
 finds it. A removed one is already torn down and reports `Destroyed`, but still
-carries its ids. Both return a disconnect function.
+carries its ids. Both return a disconnect function. `OnAdded` is also handed
+whether the object was **restored** — read back from a pack under the id it was
+saved with, rather than created by anyone.
 
 ```lua
 local stop = Prism.Objects:OnAdded(function(object)
@@ -562,34 +564,80 @@ destroyed by the same transaction that changed it is announced once, as gone.
 
 ## History
 
-Undo and redo, per player, on the client. Each client keeps its own stacks, so
-undo only ever takes back this player's actions.
+Undo and redo, per player. The client drives it:
 
 ```lua
-Prism.History:Undo()      -- yields while the reverse transaction flies
+Prism.History:Undo()      -- yields while the server answers for its half
 Prism.History:Redo()
 Prism.History:CanUndo()
 Prism.History:OnChange(function() toolbar:Refresh() end)
 ```
 
-A step is a committed transaction, or a run of `Object:Set` calls to one
-property with no pause longer than a second, so a drag undoes as one. Undoing
-sends the reverse as a transaction of its own, through the same rights and
-locks as any edit. A create is undone by destroying what it made, a set by
-writing back what it overwrote, and a destroy by making the object again from
-what it held. Objects in scenes the client owns revert on the spot.
+A step is one committed transaction, one create or destroy, or a run of
+`Object:Set` calls to one property with no pause longer than a second, so a drag
+undoes as one. Each stack keeps the last 100.
+
+### A destroy is deferred, not undone
+
+Undoing a destroy does not build a replacement. The object is **suspended**:
+withdrawn from the world by every measure — `Destroyed` reads true, it is gone
+from the workspace and from its copy, its part is gone and every client has been
+told — while the table, its property values, its runtime id and its local id all
+survive. Undo revives that same object.
+
+That is what keeps references working. A reference stores a local id, a scene
+never issues one twice, and an object that comes back under its own is pointed
+at again by everything that was pointing at it. Rebuilding a lookalike would get
+a fresh id and leave every reference to the original dangling.
+
+Undoing a create is the same act in reverse: the object is suspended, not
+destroyed, because redo has to bring back *that* object.
+
+So something has to decide when a destroy is finally a destroy. That is
+`Clear`, and it runs in exactly three places: when a new action forks the redo
+stack a step was sitting on, when a step falls off the end past the 100-step
+limit, and when the player leaves (or `History:Clear()` is called). A step with
+nothing holding it lets go of whatever it was keeping, and only then are the
+values gone. **Nothing keeping it at all** — a game that never requires
+`Prism.History` — means a destroy is as immediate as it ever was.
+
+### Where the steps live
+
+Split by who owns the scene, because a step has to hold objects and objects live
+on one side or the other.
+
+| | recorded | applied |
+|---|---|---|
+| the server's scenes | server, per player | server, through the same rights, locks and budget as any edit |
+| scenes the client owns | client | client, on the spot |
+
+The client keeps the **order** — one list where each place is either a step of
+its own or the id of one the server holds — so a single undo takes back the last
+thing the player did whichever side recorded it. An undo of a server step names
+the step it means; if that is not the one on top, the server says no and sends
+back its stacks, which the client reconciles against. A new action on either
+side forks the redo stack on both.
+
+Recorded server side: every transaction a player commits, every `Object:Set`
+through the single channel, and every lone `Object:Destroy` — which used to be
+the one edit nothing could take back. Commit a transaction with `Untracked = true`
+to keep it out. Recorded client side: creates, destroys and sets in scenes the
+client owns. A copy reading its own pack back is not an action and is not
+recorded.
 
 If someone else has changed a property since, undo and redo leave that property
-alone and apply the rest of the step. A refused undo stays on the stack. An
-object made again comes back under a new runtime id, and later steps still find
-it. A lone `Object:Destroy` isn't recorded, nor are creates and destroys in
-scenes the client owns; destroy through a transaction to make it undoable. Each
-stack keeps the last 100 steps.
+alone and apply the rest of the step. A refused undo — a lock, a missing right —
+stays on the stack to be tried again. An object whose copy has been unloaded
+cannot come back, and that entry is skipped.
 
-The history is built on two signals you can use yourself:
-`Objects:OnEdited(fn)` fires for this client's own `Object:Set` calls, with the
-values before and after, and `Transactions:OnCommitted(fn)` fires for every
-transaction the server applied, with what it overwrote.
+On the server, `Prism.History` takes the player: `History:Undo(player)`,
+`Redo`, `CanUndo`, `CanRedo`, `Clear(player)`.
+
+The history is built on signals you can use yourself: `Objects:OnEdited(fn)` on
+the client for its own `Object:Set` calls, `Objects:OnPlayerEdited(fn)` on the
+server for a player's, `Transactions:OnCommitted(fn)` on the client and
+`Transactions:OnApplied(fn)` on the server, and `Objects.OnRetired(fn)` on both
+— which is the one that decides whether a destroyed object is kept.
 
 ### On the client
 

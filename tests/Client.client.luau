@@ -1131,17 +1131,18 @@ T:Describe("History")
 
 const History = Prism.History
 
-T:Test("single sets undo and redo, a run of them as one step", function()
+T:Test("a run of sets in a local scene is one step", function()
     const Sandbox = Scenes.new({Name = "ClientHistory"})
     if not Sandbox or not BareId or not TitleId then
         T:Ok(false, "not registered")
         return
     end
 
-    History:Clear()
-
     const Copy = Sandbox:Load()
     const Obj = Copy:Create(BareId, {[TitleId] = "Start"})
+
+    -- Creating is a step of its own now, and this test is about the sets.
+    History:Clear()
 
     -- Two sets back to back are one drag.
     Obj:Set(TitleId, "A")
@@ -1172,7 +1173,95 @@ T:Test("single sets undo and redo, a run of them as one step", function()
     History:Clear()
 end)
 
-T:Test("a transaction undoes as its reverse, and redoes", function()
+T:Test("a create in a local scene undoes as the same object", function()
+    const Sandbox = Scenes.new({Name = "ClientHistoryCreate"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    History:Clear()
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId, {[TitleId] = "Placed"})
+    const RuntimeId = Obj.RuntimeId
+    const LocalId = Obj.LocalId
+
+    T:Ok(History:CanUndo(), "creating was recorded")
+
+    T:Ok(History:Undo(), "undone")
+    T:Ok(Obj.Suspended, "the object is held rather than ended")
+    T:Eq(Copy:Find(LocalId), nil, "and gone from the copy")
+
+    T:Ok(History:Redo(), "redone")
+
+    -- The same table, under the same ids: the whole reason a create is undone
+    -- by withdrawing rather than destroying.
+    T:Eq(Objects:Get(RuntimeId), Obj, "back as itself")
+    T:Eq(Copy:Find(LocalId), Obj, "under its own local id")
+    T:Eq(Obj:Get(TitleId), "Placed", "still holding what it held")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
+T:Test("a destroy in a local scene undoes, and a new action ends it", function()
+    const Sandbox = Scenes.new({Name = "ClientHistoryDestroy"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId, {[TitleId] = "Doomed"})
+    const LocalId = Obj.LocalId
+    History:Clear()
+
+    T:Ok(Obj:Destroy(), "destroyed")
+    T:Ok(Obj.Suspended, "kept rather than ended")
+
+    T:Ok(History:Undo(), "undone")
+    T:Eq(Copy:Find(LocalId), Obj, "back as itself")
+    T:Eq(Obj:Get(TitleId), "Doomed", "with what it held")
+
+    -- Redo it, then act again: the step is forked off the redo stack, and
+    -- nothing is left holding the object.
+    T:Ok(History:Redo(), "redone")
+    T:Ok(Obj.Suspended, "held again")
+
+    Copy:Create(BareId, {[TitleId] = "Later"})
+    T:Ok(not History:CanRedo(), "the redo forked away")
+    T:Eq(Obj.Suspended, nil, "and what it held is gone for good")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
+T:Test("a local scene loading its own pack is not a step", function()
+    const Sandbox = Scenes.new({Name = "ClientHistoryLoad"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    Copy:Create(BareId, {[TitleId] = "One"})
+    Copy:Create(BareId, {[TitleId] = "Two"})
+    Copy:Commit()
+    Copy:Unload()
+
+    History:Clear()
+    Sandbox:Load()
+
+    -- Reading a pack back is not something anybody did, and a level of five
+    -- hundred objects is not five hundred undo steps.
+    T:Ok(not History:CanUndo(), "nothing recorded")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
+T:Test("a transaction is a step the server keeps", function()
     if not BareId or not TitleId then
         T:Ok(false, "no bare registry")
         return
@@ -1191,7 +1280,12 @@ T:Test("a transaction undoes as its reverse, and redoes", function()
     T:Eventually(function()
         return Made and Objects:Get(Made)
     end, 3, "the object arrived")
-    T:Ok(History:CanUndo(), "and the commit was recorded")
+
+    -- Recorded on the server, which tells this side where the step sits in the
+    -- order and nothing else about it.
+    T:Eventually(function()
+        return History:CanUndo()
+    end, 3, "and the commit was recorded")
 
     Window()
     T:Ok(History:Undo(), "undone")
@@ -1207,9 +1301,66 @@ T:Test("a transaction undoes as its reverse, and redoes", function()
     end, 3, "made again")
 
     if Again then
-        T:Ok(Again.RuntimeId ~= Made, "under a new runtime id")
+        -- The same object, not a replacement: the server withdrew it rather
+        -- than destroying it, so it came back under the id it always had.
+        T:Eq(Again.RuntimeId, Made, "under the same runtime id")
         Window()
         Again:Destroy()
+    end
+
+    History:Clear()
+end)
+
+T:Test("a lone destroy of a server object is undoable", function()
+    if not BareId or not TitleId then
+        T:Ok(false, "no bare registry")
+        return
+    end
+
+    History:Clear()
+    Window()
+
+    const Applied, Created = Transactions.new()
+        :Create(BareId, {[TitleId] = "Loner"})
+        :Commit()
+
+    T:Ok(Applied, "created")
+
+    const Made = Created[1]
+    const Obj = T:Eventually(function()
+        return Made and Objects:Get(Made)
+    end, 3, "the object arrived")
+
+    if not Obj then
+        return
+    end
+
+    History:Clear()
+    Window()
+
+    -- Object:Destroy on its own, which used to be the one edit nothing could
+    -- take back: it goes down a channel of its own, and the stack that records
+    -- it is now on the side that channel lands on.
+    T:Ok(Obj:Destroy(), "destroyed")
+    T:Eventually(function()
+        return Objects:Get(Made) == nil
+    end, 3, "gone")
+
+    T:Eventually(function()
+        return History:CanUndo()
+    end, 3, "and recorded")
+
+    Window()
+    T:Ok(History:Undo(), "undone")
+
+    const Back = T:Eventually(function()
+        return Objects:Get(Made)
+    end, 3, "back again")
+
+    if Back then
+        T:Eq(Back.RuntimeId, Made, "as the same object")
+        Window()
+        Back:Destroy()
     end
 
     History:Clear()

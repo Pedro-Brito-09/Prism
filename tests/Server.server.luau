@@ -2702,6 +2702,259 @@ T:Test("a transaction duplicates a group with its references remapped", function
 end)
 
 --=============================================================================
+-- Suspending
+--=============================================================================
+
+T:Describe("Suspending")
+
+T:Test("a suspended object is out of the world but whole", function()
+    const Scene, Copy = Room("SuspendRoom")
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const RuntimeId = Door.RuntimeId
+    const LocalId = Door.LocalId
+
+    T:Ok(Objects.Suspend(Door), "suspended")
+
+    T:Ok(Door.Destroyed, "reads as destroyed")
+    T:Ok(Door.Suspended, "and as suspended")
+    T:Eq(Objects:Get(RuntimeId), nil, "gone from the workspace")
+    T:Eq(Copy:Find(LocalId), nil, "and from its copy")
+    T:Eq(Door.Instance, nil, "its part went with it")
+    T:Eq(Door:Get(TitleId), nil, "and it answers like any destroyed object")
+
+    -- What survives is the whole point: the values, and both ids.
+    T:Eq(Door.Properties[TitleId].Value, "Door", "the value is still there")
+    T:Eq(Door.RuntimeId, RuntimeId, "same runtime id")
+    T:Eq(Door.LocalId, LocalId, "same local id")
+
+    T:Ok(Objects.Revive(Door), "revived")
+    T:Ok(not Door.Destroyed, "alive again")
+    T:Eq(Objects:Get(RuntimeId), Door, "back in the workspace, as itself")
+    T:Eq(Copy:Find(LocalId), Door, "and in its copy under its own id")
+    T:Eq(Door:Get(TitleId), "Door", "still holding what it held")
+    T:Ok(Door.Instance, "with a part again")
+
+    Scene:Destroy()
+end)
+
+T:Test("disposing a suspended object ends it", function()
+    const Scene, Copy = Room("DisposeRoom")
+    const Door = Copy:Create(DoorId)
+
+    Objects.Suspend(Door)
+    Objects.Dispose(Door)
+
+    T:Eq(Door.Suspended, nil, "no longer suspended")
+    T:Ok(Door.Destroyed, "still destroyed")
+    T:Ok(not Objects.Revive(Door), "and past reviving")
+
+    Scene:Destroy()
+end)
+
+T:Test("a reference relinks when its target comes back", function()
+    const Scene, Copy = Room("SuspendReference")
+    const Door = Copy:Create(DoorId)
+    const Button = Copy:Create(ButtonId)
+    Button:Set(TargetId, Door)
+
+    Objects.Suspend(Door)
+    T:Eq(Button:Get(TargetId), nil, "reads as nothing while it is gone")
+    T:Eq(Button:GetProperty(TargetId).Value, Door.LocalId, "but the id is kept")
+
+    Objects.Revive(Door)
+
+    -- The reason a destroy withdraws rather than ends: the same local id comes
+    -- back, so everything pointing at it is pointing at it again.
+    T:Eq(Button:Get(TargetId), Door, "and points at it again")
+
+    Scene:Destroy()
+end)
+
+T:Test("a copy that has gone cannot take its objects back", function()
+    const Scene, Copy = Room("SuspendUnloaded")
+    const Door = Copy:Create(DoorId)
+
+    Objects.Suspend(Door)
+    Copy:Unload()
+
+    T:Ok(not Objects.Revive(Door), "nowhere to come back to")
+    Scene:Destroy()
+end)
+
+--=============================================================================
+-- History
+--=============================================================================
+
+T:Describe("History")
+
+const History = Prism.History
+
+const function Editor(UserId: number, Scene: any): any
+    const Plr = Ghost(UserId)
+    Permissions:Grant(Plr, "TestBulk")
+    Scene:Grant(Plr, "TestBulk")
+    return Plr
+end
+
+T:Test("a transaction is one step, undone and redone as a unit", function()
+    const Scene, Copy = Room("HistoryUnit")
+    const Plr = Editor(-6001, Scene)
+    const Door = Copy:Create(DoorId, {[TitleId] = "Before"})
+
+    const Applied = Transactions.Apply(Plr, {
+        {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = "After", Type = "Text"},
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {[TitleId] = "Made"}},
+    } :: any)
+
+    T:Ok(Applied, "applied")
+    T:Eq(Door:Get(TitleId), "After", "the set landed")
+    T:Ok(History:CanUndo(Plr), "and became a step")
+
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(Door:Get(TitleId), "Before", "the set is back")
+    T:Eq(#Copy:GetObjects(), 1, "and what it created is gone")
+
+    T:Ok(History:Redo(Plr), "redone")
+    T:Eq(Door:Get(TitleId), "After", "the set again")
+    T:Eq(#Copy:GetObjects(), 2, "and the object again")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("undoing a destroy brings back the same object, wired", function()
+    const Scene, Copy = Room("HistoryDestroy")
+    const Plr = Editor(-6002, Scene)
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Copy:Create(ButtonId)
+    Button:Set(TargetId, Door)
+
+    const LocalId = Door.LocalId
+    const RuntimeId = Door.RuntimeId
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Destroy", Target = RuntimeId},
+    } :: any), "destroyed")
+
+    T:Ok(Door.Suspended, "kept rather than ended")
+    T:Eq(Button:Get(TargetId), nil, "and the button points at nothing")
+
+    T:Ok(History:Undo(Plr), "undone")
+
+    -- Not a lookalike: the same table, under the same ids, which is what the
+    -- reference was holding all along.
+    T:Eq(Copy:Find(LocalId), Door, "the same object, under its own local id")
+    T:Eq(Objects:Get(RuntimeId), Door, "and its own runtime id")
+    T:Eq(Button:Get(TargetId), Door, "so the reference is live again")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a lone destroy is a step of its own", function()
+    const Scene, Copy = Room("HistoryLone")
+    const Plr = Editor(-6003, Scene)
+    const Door = Copy:Create(DoorId)
+
+    -- What the single destroy channel does, which used to be the one edit
+    -- nothing could take back.
+    Objects.Retire(Plr, Door, true)
+
+    T:Ok(Door.Suspended, "kept")
+    T:Ok(History:CanUndo(Plr), "and recorded")
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(Copy:Find(Door.LocalId), Door, "back as itself")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("nothing keeping a destroy makes it final", function()
+    const Scene, Copy = Room("HistoryUnkept")
+    const Door = Copy:Create(DoorId)
+
+    -- No player, so no stack wants it: exactly what a game that never requires
+    -- History gets.
+    Objects.Retire(nil, Door, true)
+
+    T:Ok(Door.Destroyed, "destroyed")
+    T:Eq(Door.Suspended, nil, "and disposed on the spot")
+
+    Scene:Destroy()
+end)
+
+T:Test("a new action forks the redo stack and ends what it held", function()
+    const Scene, Copy = Room("HistoryFork")
+    const Plr = Editor(-6004, Scene)
+
+    -- Place, undo, place: the first placement sits on the redo stack holding a
+    -- suspended object, and the second forks it away.
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {}},
+    } :: any), "placed")
+
+    const Made = Copy:GetObjects()[1]
+    T:Ok(Made, "made")
+
+    T:Ok(History:Undo(Plr), "undone")
+    T:Ok(Made.Suspended, "held against the redo")
+
+    T:Ok(Transactions.Apply(Plr, {
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {}},
+    } :: any), "placed again")
+
+    T:Ok(not History:CanRedo(Plr), "the redo is gone")
+    T:Eq(Made.Suspended, nil, "and so is what it was holding")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("clearing ends everything the stacks were holding", function()
+    const Scene, Copy = Room("HistoryClear")
+    const Plr = Editor(-6005, Scene)
+    const Door = Copy:Create(DoorId)
+
+    Objects.Retire(Plr, Door, true)
+    T:Ok(Door.Suspended, "held")
+
+    History:Clear(Plr)
+
+    T:Ok(not History:CanUndo(Plr), "the stack is empty")
+    T:Eq(Door.Suspended, nil, "and the object it held is gone")
+
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a step past the limit lets go of what it held", function()
+    const Scene, Copy = Room("HistoryLimit")
+    const Plr = Editor(-6006, Scene)
+
+    -- One destroy per step, more of them than the stack keeps. The first is the
+    -- one pushed off the end.
+    const First = Copy:Create(DoorId)
+    Objects.Retire(Plr, First, true)
+    T:Ok(First.Suspended, "the first is held")
+
+    for _ = 1, 100 do
+        Objects.Retire(Plr, Copy:Create(DoorId), true)
+    end
+
+    T:Eq(First.Suspended, nil, "and let go once it fell off the stack")
+    T:Ok(History:CanUndo(Plr), "while the rest are still there")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+--=============================================================================
 -- Client integration fixtures
 --=============================================================================
 

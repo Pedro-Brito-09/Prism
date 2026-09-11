@@ -65,7 +65,10 @@ const New = Shared.factory(Objects, function(Transaction: Transaction)
     -- operation that cannot be encoded throws rather than being dropped, and
     -- the whole point is that a transaction is never sent four fifths written.
     const Ok, Applied, Created = pcall(function()
-        return Network.Apply:Invoke(Compressor:CompressTransaction(Transaction.Operations))
+        return Network.Apply:Invoke(
+            Compressor:CompressTransaction(Transaction.Operations),
+            Transaction.Untracked == true
+        )
     end)
 
     if not Ok then

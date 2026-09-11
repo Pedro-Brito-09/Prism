@@ -23,6 +23,13 @@ if IS_SERVER then
     -- After both: it applies through Objects, resolves scene copies through
     -- Scenes, and checks every operation against Permissions.
     Prism.Transactions = require("@self/Transactions/Server")
+
+    -- After Transactions, which it records, and required whether or not a game
+    -- ever calls it: a destroy is deferred on the way out and this is what
+    -- takes hold of what was destroyed. Nothing claiming it is exactly how a
+    -- destroy stays immediate -- but that decision has to be made by something
+    -- that is there to make it.
+    Prism.History = require("@self/History/Server")
     Prism.Database = require("@self/Database/Server")
 
     -- Required for the side effect: it wires up the join replay.
@@ -39,9 +46,10 @@ else
     -- pipeline into a server process.
     Prism.Selection = require("@self/Selection")
 
-    -- Client only for the same reason, and because the history it keeps is
-    -- this player's own: it records what this client committed and set.
-    Prism.History = require("@self/History")
+    -- Client only, and only half the history: it keeps the steps of scenes this
+    -- client owns and the order the two halves make together, and asks the
+    -- server for the rest.
+    Prism.History = require("@self/History/Client")
 end
 
 Prism.CustomEnum = require("@self/CustomEnum")
