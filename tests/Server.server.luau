@@ -2702,6 +2702,81 @@ T:Test("a transaction duplicates a group with its references remapped", function
 end)
 
 --=============================================================================
+-- Object signals
+--=============================================================================
+
+T:Describe("Object signals")
+
+T:Test("added and removed fire for every object, however it came and went", function()
+    const Seen: {any} = {}
+    const Gone: {any} = {}
+    local Loaded = 0
+
+    const StopAdded = Objects:OnAdded(function(Obj, Restored)
+        if Restored then
+            Loaded += 1
+        else
+            table.insert(Seen, Obj)
+        end
+    end)
+
+    const StopRemoved = Objects:OnRemoved(function(Obj)
+        table.insert(Gone, Obj)
+    end)
+
+    const Scene, Copy = Room("SignalRoom")
+    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+
+    T:Eq(Seen[1], Door, "creating fired added")
+    T:Eq(Loaded, 0, "and did not call it a restore")
+
+    -- Filed by the time the listener runs, both ways it can be looked up.
+    T:Eq(Objects:Get(Door.RuntimeId), Door, "already in the workspace")
+    T:Eq(Copy:Find(Door.LocalId), Door, "and in its copy")
+
+    Objects.Suspend(Door)
+    T:Eq(Gone[1], Door, "suspending fired removed")
+    T:Ok(Door.Destroyed, "with the object already gone")
+
+    Objects.Revive(Door)
+    T:Eq(Seen[2], Door, "and reviving fired added again")
+
+    Door:Destroy()
+    T:Eq(Gone[2], Door, "destroying fired removed")
+
+    -- A scene load builds its objects silently and sends them in one batch;
+    -- the signal is about the object existing, so it fires for each of them.
+    Copy:Create(DoorId)
+    Copy:Commit()
+    Copy:Unload()
+
+    const Before = Loaded
+    Scene:Load()
+    T:Ok(Loaded > Before, "a load fired added for what it read back")
+
+    StopAdded()
+    StopRemoved()
+    Scene:Destroy()
+end)
+
+T:Test("unloading a copy fires removed for everything it held", function()
+    const Scene, Copy = Room("SignalUnload")
+    Copy:Create(DoorId)
+    Copy:Create(DoorId)
+
+    local Count = 0
+    const Stop = Objects:OnRemoved(function()
+        Count += 1
+    end)
+
+    Copy:Unload()
+    T:Eq(Count, 2, "one for each object the copy held")
+
+    Stop()
+    Scene:Destroy()
+end)
+
+--=============================================================================
 -- Suspending
 --=============================================================================
 
