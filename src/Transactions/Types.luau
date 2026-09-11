@@ -88,6 +88,16 @@ export type Transaction = {
     -- caller asked for is the one behaviour a transaction must not have.
     Rejected: number,
 
+    -- Which side this transaction is about, decided by the first object or copy
+    -- it touches: true for scenes the client owns, false for the server's, nil
+    -- while it is still empty. Committing reads it to know whether that means
+    -- sending a packet or doing the work here.
+    --
+    -- One or the other, never both. A mixed transaction would have to send half
+    -- of itself and wait, with the other half already applied if the answer came
+    -- back no, and a transaction that cannot be atomic is not one.
+    Local: boolean?,
+
     -- Set by whoever commits it to keep it out of the author's undo history.
     -- It rides to the server, because for a scene the server owns that is where
     -- the history lives. Not a permission: an untracked edit is checked and

@@ -588,6 +588,14 @@ function Objects.Drop(Obj: Object)
 end
 
 
+-- The client's twin, and always false here: a copy the server holds is the
+-- server's, and there is no such thing as a scene this side owns privately.
+-- Asked by the shared transaction builder, which decides what committing means
+-- from the answer and must be able to ask either side.
+function Objects:IsLocalCopy(_Live: Types.SceneInstanceId): boolean
+    return false
+end
+
 function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end

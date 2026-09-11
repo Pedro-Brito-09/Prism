@@ -1237,6 +1237,93 @@ T:Test("a destroy in a local scene undoes, and a new action ends it", function()
     History:Clear()
 end)
 
+T:Test("a local transaction applies here and is one step", function()
+    const Sandbox = Scenes.new({Name = "ClientLocalTransaction"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Standing = Copy:Create(BareId, {[TitleId] = "Standing"})
+    History:Clear()
+
+    const Applied, Created = Transactions.new()
+        :Create(BareId, {[TitleId] = "One"}, Copy.Id)
+        :Create(BareId, {[TitleId] = "Two"}, Copy.Id)
+        :Set(Standing, TitleId, "Moved")
+        :Commit()
+
+    -- No round trip: a scene this client owns is this client's to edit, so
+    -- Commit has already done it by the time it returns.
+    T:Ok(Applied, "applied")
+    T:Eq(#Created, 2, "two created")
+    T:Eq(Standing:Get(TitleId), "Moved", "and the set landed")
+    T:Eq(#Copy:GetObjects(), 3, "three objects in the copy")
+
+    T:Ok(History:CanUndo(), "recorded")
+    T:Ok(History:Undo(), "undone")
+
+    T:Eq(#Copy:GetObjects(), 1, "the whole edit went back at once")
+    T:Eq(Standing:Get(TitleId), "Standing", "including the set")
+
+    T:Ok(History:Redo(), "redone")
+    T:Eq(#Copy:GetObjects(), 3, "and came back at once")
+    T:Eq(Standing:Get(TitleId), "Moved", "set and all")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
+T:Test("a transaction cannot mix a local scene with the server's", function()
+    const Sandbox = Scenes.new({Name = "ClientMixed"})
+    if not Sandbox or not BareId or not TitleId or not Editable then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Mine = Copy:Create(BareId, {[TitleId] = "Mine"})
+
+    -- Half of this would have to be asked for and could come back refused, with
+    -- the other half already applied. There is no atomicity to be had, so it is
+    -- refused where it is built rather than half done.
+    const Edit = Transactions.new()
+        :Set(Mine, TitleId, "Local")
+        :Set(Editable, TitleId, "Server")
+
+    T:Ok(Edit.Rejected > 0, "the second kind was rejected")
+    T:Ok(not Edit:Commit(), "and it refuses to commit")
+    T:Eq(Mine:Get(TitleId), "Mine", "nothing applied")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
+T:Test("a local transaction destroys as one step, and undoes as the same objects", function()
+    const Sandbox = Scenes.new({Name = "ClientLocalDestroy"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const First = Copy:Create(BareId, {[TitleId] = "First"})
+    const Second = Copy:Create(BareId, {[TitleId] = "Second"})
+    History:Clear()
+
+    T:Ok(Transactions.new():Destroy(First):Destroy(Second):Commit(), "applied")
+    T:Ok(First.Suspended and Second.Suspended, "both kept rather than ended")
+    T:Eq(#Copy:GetObjects(), 0, "and both gone")
+
+    T:Ok(History:Undo(), "undone")
+    T:Eq(Copy:Find(First.LocalId), First, "the same object back")
+    T:Eq(Copy:Find(Second.LocalId), Second, "and the other")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
 T:Test("a pack places into a copy this client owns", function()
     const Source = Scenes.new({Name = "ClientPlaceSource"})
     if not Source or not BareId or not TitleId then
@@ -1272,10 +1359,11 @@ T:Test("a pack places into a copy this client owns", function()
         end
     end
 
-    -- One step per object, not one for the placement: a placement into a copy
-    -- the server owns is a transaction and undoes whole, but here each create
-    -- is recorded on its own. Pinned so that whatever closes that gap has to
-    -- come back and change this line.
+    -- One step per object: copy:Place creates them one at a time and the
+    -- history records each. Placing as a single step is what the transaction
+    -- form is for -- Transactions.new():Place(pack, copy.Id) -- and Scenes
+    -- cannot reach for that itself without requiring the module that now
+    -- requires it.
     T:Ok(History:Undo(), "undone")
     T:Eq(#Copy:GetObjects(), 2, "one object at a time")
 

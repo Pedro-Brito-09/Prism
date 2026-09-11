@@ -46,16 +46,6 @@ Pedro's to make before or while building.
 
 - [ ] **Small edges left open.** Each is a decision as much as a fix — *Ask*
       before doing any of them.
-      - **A placement into a client owned copy is not one undo step.**
-        `copy:Place` on a server copy goes through a transaction and undoes
-        whole; the client's own `Place` creates its objects one at a time and
-        the history records one step each, so undoing a pasted prefab there
-        takes it apart object by object. Closing it wants a way for the client
-        to say "these are one action" -- a batch that collects what is pushed
-        inside it into a single step, useful for any tool making several local
-        edits at once, not only for placing. The question is whether that is
-        worth an API of its own or whether `History:Push` with an Undo that
-        destroys the lot is what an editor should write.
       - **A retired id can be claimed again by `CustomId`.** `IdPool` never
         hands a released id out on its own when recycling is off, but
         `Claim(id)` with an explicit id only checks `Used`, so unregistering a
@@ -76,6 +66,30 @@ Pedro's to make before or while building.
         rights on it (`Permissions:GrantOn` / `RevokeOn`) would close it.
 
 ## Done
+
+- [x] **A transaction is not only a way to talk to the server.** One whose
+      objects are all in scenes the client owns applies on the spot: the same
+      builder, the same operations, the same three phases and the same rollback,
+      with nothing sent and nothing waited for. Committing reads what the
+      transaction is about and does one or the other.
+
+      Before it, a scene the client owned had no batching at all. Every set,
+      create and destroy was its own apply and its own undo step, which is why
+      placing a prefab into one came apart object by object on undo -- the edge
+      this closes.
+
+      A transaction is all local or all the server's, decided by the first thing
+      it touches and refused by name when the second kind arrives. Half of a
+      mixed one needs a round trip that can come back refused, by which point the
+      local half has applied; there is no atomicity across that line. Duplicate
+      and DuplicateGroup stopped refusing local objects, because now there is
+      something for them to mean.
+
+      It is one history step, which took two hooks: the client records local
+      objects one at a time from the object signals, so the apply says when it
+      starts -- stop that -- and says when it is done, handing over the whole
+      edit. The second fires either way, with nothing to record when the apply
+      rolled back, so what the first switched off is always switched back on.
 
 - [x] **Placing a prefab into an existing copy.** `copy:Place(pack)` on both
       sides, and `Transaction:Place(pack, copy)` for a client. A load reads a

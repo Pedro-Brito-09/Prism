@@ -163,7 +163,7 @@ const function AddInstance(Instance_: SceneInstanceId, Scene: SceneIdentifier, O
         Folders[Instance_] = Folder
     end
 
-    Objects.TrackInstance(Instance_, Scene, if Opened then Folder else nil)
+    Objects.TrackInstance(Instance_, Scene, if Opened then Folder else nil, false)
     Notify(CopyAdded, Instance_, Scene, if Opened then Folder else nil)
 end
 
@@ -347,7 +347,7 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     -- Filed the same way a replicated copy is, so an object of this copy can
     -- work out its own persistent identity and Objects:GetInstance answers for
     -- it like any other.
-    Objects.TrackInstance(Instance_.Id, Owner.Id)
+    Objects.TrackInstance(Instance_.Id, Owner.Id, nil, true)
     return Instance_ :: any
 end
 
@@ -502,6 +502,21 @@ end
 
 function Scenes:GetOwned(): {[SceneIdentifier]: LocalScene}
     return Owned
+end
+
+-- One live copy of a scene this client owns, by its id, or nil for anything
+-- else -- a copy of the server's, or one that has been unloaded. What a
+-- transaction asks before applying itself here: an operation naming a copy this
+-- side does not own is one it has no business doing on its own.
+function Scenes:GetLocalCopy(Copy: SceneInstanceId): SceneInstance?
+    for _, Scene in Owned do
+        const Instance_ = (Scene :: any).Instances[Copy]
+        if Instance_ then
+            return Instance_
+        end
+    end
+
+    return nil
 end
 
 return Scenes

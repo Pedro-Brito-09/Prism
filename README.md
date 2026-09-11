@@ -367,10 +367,14 @@ Prism.Transactions.new():Place(prefab, room.Id):Commit()
 
 One transaction, so it lands whole or not at all and undoes as a single step.
 
-Copies of scenes the client owns have `Place` too, straight on the copy — with
-one difference worth knowing: there is no transaction there, so the client's
-history records one step per object rather than one for the placement, and
-undoing takes the objects back one at a time.
+Copies of scenes the client owns have `Place` too, straight on the copy. That
+form creates the objects one at a time, so the history records one step each;
+the transaction form works on a local copy as well, and is the one to reach for
+when the placement should undo as a single step:
+
+```lua
+Prism.Transactions.new():Place(prefab, sandbox.Id):Commit()
+```
 
 ### Saving
 
@@ -601,6 +605,31 @@ even be built — an unknown property, a target that is not an object — makes
 This is also the only way a client creates an object. `Objects.new` is server
 side, and until a channel asked for a create, `CanCreate` was a permission
 nothing could reach.
+
+### Not only for talking to the server
+
+A transaction whose objects are all in scenes the client owns **applies on the
+spot**. Same builder, same operations; `Commit` sees what it is about and either
+sends it or does the work, and a local commit does not yield because there is
+nobody to ask.
+
+That is what batching a local edit looks like. Without it every set, create and
+destroy in a scene the client owns was its own apply and its own undo step, so
+undoing a pasted prefab took it apart one object at a time.
+
+```lua
+-- A whole prefab into a copy this client owns: one edit, one undo step.
+Prism.Transactions.new():Place(prefab, sandbox.Id):Commit()
+```
+
+A transaction is **all local or all the server's**, never both. The second kind
+to arrive is refused by name when it is added. That one is forced: half of a
+mixed transaction needs a round trip that can come back refused, and by then the
+local half has already applied — there is no atomicity to be had across that
+line, and a transaction that cannot be atomic is not one.
+
+Everything else is the same on both paths: the three phases in the same order,
+a rollback if it throws partway, and one entry in the history.
 
 ### Ordering
 

@@ -21,6 +21,7 @@
 -- is what this reconciles against.
 
 const Objects = require("../Objects/Client")
+const Transactions = require("../Transactions/Client")
 const Network = require("./Network")
 const Listeners = require("../Listeners")
 const Logger = require("../Logger")
@@ -418,6 +419,66 @@ end)
 
 -- Only scenes this client owns. What it does to the server's is recorded there,
 -- where the objects are, and reaches this side as a step id and nothing else.
+
+-- A local transaction is one step, which is what a transaction is for. The two
+-- hooks are why it can be: the first stops the object by object recording below
+-- from firing while the edit runs, and the second hands the whole thing over.
+-- Without the first, a transaction creating three objects would land as three
+-- steps and then a fourth.
+Transactions.OnApplying(function()
+    Applying = true
+end)
+
+Transactions.OnApplied(function(Record): boolean
+    Applying = false
+
+    -- Nil when the apply came apart and was rolled back: nothing happened, so
+    -- there is nothing to take back.
+    if not Record then
+        return false
+    end
+
+    const Entries: {Entry} = {}
+    local Creates = 0
+
+    for Index, Operation in Record.Operations do
+        const Op = Operation :: any
+
+        if Op.Kind == "Create" then
+            Creates += 1
+            const Made = Record.Created[Creates]
+            if Made then
+                table.insert(Entries, {Kind = "Create" :: "Create", Target = Made})
+            end
+        elseif Op.Kind == "Set" then
+            const Obj = Record.Targets[Index]
+            if Obj then
+                table.insert(Entries, {
+                    Kind = "Set" :: "Set",
+                    Target = Obj,
+                    Property = Op.Property,
+                    Before = Record.Before[Index],
+                    After = Op.Value,
+                })
+            end
+        elseif Op.Kind == "Destroy" then
+            const Obj = Record.Targets[Index]
+
+            -- Named twice in one transaction is one destroy by the time it
+            -- lands, and the second naming has no object suspended of its own.
+            if Obj and Obj.Suspended then
+                table.insert(Entries, {Kind = "Destroy" :: "Destroy", Target = Obj})
+            end
+        end
+    end
+
+    if #Entries == 0 then
+        return false
+    end
+
+    Push({Entries = Entries})
+    return true
+end)
 
 Objects:OnEdited(function(Obj, Property, Before, After)
     if Applying or not Obj.Local then

@@ -51,6 +51,12 @@ const InstanceScene: {[Types.SceneInstanceId]: Types.SceneIdentifier} = {}
 -- here is one the server loaded, whose parts are the server's.
 const DrawInto: {[Types.SceneInstanceId]: Folder} = {}
 
+-- Copies of scenes this client owns. The distinction the server never has to
+-- make and this side cannot do without: an edit to one of these applies here
+-- and now, and an edit to any other copy is a request. A transaction reads it
+-- to know whether committing means sending a packet or doing the work.
+const LocalCopies: {[Types.SceneInstanceId]: true} = {}
+
 -- Every object appearing here and going, whichever way it came: replicated
 -- from the server, built in a scene this client owns, or drawn for a copy the
 -- server opened. UI used to poll GetWorkspace to notice any of it.
@@ -937,9 +943,25 @@ end
 
 -- Told by Scenes/Client as the server announces copies appearing, with the
 -- folder to draw into when the server opened the copy rather than loading it.
-function Objects.TrackInstance(Live: Types.SceneInstanceId, Scene: Types.SceneIdentifier, Folder: Folder?)
+function Objects.TrackInstance(
+    Live: Types.SceneInstanceId,
+    Scene: Types.SceneIdentifier,
+    Folder: Folder?,
+    Local: boolean?
+)
     InstanceScene[Live] = Scene
     DrawInto[Live] = Folder
+
+    if Local then
+        LocalCopies[Live] = true
+    end
+end
+
+-- Whether a copy belongs to a scene this client owns, which is what decides
+-- whether editing it is a thing this side may simply do. The server's answer is
+-- always false: nothing there is anybody's local.
+function Objects:IsLocalCopy(Live: Types.SceneInstanceId): boolean
+    return LocalCopies[Live] == true
 end
 
 -- Tears down every object of one live copy. Called by Scenes/Client when the
@@ -948,6 +970,7 @@ end
 function Objects.DropInstance(Live: Types.SceneInstanceId)
     InstanceScene[Live] = nil
     DrawInto[Live] = nil
+    LocalCopies[Live] = nil
 
     const Held = ByInstance[Live]
     if not Held then

@@ -56,6 +56,29 @@ function Shared.factory(
         return nil
     end
 
+    -- Which side a transaction belongs to, decided by the first thing it
+    -- touches and held to for the rest of it.
+    --
+    -- A transaction is all of one or all of the other. Half of a mixed one
+    -- would need a round trip that can come back refused, and by the time it
+    -- did the local half would already have applied -- there is no atomicity to
+    -- be had across that line, and a transaction that is not atomic is not a
+    -- transaction. So the second kind to arrive is refused, by name, rather
+    -- than quietly splitting the edit in two.
+    const function Claim(self: Transaction, Local: boolean, What: string): boolean
+        if self.Local == nil then
+            self.Local = Local
+            return true
+        end
+
+        if self.Local == Local then
+            return true
+        end
+
+        Reject(self, `{What} belongs to {if Local then "a scene this client owns" else "the server"}, and this transaction is already about {if Local then "the server" else "a scene this client owns"}.`)
+        return false
+    end
+
     const function __create(
         self: Transaction,
         Reference: Types.TypeReference,
@@ -69,6 +92,11 @@ function Shared.factory(
         const Registry = if type(Identifier) == "number" then Objects:GetRegistry(Identifier) else nil
         if not Registry or type(Identifier) ~= "number" then
             Reject(self, `Cannot create {tostring(Identifier)}: no object type is registered here with that id.`)
+            return self
+        end
+
+        -- Zero is the implicit default scene, which is the server's.
+        if not Claim(self, Live ~= nil and Objects:IsLocalCopy(Live), Registry.Name) then
             return self
         end
 
@@ -117,13 +145,6 @@ function Shared.factory(
             return self
         end
 
-        -- A scene this client owns has no copy the server knows, so a create
-        -- aimed at it would only be refused there.
-        if Obj.Local then
-            Reject(self, `{Obj.Name} belongs to a scene this client owns; duplicate it with Objects:Duplicate.`)
-            return self
-        end
-
         return __create(self, Obj.Parent, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
     end
 
@@ -146,11 +167,6 @@ function Shared.factory(
             const Obj = Resolve(Target)
             if not Obj or Obj.Destroyed then
                 Reject(self, "Cannot duplicate an object that is not here.")
-                continue
-            end
-
-            if Obj.Local then
-                Reject(self, `{Obj.Name} belongs to a scene this client owns; duplicate it with Objects:DuplicateGroup.`)
                 continue
             end
 
@@ -290,6 +306,10 @@ function Shared.factory(
             return self
         end
 
+        if not Claim(self, Obj.Local == true, Obj.Name) then
+            return self
+        end
+
         const Prop = Obj:GetProperty(Property)
         if not Prop then
             Reject(self, `{Obj.Name} has no property {Property}.`)
@@ -338,6 +358,10 @@ function Shared.factory(
             return self
         end
 
+        if not Claim(self, Obj.Local == true, Obj.Name) then
+            return self
+        end
+
         table.insert(self.Operations, {
             Kind = "Destroy" :: "Destroy",
             Target = Obj.RuntimeId,
@@ -364,6 +388,7 @@ function Shared.factory(
         const Transaction = {}
         Transaction.Operations = {}
         Transaction.Rejected = 0
+        Transaction.Local = nil
 
         Transaction.Create = __create
         Transaction.Duplicate = __duplicate
