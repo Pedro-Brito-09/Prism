@@ -28,9 +28,17 @@ const Types = require("../Objects/Types")
 
 const History = {}
 
--- Steps of this client's own kept on each stack. The server keeps its own count
--- of its own; a player who edits only one kind of scene sees exactly this many
--- either way.
+-- Steps of this client's own kept on each stack, across every scene this client
+-- owns. One count for all of them, for the reason the server keeps one for all
+-- of its own: what a player takes back is one sequence of things they did, not
+-- one per room.
+--
+-- The two halves count separately, which is the one line the order does not
+-- draw: a step here and a step the server holds are the same kind of thing to
+-- undo, but only this side can count them together, and a client that has gone
+-- quiet must not be what decides how much the server holds. So each side keeps
+-- its own hundred, and a player who edits only one kind of scene sees exactly
+-- that many either way.
 const LIMIT = 100
 
 -- How long a run of sets to one property may pause and still be one step. A

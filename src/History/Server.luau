@@ -47,8 +47,13 @@ export type Object = ObjectTypes.Object
 
 const History = {}
 
--- Steps kept on each stack, per player. The oldest goes when a new one arrives
--- past this, and goes for good: whatever it was holding is disposed.
+-- Steps kept on each stack, per player and across every scene the server owns.
+-- One count, not one per scene: a player editing two rooms has done one
+-- sequence of things and takes them back in the order they did them, so a limit
+-- per scene would drop a step that is nowhere near the oldest thing they did.
+--
+-- The oldest goes when a new one arrives past this, and goes for good:
+-- whatever it was holding is disposed.
 const LIMIT = 100
 
 -- How long a run of single sets to one property may pause and still count as

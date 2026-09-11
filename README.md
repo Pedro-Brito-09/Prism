@@ -575,7 +575,14 @@ Prism.History:OnChange(function() toolbar:Refresh() end)
 
 A step is one committed transaction, one create or destroy, or a run of
 `Object:Set` calls to one property with no pause longer than a second, so a drag
-undoes as one. Each stack keeps the last 100.
+undoes as one.
+
+Each stack keeps the last 100 steps. That count is **per player and across every
+scene** — editing two rooms does not give you two hundred steps, because what
+you take back is one sequence of things you did rather than one per room. The
+server's half and the client's half do count separately, though: only the client
+can see both, and a client that has gone quiet must not be what decides how much
+the server holds on to.
 
 ### A destroy is deferred, not undone
 
