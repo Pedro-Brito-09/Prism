@@ -418,6 +418,42 @@ const function Reference(
     return Target
 end
 
+-- A saved object's values split in two: the ones that can be applied as they
+-- are, and the references, which cannot.
+--
+-- A reference holds a local id, and a pack being *placed* -- read into a copy
+-- that already exists, rather than into a copy of its own -- is read under new
+-- ids that its scene mints as it goes. The saved id means nothing there: at
+-- best it names nothing, at worst it names whatever else in that copy happens
+-- to answer to it, which would wire a pasted button to a door it has never met.
+--
+-- So they are held back, and written afterwards against a map of what the
+-- placement actually made. Loading a pack as a whole new copy has no such
+-- problem -- every object keeps the id it was saved with -- which is why this
+-- is the placing path's alone.
+const function SplitReferences(
+    Values: {[PropertyTypes.PropertyIdentifier]: any}
+): ({[PropertyTypes.PropertyIdentifier]: any}, {[PropertyTypes.PropertyIdentifier]: any}?)
+    const Plain = {}
+    local References: {[PropertyTypes.PropertyIdentifier]: any}? = nil
+
+    for Id, Value in Values do
+        const Registry = Properties:GetRegistry(Id)
+        if Registry and Registry.Type == "Object" then
+            if not References then
+                References = {}
+            end
+
+            (References :: any)[Id] = Value
+            continue
+        end
+
+        Plain[Id] = Value
+    end
+
+    return Plain, References
+end
+
 -- What a setter hands to Prop:Set, for any property type. Everything but an
 -- Object passes straight through, so a caller does not have to know which kind
 -- it is holding -- there are four setters across the two sides and each one
@@ -501,6 +537,7 @@ return {
     ResolveReference = ResolveReference,
     Reference = Reference,
     Accept = Accept,
+    SplitReferences = SplitReferences,
 
     -- Reading or destroying an already destroyed object answers instead of
     -- throwing. The previous noop raised an error, which meant a stale

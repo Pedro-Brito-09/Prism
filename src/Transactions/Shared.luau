@@ -16,6 +16,7 @@
 const PropertyTypes = require("../Properties/Types")
 const ObjectTypes = require("../Objects/Types")
 const ObjectShared = require("../Objects/Shared")
+const Compressor = require("../Compressor")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
@@ -208,6 +209,75 @@ function Shared.factory(
         return self
     end
 
+    -- A pack placed into a copy the server owns, as a list of creates: one per
+    -- object in it, each asking for exactly what a create asks for, so placing a
+    -- prefab is checked against create rights rather than needing a right of its
+    -- own. One transaction, so it lands whole or not at all and undoes as one
+    -- step.
+    --
+    -- The references are why this is not a loop over Create. A saved reference
+    -- holds a local id from the scene the pack was written in, and the ids these
+    -- objects will answer to are minted at the far end, after the packet is
+    -- written -- so each one names the operation that makes its target instead,
+    -- and the far end fills in the id once the creates have run. A reference to
+    -- something the pack did not carry is dropped: the id would mean nothing
+    -- there, or worse, would mean something.
+    const function __place(
+        self: Transaction,
+        Pack: buffer,
+        Live: ObjectTypes.SceneInstanceId?
+    ): Transaction
+        const Ok, _, Decompressed = pcall(function()
+            return Compressor:DecompressScene(Pack)
+        end)
+
+        if not Ok or not Decompressed then
+            Reject(self, "Cannot place a pack that could not be read.")
+            return self
+        end
+
+        -- Which operation makes each object, by the id the pack knew it as.
+        const Placed: {[number]: number} = {}
+        const Pending: {{Index: number, References: {[number]: any}}} = {}
+
+        for _, Saved in Decompressed :: {any} do
+            const Values, References = ObjectShared.SplitReferences(Saved.Properties)
+
+            const Before = #self.Operations
+            __create(self, Saved.Parent, Values, Live)
+
+            -- Rejected, and the transaction will refuse to commit; there is
+            -- nothing to record an operation index against.
+            if #self.Operations == Before then
+                continue
+            end
+
+            Placed[Saved.LocalId] = #self.Operations
+            if References then
+                table.insert(Pending, {Index = #self.Operations, References = References})
+            end
+        end
+
+        for _, Entry in Pending do
+            const Operation = self.Operations[Entry.Index] :: Types.CreateOperation
+
+            for PropertyId, Saved in Entry.References do
+                const Names = Placed[Saved]
+                if not Names then
+                    continue
+                end
+
+                if not Operation.References then
+                    Operation.References = {}
+                end
+
+                (Operation.References :: any)[PropertyId] = Names
+            end
+        end
+
+        return self
+    end
+
     const function __set(
         self: Transaction,
         Target: Types.ObjectReference,
@@ -298,6 +368,7 @@ function Shared.factory(
         Transaction.Create = __create
         Transaction.Duplicate = __duplicate
         Transaction.DuplicateGroup = __duplicate_group
+        Transaction.Place = __place
         Transaction.Set = __set
         Transaction.Destroy = __destroy
         Transaction.Commit = __commit

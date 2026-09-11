@@ -17,6 +17,7 @@
 const Permissions = require("../Permissions/Server")
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
+const ObjectShared = require("../Objects/Shared")
 const Registry = require("./Registry")
 const Audience = require("./Audience")
 const World = require("../World")
@@ -229,6 +230,82 @@ const function __instance_objects(self: SceneInstance): {any}
     return List
 end
 
+-- A pack read into this copy rather than into a copy of its own: pasting a
+-- saved group of objects into a level somebody is editing.
+--
+-- The opposite of loading in the one way that matters. A load restores every
+-- object under the id it was saved with, which is what keeps a pack meaning the
+-- same thing every time it is read. A placement cannot: the copy it is going
+-- into already has objects, and their ids are already spoken for. So every
+-- object is created afresh, the scene mints the ids, and the pack's own LastId
+-- is ignored -- it belongs to the scene the pack came from and says nothing
+-- about this one.
+--
+-- Which leaves the references. They are held back while the objects are built
+-- and written afterwards against what was actually made: a reference to another
+-- object in the pack follows it to its new id, and a reference to anything else
+-- is dropped rather than carried over. Carrying it would be worse than losing
+-- it -- the id would name whatever in this copy happens to answer to it, and a
+-- pasted button would come up wired to a door it has never met.
+const function __place(self: SceneInstance, Pack: buffer): {ObjectTypes.Object}?
+    const Ok, _, Decompressed = pcall(function()
+        return Compressor:DecompressScene(Pack)
+    end)
+
+    if not Ok or not Decompressed then
+        Logger:Warn(`Failed to read a pack being placed into a copy of {self.Owner.Name}.`)
+        return nil
+    end
+
+    const Made: {ObjectTypes.Object} = {}
+
+    -- What the placement made, by the id the pack knew each object as.
+    const Placed: {[number]: ObjectTypes.Object} = {}
+    const Pending: {{Object: ObjectTypes.Object, References: {[number]: any}}} = {}
+
+    for _, Saved in Decompressed :: {any} do
+        if not Objects:GetRegistry(Saved.Parent) then
+            -- Skipped rather than refused, like restoring a saved object of a
+            -- type this build no longer has: the rest of the pack is still a
+            -- thing worth placing.
+            Logger:Warn(`Skipped an object while placing a pack: object type {Saved.Parent} is not registered.`)
+            continue
+        end
+
+        const Values, References = ObjectShared.SplitReferences(Saved.Properties)
+        const Obj = Objects.new(Saved.Parent, Values, self, false)
+
+        table.insert(Made, Obj)
+        Placed[Saved.LocalId] = Obj
+
+        if References then
+            table.insert(Pending, {Object = Obj, References = References})
+        end
+    end
+
+    for _, Entry in Pending do
+        for PropertyId, Saved in Entry.References do
+            const Prop = Entry.Object.Properties[PropertyId]
+            const Target = Placed[Saved]
+
+            -- Left at nothing when the pack did not carry what it pointed at,
+            -- which is what a property never written reads as.
+            if Prop and Target then
+                Prop:Set(Target.LocalId)
+            end
+        end
+    end
+
+    -- One announcement for the lot, down the chunked path a load uses. Building
+    -- them silently is also what keeps a reference from going out twice: once
+    -- holding an id from another scene, once corrected.
+    if #Made > 0 then
+        Objects.AnnounceAll(Made)
+    end
+
+    return Made
+end
+
 const function __instance_serialize(self: SceneInstance): buffer
     const List = __instance_objects(self)
 
@@ -280,6 +357,7 @@ const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean): Sc
     Instance_.ByLocal = {}
 
     Instance_.Create = __create
+    Instance_.Place = __place
     Instance_.Find = __find
     Instance_.GetObjects = __instance_objects
     Instance_.Serialize = __instance_serialize

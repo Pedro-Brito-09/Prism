@@ -337,6 +337,41 @@ Unloading a copy destroys its folder and everything in it. A default scene
 folder goes with the last of its copies; a parent you supplied is yours and is
 left alone.
 
+### Placing a pack into a copy
+
+Loading reads a pack as a whole new copy, every object under the id it was saved
+with. Placing reads one **into a copy that already exists** — pasting a prefab
+into a level somebody is editing:
+
+```lua
+local prefab = doorway:Serialize()          -- any pack: a copy's or a scene's
+
+local made = room:Place(prefab)             -- server side, returns the new objects
+```
+
+Every object is created afresh under an id the target copy's scene mints, so the
+pack's own ids — and its `LastId` — are ignored; they belong to the scene it was
+written in. Place the same prefab five times and you get five independent sets.
+
+References inside the pack follow it: a door and the button that works it come
+out wired to each other. A reference to anything the pack *didn't* carry is
+dropped rather than carried over, because that id means nothing in the target
+copy — and if it happens to mean something, it means the wrong thing.
+
+A client places through a transaction, which makes it one create per object and
+so needs create rights and nothing more:
+
+```lua
+Prism.Transactions.new():Place(prefab, room.Id):Commit()
+```
+
+One transaction, so it lands whole or not at all and undoes as a single step.
+
+Copies of scenes the client owns have `Place` too, straight on the copy — with
+one difference worth knowing: there is no transaction there, so the client's
+history records one step per object rather than one for the placement, and
+undoing takes the objects back one at a time.
+
 ### Saving
 
 `instance:Commit()` writes a copy back into its scene; `Scene:Serialize()` hands
@@ -546,6 +581,7 @@ local edit = Prism.Transactions.new()
 edit:Create(Crate, {[Health] = 50}, room.Id)
     :Duplicate(original)             -- a create holding original's values
     :DuplicateGroup(selection)       -- the same, references between them remapped
+    :Place(prefab, room.Id)          -- a saved pack, one create per object in it
     :Set(other, "Health", 20)
     :Destroy(stale)
 

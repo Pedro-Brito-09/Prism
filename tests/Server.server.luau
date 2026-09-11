@@ -3150,6 +3150,191 @@ T:Test("a step past the limit lets go of what it held", function()
 end)
 
 --=============================================================================
+-- Placing
+--=============================================================================
+
+T:Describe("Placing")
+
+-- A pack holding a door and a button wired to it, for the placing tests to
+-- paste around. Built once, in a scene of its own, and committed.
+const Prefab = (function(): buffer
+    const Scene = Scenes.new({Name = "PrefabSource"}) :: any
+    const Copy = Scene:Load()
+
+    const Door = Copy:Create(DoorId, {[TitleId] = "PrefabDoor"})
+    const Button = Copy:Create(ButtonId, {[TitleId] = "PrefabButton"})
+    Button:Set(TargetId, Door)
+
+    const Pack = Copy:Serialize()
+    Scene:Destroy()
+    return Pack
+end)()
+
+T:Test("a placed pack lands under this copy's own ids", function()
+    const Scene, Copy = Room("PlaceRoom")
+    const Sitting = Copy:Create(DoorId, {[TitleId] = "Sitting"})
+
+    const Made = Copy:Place(Prefab)
+    T:Ok(Made and #Made == 2, "both objects placed")
+
+    if not Made then
+        Scene:Destroy()
+        return
+    end
+
+    T:Eq(#Copy:GetObjects(), 3, "beside what was already there")
+
+    for _, Obj in Made do
+        T:Ok(Obj.LocalId ~= Sitting.LocalId, "a fresh id, not the saved one")
+        T:Eq(Copy:Find(Obj.LocalId), Obj, "filed under it")
+        T:Eq(Obj.InstanceId, Copy.Id, "in this copy")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("references inside a placed pack follow it", function()
+    const Scene, Copy = Room("PlaceReferences")
+    const Made = Copy:Place(Prefab) :: any
+
+    local Door, Button
+    for _, Obj in Made do
+        if Obj:Get(TitleId) == "PrefabDoor" then
+            Door = Obj
+        else
+            Button = Obj
+        end
+    end
+
+    T:Ok(Door and Button, "found both")
+
+    if Door and Button then
+        -- The saved id named a door in the scene the pack was written in. What
+        -- it names here is whatever the placement made.
+        T:Eq(Button:Get(TargetId), Door, "the button works the door it came with")
+        T:Ok(Button:GetProperty(TargetId).Value ~= 0, "by a real id")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("placing twice gives two independent sets", function()
+    const Scene, Copy = Room("PlaceTwice")
+
+    const First = Copy:Place(Prefab) :: any
+    const Second = Copy:Place(Prefab) :: any
+
+    T:Eq(#Copy:GetObjects(), 4, "four objects in the copy")
+
+    local FirstButton, SecondButton
+    for _, Obj in First do
+        if Obj:Get(TitleId) == "PrefabButton" then
+            FirstButton = Obj
+        end
+    end
+
+    for _, Obj in Second do
+        if Obj:Get(TitleId) == "PrefabButton" then
+            SecondButton = Obj
+        end
+    end
+
+    T:Ok(FirstButton and SecondButton, "a button in each")
+
+    if FirstButton and SecondButton then
+        T:Ok(FirstButton:Get(TargetId) ~= SecondButton:Get(TargetId), "each works its own door")
+        T:Ok(table.find(First, FirstButton:Get(TargetId)) ~= nil, "the door it was placed with")
+        T:Ok(table.find(Second, SecondButton:Get(TargetId)) ~= nil, "and likewise")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("a reference the pack did not carry is dropped", function()
+    const Source = Scenes.new({Name = "PlaceDangling"}) :: any
+    const SourceCopy = Source:Load()
+
+    -- A button whose door is not in the pack: the door is destroyed before the
+    -- pack is written, so the reference is an id naming nothing.
+    const Door = SourceCopy:Create(DoorId)
+    const Button = SourceCopy:Create(ButtonId)
+    Button:Set(TargetId, Door)
+    const Saved = Door.LocalId
+    Door:Destroy()
+
+    const Pack = SourceCopy:Serialize()
+    Source:Destroy()
+
+    const Scene, Copy = Room("PlaceDanglingTarget")
+
+    -- Something in the target copy answering to the id the pack carried, which
+    -- is the whole hazard: carried over, the placed button would come up wired
+    -- to this.
+    local Filler = Copy:Create(DoorId, {[TitleId] = "NotYours"})
+    while Filler.LocalId < Saved do
+        Filler = Copy:Create(DoorId, {[TitleId] = "NotYours"})
+    end
+
+    const Made = Copy:Place(Pack) :: any
+    T:Ok(Made and #Made == 1, "the button placed")
+
+    if Made and Made[1] then
+        T:Eq(Made[1]:Get(TargetId), nil, "pointing at nothing")
+        T:Eq(Made[1]:GetProperty(TargetId).Value, nil, "with nothing written")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("a client places through create rights, as one step", function()
+    const Scene, Copy = Room("PlaceTransaction")
+    const Plr = Editor(-6100, Scene)
+
+    -- Built as a client builds it, applied as the player rather than as the
+    -- server, so the create rights are the ones actually being asked for.
+    const Edit = Transactions.new():Place(Prefab, Copy.Id)
+    T:Eq(#Edit.Operations, 2, "one create per object in the pack")
+
+    const Applied, Created = Transactions.Apply(Plr, Edit.Operations)
+
+    T:Ok(Applied, "applied")
+    T:Eq(#Created, 2, "both landed")
+
+    const First = Objects:Get(Created[1])
+    const Second = Objects:Get(Created[2])
+    T:Ok(First and Second, "both are here")
+
+    if First and Second then
+        const Button = if First:Get(TitleId) == "PrefabButton" then First else Second
+        const Door = if Button == First then Second else First
+        T:Eq(Button:Get(TargetId), Door, "wired to the door placed with it")
+    end
+
+    -- One transaction, so one step: undoing takes the whole placement back
+    -- rather than one object of it.
+    T:Ok(History:CanUndo(Plr), "recorded")
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(#Copy:GetObjects(), 0, "the placement went as a unit")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
+T:Test("a placement a client is not allowed refuses whole", function()
+    const Scene, Copy = Room("PlaceRefused")
+    const Plr = Ghost(-6101)
+
+    -- No rights on this scene at all.
+    const Applied = Transactions.Apply(Plr, Transactions.new():Place(Prefab, Copy.Id).Operations)
+
+    T:Ok(not Applied, "refused")
+    T:Eq(#Copy:GetObjects(), 0, "and placed nothing")
+
+    Scene:Destroy()
+end)
+
+--=============================================================================
 -- Client integration fixtures
 --=============================================================================
 

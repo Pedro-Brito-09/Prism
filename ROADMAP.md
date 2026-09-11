@@ -44,20 +44,18 @@ In the order to build them. Each is described well enough to start without
 the conversation that produced it; anything marked *Ask* is a decision that is
 Pedro's to make before or while building.
 
-- [ ] **Placing a prefab into an existing copy.** Next up. A pack loads only as
-      a whole new copy today (`Read` in `src/Scenes/Server.luau`, which restores
-      each object under its saved local id). Pasting a saved group of objects into
-      a level being edited needs the opposite: fresh local ids minted by the
-      target copy's scene, and references inside the pack remapped to the new
-      ids — the same remap `Objects:DuplicateGroup` does, over a pack rather
-      than over live objects. Server side first
-      (`copy:Place(pack)` or similar, returning the new objects), then a
-      transaction step so a client can place one through create rights, then
-      the client-owned-scene equivalent. Undo should see a placement as one
-      step; recording it as a transaction gives that for free.
-
 - [ ] **Small edges left open.** Each is a decision as much as a fix — *Ask*
       before doing any of them.
+      - **A placement into a client owned copy is not one undo step.**
+        `copy:Place` on a server copy goes through a transaction and undoes
+        whole; the client's own `Place` creates its objects one at a time and
+        the history records one step each, so undoing a pasted prefab there
+        takes it apart object by object. Closing it wants a way for the client
+        to say "these are one action" -- a batch that collects what is pushed
+        inside it into a single step, useful for any tool making several local
+        edits at once, not only for placing. The question is whether that is
+        worth an API of its own or whether `History:Push` with an Undo that
+        destroys the lot is what an editor should write.
       - **A retired id can be claimed again by `CustomId`.** `IdPool` never
         hands a released id out on its own when recycling is off, but
         `Claim(id)` with an explicit id only checks `Used`, so unregistering a
@@ -78,6 +76,28 @@ Pedro's to make before or while building.
         rights on it (`Permissions:GrantOn` / `RevokeOn`) would close it.
 
 ## Done
+
+- [x] **Placing a prefab into an existing copy.** `copy:Place(pack)` on both
+      sides, and `Transaction:Place(pack, copy)` for a client. A load reads a
+      pack as a whole new copy under the ids it was saved with; a placement
+      reads one into a copy that already exists, so every object is created
+      afresh and the target scene mints the ids. The pack's own LastId is
+      ignored -- it belongs to the scene the pack was written in.
+
+      References are the reason it is not a loop over Create. A saved reference
+      holds a local id from that other scene, so the values are split before
+      anything is built (`Objects/Shared.SplitReferences`) and written
+      afterwards against what the placement actually made. One that points at
+      another object in the pack follows it; one that points at anything else is
+      dropped rather than carried, because in the target copy that id names
+      nothing -- or, worse, names something.
+
+      The transaction path expands into one create per object rather than
+      adding an operation kind, so a client places through create rights and
+      nothing more, and the references name the operations that make their
+      targets -- the machinery object references already added for group
+      duplication. One transaction, so a placement lands whole or not at all and
+      undoes as a single step.
 
 - [x] **Object added / removed signals on the server.** `Objects:OnAdded` and
       `OnRemoved`, mirroring the client's down to the `Restored` argument, so a

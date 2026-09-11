@@ -69,6 +69,14 @@ export type SceneInstance = {
         InitialValues: {[number]: any}?
     ) -> ObjectTypes.Object?,
 
+    -- A pack read into this copy rather than into a copy of its own: pasting a
+    -- prefab into a level being edited. Every object is made afresh under an id
+    -- this copy's scene mints, and the references inside the pack are remapped
+    -- onto them; a reference pointing at anything the pack did not carry is
+    -- dropped, because the id it holds means nothing here. Returns what it made,
+    -- or nil if the pack could not be read.
+    Place: (self: SceneInstance, Pack: buffer) -> {ObjectTypes.Object}?,
+
     Find: (self: SceneInstance, Local: Handles.LocalId) -> ObjectTypes.Object?,
     GetObjects: (self: SceneInstance) -> {ObjectTypes.Object},
 

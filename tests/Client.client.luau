@@ -1237,6 +1237,52 @@ T:Test("a destroy in a local scene undoes, and a new action ends it", function()
     History:Clear()
 end)
 
+T:Test("a pack places into a copy this client owns", function()
+    const Source = Scenes.new({Name = "ClientPlaceSource"})
+    if not Source or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const SourceCopy = Source:Load()
+    SourceCopy:Create(BareId, {[TitleId] = "PackOne"})
+    SourceCopy:Create(BareId, {[TitleId] = "PackTwo"})
+    const Pack = SourceCopy:Serialize()
+    Source:Destroy()
+
+    const Target = Scenes.new({Name = "ClientPlaceTarget"})
+    if not Target then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Target:Load()
+    const Sitting = Copy:Create(BareId, {[TitleId] = "Sitting"})
+
+    const Made = Copy:Place(Pack)
+    T:Ok(Made and #Made == 2, "both objects placed")
+
+    if Made then
+        T:Eq(#Copy:GetObjects(), 3, "beside what was already there")
+
+        for _, Obj in Made do
+            T:Ok(Obj.LocalId ~= Sitting.LocalId, "under a fresh id")
+            T:Eq(Copy:Find(Obj.LocalId), Obj, "filed under it")
+            T:Ok(Obj.Local, "and owned by this client")
+        end
+    end
+
+    -- One step per object, not one for the placement: a placement into a copy
+    -- the server owns is a transaction and undoes whole, but here each create
+    -- is recorded on its own. Pinned so that whatever closes that gap has to
+    -- come back and change this line.
+    T:Ok(History:Undo(), "undone")
+    T:Eq(#Copy:GetObjects(), 2, "one object at a time")
+
+    Target:Destroy()
+    History:Clear()
+end)
+
 T:Test("a local scene loading its own pack is not a step", function()
     const Sandbox = Scenes.new({Name = "ClientHistoryLoad"})
     if not Sandbox or not BareId or not TitleId then

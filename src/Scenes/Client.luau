@@ -26,6 +26,7 @@
 
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Client")
+const ObjectShared = require("../Objects/Shared")
 const World = require("../World")
 const Network = require("./Network")
 const Handles = require("../Handles")
@@ -215,6 +216,55 @@ const function __create(self: SceneInstance, Reference: any, InitialValues: {[nu
     return Objects.new(Reference, InitialValues, self)
 end
 
+-- A pack read into this copy rather than into a copy of its own. The server's
+-- twin -- see Scenes/Server, which explains why the references cannot simply be
+-- carried across -- with nothing to announce, because a scene this client owns
+-- replicates to nobody.
+const function __place(self: SceneInstance, Pack: buffer): any
+    const Ok, _, Decompressed = pcall(function()
+        return Compressor:DecompressScene(Pack)
+    end)
+
+    if not Ok or not Decompressed then
+        Logger:Warn(`Failed to read a pack being placed into a copy of {self.Owner.Name}.`)
+        return nil
+    end
+
+    const Made = {}
+    const Placed: {[number]: any} = {}
+    const Pending: {{Object: any, References: {[number]: any}}} = {}
+
+    for _, Saved in Decompressed :: {any} do
+        if not Objects:GetRegistry(Saved.Parent) then
+            Logger:Warn(`Skipped an object while placing a pack: object type {Saved.Parent} is not registered.`)
+            continue
+        end
+
+        const Values, References = ObjectShared.SplitReferences(Saved.Properties)
+        const Obj = Objects.new(Saved.Parent, Values, self)
+
+        table.insert(Made, Obj)
+        Placed[Saved.LocalId] = Obj
+
+        if References then
+            table.insert(Pending, {Object = Obj, References = References})
+        end
+    end
+
+    for _, Entry in Pending do
+        for PropertyId, Saved in Entry.References do
+            const Prop = Entry.Object.Properties[PropertyId]
+            const Target = Placed[Saved]
+
+            if Prop and Target then
+                Prop:Set(Target.LocalId)
+            end
+        end
+    end
+
+    return Made
+end
+
 const function __find(self: SceneInstance, Local_: number): any
     return self.ByLocal[Local_]
 end
@@ -285,6 +335,7 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     Instance_.ByLocal = {}
 
     Instance_.Create = __create
+    Instance_.Place = __place
     Instance_.Find = __find
     Instance_.GetObjects = __instance_objects
     Instance_.Serialize = __instance_serialize

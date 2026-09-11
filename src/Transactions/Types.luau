@@ -131,6 +131,16 @@ export type Transaction = {
         Instance: ObjectTypes.SceneInstanceId?
     ) -> Transaction,
 
+    -- A saved pack placed into a live copy: one create per object in it, with
+    -- the references inside the pack rewritten to name those creates. Checked
+    -- as creates are, so placing a prefab needs create rights and nothing more,
+    -- and undone as one step because it is one transaction.
+    Place: (
+        self: Transaction,
+        Pack: buffer,
+        Instance: ObjectTypes.SceneInstanceId?
+    ) -> Transaction,
+
     -- Whether the whole list applied, and the runtime ids of what it created, in
     -- the order the creates were declared. On the client this yields until the
     -- server has answered: a created object has no local identity to hand back
