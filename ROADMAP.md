@@ -99,12 +99,14 @@ Pedro's to make before or while building.
       back its stacks to be reconciled against.
 
       A destroy is now a *suspend*: the object is withdrawn from the world --
-      unfiled, part gone, lock gone, every client told -- while the table, the
-      values, the runtime id and the local id all survive. Undo revives that
-      same object, which is the point: a reference stores a local id, so an
-      object that comes back under its own is pointed at again by everything
-      that pointed at it, where a rebuilt lookalike left every reference
-      dangling. Undoing a create is the same act in reverse.
+      unfiled, lock gone, part parented out of it, every client told -- while
+      the table, the values, both ids and the part itself all survive. Undo
+      revives that same object, which is the point: a reference stores a local
+      id, so an object that comes back under its own is pointed at again by
+      everything that pointed at it, where a rebuilt lookalike left every
+      reference dangling. It comes back with the part it had rather than a clone
+      of the template, so whatever the game hung on that part is still there.
+      Undoing a create is the same act in reverse.
 
       So every step carries Undo, Redo and **Clear**, and Clear is what finally
       destroys anything the step was keeping. It runs in exactly three places:

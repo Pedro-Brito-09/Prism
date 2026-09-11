@@ -581,9 +581,11 @@ undoes as one. Each stack keeps the last 100.
 
 Undoing a destroy does not build a replacement. The object is **suspended**:
 withdrawn from the world by every measure — `Destroyed` reads true, it is gone
-from the workspace and from its copy, its part is gone and every client has been
-told — while the table, its property values, its runtime id and its local id all
-survive. Undo revives that same object.
+from the workspace and from its copy, its part is parented out of the world and
+every client has been told — while the table, its property values, its runtime
+id and its local id all survive. Undo revives that same object, with the part it
+had rather than a fresh clone of the template, so whatever the game hung on that
+part is still hanging there. The part is destroyed by `Clear`, with the rest.
 
 That is what keeps references working. A reference stores a local id, a scene
 never issues one twice, and an object that comes back under its own is pointed

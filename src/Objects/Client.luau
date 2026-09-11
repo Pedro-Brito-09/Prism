@@ -381,14 +381,19 @@ const function Withdraw(Obj: Object)
     if Obj.Instance then
         ByPart[Obj.Instance] = nil
 
-        -- A replicated object's part belongs to the server and goes when the
-        -- server takes it away. A local or drawn one was cloned here and is
-        -- nobody else's to remove.
+        -- A local or drawn part was cloned here, so it is this side's to move:
+        -- out of the world and kept, so an object that comes back comes back
+        -- with the part it had rather than a fresh copy of the template.
+        -- Destroying it is Dispose's, once nothing can bring the object back.
+        --
+        -- A replicated one belongs to the server and goes when the server takes
+        -- it away. There is nothing here to keep and nothing here to destroy,
+        -- so only the reference is dropped.
         if Obj.Local or Obj.Drawn then
-            Obj.Instance:Destroy()
+            Obj.Instance.Parent = nil
+        else
+            Obj.Instance = nil
         end
-
-        Obj.Instance = nil
     end
 
     ByRuntimeId[Obj.RuntimeId] = nil
@@ -423,10 +428,17 @@ const function Withdraw(Obj: Object)
     Listeners.Notify(Removed, Obj)
 end
 
--- The part that cannot be taken back: the values go, and with them any chance
--- of this object being itself again.
+-- The part that cannot be taken back: the values go, the part this side owns
+-- goes, and with them any chance of this object being itself again.
 const function Dispose(Obj: Object)
     Obj.Suspended = nil
+
+    -- Only ever one this client cloned: a replicated part is the server's and
+    -- Withdraw already let go of the reference to it.
+    if Obj.Instance then
+        Obj.Instance:Destroy()
+        Obj.Instance = nil
+    end
 
     for _, Prop in Obj.Properties do
         Prop:Destroy()
@@ -511,20 +523,28 @@ end
 -- never replicates here. The type still builds objects then; they simply have
 -- no instance, which is what a server side object registered without one does.
 const function Enter(Obj: any, Ref: ObjectRegistry, Live: any, Restored: boolean?)
-    local Inst: Instance? = nil
-    const Template = TemplateOf(Ref)
+    -- Already holding one means this object was withdrawn rather than
+    -- destroyed, and its part was parented out of the world and kept. It goes
+    -- back rather than being cloned again: a clone would only look like the
+    -- part that left.
+    local Inst: Instance? = Obj.Instance
 
-    if Template then
-        const Clone = Template:Clone()
-        Clone:SetAttribute(Shared.RuntimeAttribute, Obj.RuntimeId)
-        CollectionService:AddTag(Clone, Shared.ObjectTag)
+    if Inst then
+        Inst.Parent = Live.Folder
+    else
+        const Template = TemplateOf(Ref)
+        if Template then
+            const Clone = Template:Clone()
+            Clone:SetAttribute(Shared.RuntimeAttribute, Obj.RuntimeId)
+            CollectionService:AddTag(Clone, Shared.ObjectTag)
 
-        -- Into the copy holding it, exactly as on the server: two copies of
-        -- one room have to be able to sit in two places, and the copy's folder
-        -- is what moves them.
-        Clone.Parent = Live.Folder
+            -- Into the copy holding it, exactly as on the server: two copies of
+            -- one room have to be able to sit in two places, and the copy's
+            -- folder is what moves them.
+            Clone.Parent = Live.Folder
 
-        Inst = Clone
+            Inst = Clone
+        end
     end
 
     Obj.Instance = Inst

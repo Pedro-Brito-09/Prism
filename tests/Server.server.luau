@@ -2712,6 +2712,9 @@ T:Test("a suspended object is out of the world but whole", function()
     const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
     const RuntimeId = Door.RuntimeId
     const LocalId = Door.LocalId
+    const Part = Door.Instance
+
+    T:Ok(Part, "built with a part")
 
     T:Ok(Objects.Suspend(Door), "suspended")
 
@@ -2719,34 +2722,44 @@ T:Test("a suspended object is out of the world but whole", function()
     T:Ok(Door.Suspended, "and as suspended")
     T:Eq(Objects:Get(RuntimeId), nil, "gone from the workspace")
     T:Eq(Copy:Find(LocalId), nil, "and from its copy")
-    T:Eq(Door.Instance, nil, "its part went with it")
     T:Eq(Door:Get(TitleId), nil, "and it answers like any destroyed object")
 
-    -- What survives is the whole point: the values, and both ids.
+    -- What survives is the whole point: the values, both ids, and the part
+    -- itself -- out of the world rather than destroyed.
     T:Eq(Door.Properties[TitleId].Value, "Door", "the value is still there")
     T:Eq(Door.RuntimeId, RuntimeId, "same runtime id")
     T:Eq(Door.LocalId, LocalId, "same local id")
+    T:Eq(Door.Instance, Part, "the part is kept")
+    T:Eq(Part.Parent, nil, "parented out of the world")
 
     T:Ok(Objects.Revive(Door), "revived")
     T:Ok(not Door.Destroyed, "alive again")
     T:Eq(Objects:Get(RuntimeId), Door, "back in the workspace, as itself")
     T:Eq(Copy:Find(LocalId), Door, "and in its copy under its own id")
     T:Eq(Door:Get(TitleId), "Door", "still holding what it held")
-    T:Ok(Door.Instance, "with a part again")
+
+    -- The same part, not a fresh clone of the template: whatever a game hung
+    -- on it is still hanging there.
+    T:Eq(Door.Instance, Part, "the part it always had")
+    T:Eq(Part.Parent, Copy.Folder, "back in the copy's folder")
 
     Scene:Destroy()
 end)
 
-T:Test("disposing a suspended object ends it", function()
+T:Test("disposing a suspended object ends it, part and all", function()
     const Scene, Copy = Room("DisposeRoom")
     const Door = Copy:Create(DoorId)
+    const Part = Door.Instance
 
     Objects.Suspend(Door)
+    T:Eq(Door.Instance, Part, "the part was kept by the suspend")
+
     Objects.Dispose(Door)
 
     T:Eq(Door.Suspended, nil, "no longer suspended")
     T:Ok(Door.Destroyed, "still destroyed")
-    T:Ok(not Objects.Revive(Door), "and past reviving")
+    T:Eq(Door.Instance, nil, "and the part went with it")
+    T:Ok(not Objects.Revive(Door), "past reviving")
 
     Scene:Destroy()
 end)

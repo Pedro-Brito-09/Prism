@@ -135,9 +135,14 @@ const function Withdraw(self: Object, Announce: boolean)
     -- needs to drop the lock it knew about.
     Locks[self.RuntimeId] = nil
 
+    -- Out of the world rather than destroyed, and kept. To every client the two
+    -- are the same thing -- a part with no parent is not in the DataModel, so
+    -- it replicates away exactly as a destroyed one does -- but coming back
+    -- means coming back as the same part, with whatever the game hung on it
+    -- still hanging there. A fresh clone from the template would lose all of
+    -- it. Destroying is Dispose's, once nothing can bring the object back.
     if self.Instance then
-        self.Instance:Destroy()
-        self.Instance = nil
+        self.Instance.Parent = nil
     end
 
     -- Out of the scene before out of the workspace, so a scene walking its own
@@ -165,10 +170,15 @@ const function Withdraw(self: Object, Announce: boolean)
     self.Destroy = Shared.Destroyed.Destroy
 end
 
--- The part that cannot be taken back: the values go, and with them any chance
--- of building this object again.
+-- The part that cannot be taken back: the values go, the part goes, and with
+-- them any chance of this object being itself again.
 const function Dispose(self: Object)
     self.Suspended = nil
+
+    if self.Instance then
+        self.Instance:Destroy()
+        self.Instance = nil
+    end
 
     for _, Prop in self.Properties do
         Prop:Destroy()
@@ -605,8 +615,15 @@ end
 -- the reference sent beside the object -- can still find its owner. None at all
 -- in an opened copy, whose parts each admitted client draws.
 const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: boolean)
-    local Inst: Instance? = nil
-    if Ref.Instance and not Instance_.Opened then
+    -- Already holding one means this object has been here before and was
+    -- withdrawn rather than destroyed: its part was parented out of the world
+    -- and kept, so it goes back rather than being cloned again. Cloning would
+    -- hand back a part that only looks like the one that left.
+    local Inst: Instance? = Obj.Instance
+
+    if Inst then
+        Inst.Parent = Instance_.Folder
+    elseif Ref.Instance and not Instance_.Opened then
         const Clone = Ref.Instance:Clone()
         Clone:SetAttribute(Shared.RuntimeAttribute, Obj.RuntimeId)
         CollectionService:AddTag(Clone, Shared.ObjectTag)
