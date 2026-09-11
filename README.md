@@ -818,6 +818,11 @@ removals have bulk channels beside the single ones.
 
 ### Budget
 
+Undo and redo spend one action each, whatever the step holds: a transaction is
+one thing to take back however many operations it carried, and charging by the
+entry would leave a player who committed an edit at their ceiling unable to undo
+it. Loading a scene is one action for the same reason.
+
 A transaction spends one action per operation rather than one per packet, so a
 role with `Rate = 60` may commit sixty operations a second however they are
 grouped. Charging per call would let one packet carrying ten thousand

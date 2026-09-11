@@ -389,9 +389,15 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
         return false
     end
 
-    -- Charged like the edit it is. An undo is work the server does on a
-    -- player's word, and a player spamming undo and redo is spamming edits.
-    if not Permissions:Consume(Plr, #Step.Entries) then
+    -- One action for the step, whatever is in it. A transaction is one thing to
+    -- take back however many operations it carried, and charging by the entry
+    -- would mean a player who committed an edit at their ceiling could not undo
+    -- it -- which is the moment they most want to.
+    --
+    -- The same reasoning a load is charged by, and the same trade: what bounds
+    -- how much work a player can ask for this way is how often they may ask,
+    -- not how big each ask is.
+    if not Permissions:Consume(Plr, 1) then
         return false
     end
 
