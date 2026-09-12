@@ -1098,14 +1098,15 @@ Part of the suite needs no Roblox at all:
 scripts/test-pure.sh
 ```
 
-`tests/Pure.luau` covers Varint, Handles, IdPool and the codecs -- plain Luau over
-buffers and numbers, and the floor the format stands on: every id, length and
-count in a pack is a varint, every saved object is addressed by a persistent id,
-and every registry id comes out of a pool. 270 checks, including every byte
-length boundary this file claims for varints, that `PersistentId` really is
-`Scene * 2^32 + Local` across the 48 bits it uses, that every codec that does not
-need a Roblox type round trips at its boundaries, and that a non-recycling pool
-never hands out a released id twice. It fetches a pinned Luau CLI into
+`tests/Pure.luau` covers Varint, Handles, IdPool, the codecs, permission
+resolution and property layout -- everything that needs no DataModel. Much of it
+is the floor the format stands on: every id, length and count in a pack is a
+varint, every saved object is addressed by a persistent id, every registry id
+comes out of a pool. 313 checks, including every byte length boundary this file
+claims for varints, that `PersistentId` really is `Scene * 2^32 + Local` across
+the 48 bits it uses, that every codec that does not need a Roblox type round
+trips at its boundaries, that a blacklist beats a whitelist, and that a
+non-recycling pool never hands out a released id twice. It fetches a Luau CLI into
 `.tooling/`; CI runs it on every push.
 
 The rest needs a DataModel, players and replication, so Studio is the only place

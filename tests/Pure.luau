@@ -19,6 +19,8 @@ local Varint = require("../src/Varint")
 local Handles = require("../src/Handles")
 local IdPool = require("../src/IdPool")
 local Codecs = require("../src/Codecs")
+local PermissionsShared = require("../src/Permissions/Shared")
+local PropertiesShared = require("../src/Properties/Shared")
 
 local failures = 0
 local checks = 0
@@ -229,6 +231,170 @@ do
     end)
     ok(not fine, "String should refuse more than 65535 bytes")
 end
+
+
+-- Permissions: which verbs, object types and properties a set of scene rights
+-- lets through. Pure table work, and the place a mistake is a hole rather than
+-- a glitch, so the lists are checked in both directions.
+local Crate, Enemy, Door = 1, 2, 3
+local Tint, Health = 10, 11
+local function rights(cfg) return PermissionsShared.SceneRights(cfg, "Test") end
+
+-- No grant means nothing, and an unrecognised verb denies rather than falling
+-- through to the allow path.
+do
+    local none = rights(nil)
+    ok(not PermissionsShared.Allows(none, "Create", Crate), "no config should deny Create")
+    ok(not PermissionsShared.Allows(none, "Edit", Crate), "no config should deny Edit")
+    local all = rights({CanCreate = true, CanEdit = true, CanDestroy = true})
+    ok(not PermissionsShared.Allows(all, "Publish", Crate), "an unknown verb must deny")
+    ok(not PermissionsShared.Allows(all, "", Crate), "an empty verb must deny")
+    ok(PermissionsShared.Allows(all, "Create", Crate), "granted Create should allow")
+end
+
+-- An absent whitelist constrains nothing; a present one is exhaustive.
+do
+    local open = rights({CanEdit = true})
+    ok(PermissionsShared.Allows(open, "Edit", Crate), "absent object whitelist allows Crate")
+    ok(PermissionsShared.Allows(open, "Edit", Enemy), "absent object whitelist allows Enemy")
+
+    local only = rights({CanEdit = true, Objects = {Whitelist = {Crate}}})
+    ok(PermissionsShared.Allows(only, "Edit", Crate), "whitelisted type allowed")
+    ok(not PermissionsShared.Allows(only, "Edit", Enemy), "whitelist must be exhaustive")
+
+    local banned = rights({CanEdit = true, Objects = {Blacklist = {Enemy}}})
+    ok(PermissionsShared.Allows(banned, "Edit", Crate), "unlisted type still allowed")
+    ok(not PermissionsShared.Allows(banned, "Edit", Enemy), "blacklisted type denied")
+
+    -- Blacklist beats whitelist: naming a type in both must deny.
+    local both = rights({CanEdit = true, Objects = {Whitelist = {Crate}, Blacklist = {Crate}}})
+    ok(not PermissionsShared.Allows(both, "Edit", Crate), "blacklist must win over whitelist")
+end
+
+-- Property lists govern writing only, and take either a plain id or the
+-- [Property] = {ObjectType} form that limits an entry to those types.
+do
+    local plain = rights({CanEdit = true, Properties = {Blacklist = {Tint}}})
+    ok(not PermissionsShared.Allows(plain, "Edit", Crate, Tint), "blacklisted property denied")
+    ok(PermissionsShared.Allows(plain, "Edit", Crate, Health), "other property still allowed")
+
+    local scoped = rights({CanEdit = true, Properties = {Blacklist = {[Tint] = {Crate}}}})
+    ok(not PermissionsShared.Allows(scoped, "Edit", Crate, Tint), "Tint on a Crate denied")
+    ok(PermissionsShared.Allows(scoped, "Edit", Door, Tint), "Tint on a Door still allowed")
+
+    local wl = rights({CanEdit = true, Properties = {Whitelist = {Health}}})
+    ok(PermissionsShared.Allows(wl, "Edit", Crate, Health), "whitelisted property allowed")
+    ok(not PermissionsShared.Allows(wl, "Edit", Crate, Tint), "property whitelist is exhaustive")
+
+    local wlScoped = rights({CanEdit = true, Properties = {Whitelist = {[Tint] = {Crate}}}})
+    ok(PermissionsShared.Allows(wlScoped, "Edit", Crate, Tint), "scoped whitelist allows its type")
+    ok(not PermissionsShared.Allows(wlScoped, "Edit", Door, Tint), "scoped whitelist denies other types")
+end
+
+-- A destroy writes no property, so the property lists say nothing about one.
+do
+    local r = rights({CanDestroy = true, CanEdit = true, Properties = {Blacklist = {Tint}}})
+    ok(PermissionsShared.Allows(r, "Destroy", Crate, Tint), "a destroy ignores the property lists")
+    ok(not PermissionsShared.Allows(r, "Edit", Crate, Tint), "an edit does not")
+end
+
+-- A verb the role lacks is denied whatever the lists say.
+do
+    local r = rights({CanEdit = true, Objects = {Whitelist = {Crate}}})
+    ok(not PermissionsShared.Allows(r, "Create", Crate), "Create is not granted by CanEdit")
+    ok(not PermissionsShared.Allows(r, "Destroy", Crate), "Destroy is not granted by CanEdit")
+end
+
+-- The ungranted default: 60 actions a second, a ceiling rather than a right.
+ok(PermissionsShared.DEFAULT_RATE == 60, `default rate was {PermissionsShared.DEFAULT_RATE}`)
+
+-- Properties: how a registry becomes a property panel.
+-- Built the way registration builds one: PropertiesShared.Display fills every field in,
+-- so a partial Display never reaches Layout. The server normalises at Register
+-- and the client stores the payload that was normalised before it was sent.
+local function reg(t: {[number]: any}): {[number]: any}
+    local out: {[number]: any} = {}
+    for id, d in t do
+        out[id] = {Id = id, Name = d.Name, Display = PropertiesShared.Display(d.Display, d.Name)}
+    end
+    return out
+end
+
+local R = reg({
+    [1] = {Name = "Speed", Display = {Category = "Motion", Order = 2}},
+    [2] = {Name = "Drag", Display = {Category = "Motion", Order = 1}},
+    [3] = {Name = "Tint", Display = {Category = "Look", Order = 5}},
+    [4] = {Name = "Secret", Display = {Category = "Look", Order = 6, Hidden = true}},
+    [5] = {Name = "Plain"},
+})
+
+-- Grouped by category, sorted by Order within one.
+do
+    local s = PropertiesShared.Layout(R, {1, 2, 3})
+    ok(#s == 2, `expected two sections, got {#s}`)
+    ok(s[1].Properties[1].Name == "Drag", `Motion first was {s[1].Properties[1].Name}`)
+    ok(s[1].Properties[2].Name == "Speed", `Motion second was {s[1].Properties[2].Name}`)
+end
+
+-- A category's place follows the lowest Order in it, not where it was first
+-- mentioned: the sort runs across every entry before anything is grouped.
+do
+    local s = PropertiesShared.Layout(R, {3, 1, 2})
+    ok(s[1].Category == "Motion", `lowest Order should lead, got {s[1].Category}`)
+    ok(s[2].Category == "Look", `second section was {s[2].Category}`)
+
+    local first = PropertiesShared.Layout(reg({
+        [1] = {Name = "Late", Display = {Category = "Z", Order = 0}},
+        [2] = {Name = "Early", Display = {Category = "A", Order = 9}},
+    }), {2, 1})
+    ok(first[1].Category == "Z", `Z holds Order 0 so it should lead, got {first[1].Category}`)
+end
+
+-- Hidden is left out unless asked for.
+do
+    local without = PropertiesShared.Layout(R, {3, 4})
+    ok(#without == 1, `Hidden should leave one section, got {#without}`)
+    ok(#without[1].Properties == 1, "Hidden should be left out")
+    ok(without[1].Properties[1].Name == "Tint", "the visible one should remain")
+
+    local with = PropertiesShared.Layout(R, {3, 4}, true)
+    ok(#with[1].Properties == 2, "Hidden should be included when asked for")
+end
+
+-- No Display at all: Category defaults to General, Order to 0.
+do
+    local s = PropertiesShared.Layout(R, {5})
+    ok(#s == 1 and s[1].Category == "General", `default category was {s[1].Category}`)
+    ok(R[5].Display.Order == 0, "Order should default to 0")
+    ok(R[5].Display.Hidden == false, "Hidden should default to false")
+    ok(R[5].Display.ReadOnly == false, "ReadOnly should default to false")
+end
+
+-- Ties on Order keep the order the ids were given in, which is what "the order
+-- the object type lists them in" means.
+do
+    local T = reg({
+        [1] = {Name = "A", Display = {Category = "C", Order = 0}},
+        [2] = {Name = "B", Display = {Category = "C", Order = 0}},
+        [3] = {Name = "C", Display = {Category = "C", Order = 0}},
+    })
+    local forward = PropertiesShared.Layout(T, {1, 2, 3})[1].Properties
+    ok(forward[1].Name == "A" and forward[3].Name == "C", "ties should keep the given order")
+
+    local backward = PropertiesShared.Layout(T, {3, 2, 1})[1].Properties
+    ok(backward[1].Name == "C" and backward[3].Name == "A", "ties should follow a reversed list too")
+end
+
+-- An id the registry does not hold is skipped rather than throwing.
+do
+    local s = PropertiesShared.Layout(R, {1, 999})
+    ok(#s == 1 and #s[1].Properties == 1, "an unknown id should be skipped")
+    ok(#PropertiesShared.Layout(R, {}) == 0, "an empty list gives no sections")
+end
+
+-- The wrong-type fallback (Display = 42, Order = "soon") is left to the Studio
+-- suite: it reports through Logger:Warn, and warn is a Roblox global the Luau
+-- CLI does not have.
 
 print(`{checks - failures}/{checks} checks passed`)
 if failures > 0 then
