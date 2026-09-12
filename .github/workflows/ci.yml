@@ -22,3 +22,6 @@ jobs:
 
       - name: Type check
         run: scripts/analyze.sh
+
+      - name: Channel arity
+        run: node scripts/check-channels.js

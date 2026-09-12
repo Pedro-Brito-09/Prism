@@ -1152,6 +1152,16 @@ without the standing noise having to be cleared first.
 
 `scripts/analyze.sh --raw` prints everything, baseline or not.
 
+`node scripts/check-channels.js` is the other half, and it checks what the
+analyser structurally cannot. `Fire`, `FireAll` and `Invoke` all take `...:
+any`, so sending a channel the wrong number of arguments type checks cleanly
+and then errors at runtime -- the failure this file has warned about from the
+beginning, met until now by grepping for every caller by hand. The script does
+that grep across all three call forms, the `Audience.Fire` paths included, and
+CI runs it.
+
+It found `Objects.LocksChanged` being sent two arrays where it declares three.
+
 This is the check the Studio pass cannot do cheaply. A wrong argument count on a
 channel, a function that returns one value where two are read, a field that
 moved — the analyser finds all of those across 20,000 lines in seconds, where
