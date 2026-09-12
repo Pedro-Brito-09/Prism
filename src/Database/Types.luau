@@ -53,8 +53,12 @@ export type Cache = {
 }
 
 export type Page = {
-    read Records: {Metadata},
-    read HasMore: boolean,
+    -- Frozen rather than read-only in the type: `read` fields need the new
+    -- type solver, which this code is not checked under, and FreezePage calls
+    -- table.freeze on Records before a page is ever handed out. The guarantee
+    -- is the freeze; the annotation was only ever restating it.
+    Records: {Metadata},
+    HasMore: boolean,
 }
 
 export type ShardCache = {
