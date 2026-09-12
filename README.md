@@ -1092,6 +1092,24 @@ not — the version lives on the pack that contains them.
 
 ## Tests
 
+Part of the suite needs no Roblox at all:
+
+```bash
+scripts/test-pure.sh
+```
+
+`tests/Pure.luau` covers Varint, Handles and IdPool -- plain Luau over buffers
+and numbers, and the floor the storage format stands on: every id, length and
+count in a pack is a varint, every saved object is addressed by a persistent id,
+and every registry id comes out of a pool. 161 checks, including every byte
+length boundary this file claims for varints, that `PersistentId` really is
+`Scene * 2^32 + Local` across the 48 bits it uses, and that a non-recycling pool
+never hands out a released id twice. It fetches a pinned Luau CLI into
+`.tooling/`; CI runs it on every push.
+
+The rest needs a DataModel, players and replication, so Studio is the only place
+it runs.
+
 The tests run the unit suite on the server and the replication, permissions,
 optimistic-edit, transaction and lifecycle suite on one client. Sync the files into Studio
 with Roblox Script Sync using this layout:
