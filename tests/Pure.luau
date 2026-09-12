@@ -18,6 +18,7 @@
 local Varint = require("../src/Varint")
 local Handles = require("../src/Handles")
 local IdPool = require("../src/IdPool")
+local Codecs = require("../src/Codecs")
 
 local failures = 0
 local checks = 0
@@ -146,6 +147,87 @@ do
     ok(pool.Max == 65535, `default max was {pool.Max}`)
     ok(pool.Recycle == true, "Recycle should default to true")
     ok(IdPool.new(10, false).Recycle == false, "Recycle false should stick")
+end
+
+
+-- Codecs: every one that does not need a Roblox type. Vector, Color, CFrame,
+-- Instance and Player are left to the Studio suite, which has them.
+local function roundTrip(name: string, codec: any, value: any, eq: ((any, any) -> boolean)?)
+    local extras = {}
+    local measured = codec.Measure(value)
+    local buf = buffer.create(measured + 16)
+    local written = codec.Write(buf, 0, value, extras)
+    ok(written == measured, `{name}: Measure said {measured}, Write wrote {written}`)
+
+    local got, read = codec.Read(buf, 0, extras)
+    local same = if eq then eq(got, value) else got == value
+    ok(same, `{name}: wrote {tostring(value)}, read back {tostring(got)}`)
+    ok(read == written, `{name}: Read consumed {read}, Write produced {written}`)
+end
+
+roundTrip("u8 min", Codecs.u8, 0); roundTrip("u8 max", Codecs.u8, 255)
+roundTrip("u16 max", Codecs.u16, 65535)
+roundTrip("u32 max", Codecs.u32, 4294967295)
+roundTrip("i8 min", Codecs.i8, -128); roundTrip("i8 max", Codecs.i8, 127)
+roundTrip("i16 min", Codecs.i16, -32768)
+roundTrip("i32 min", Codecs.i32, -2147483648)
+roundTrip("i32 max", Codecs.i32, 2147483647)
+roundTrip("f32", Codecs.f32, 1.5)
+roundTrip("f32 neg", Codecs.f32, -0.25)
+roundTrip("f64 pi", Codecs.f64, 3.14159265358979)
+roundTrip("f64 big", Codecs.f64, 1e300)
+roundTrip("Varint 0", Codecs.Varint, 0)
+roundTrip("Varint 127", Codecs.Varint, 127)
+roundTrip("Varint 128", Codecs.Varint, 128)
+roundTrip("Varint big", Codecs.Varint, 2 ^ 53 - 1)
+roundTrip("SignedVarint neg", Codecs.SignedVarint, -1099511627776)
+roundTrip("SignedVarint pos", Codecs.SignedVarint, 1099511627776)
+roundTrip("Bool true", Codecs.Bool, true)
+roundTrip("Bool false", Codecs.Bool, false)
+roundTrip("String empty", Codecs.String, "")
+roundTrip("String ascii", Codecs.String, "hello world")
+roundTrip("String utf8", Codecs.String, "caf\u{00E9} \u{2014} \u{1F600}")
+roundTrip("String 1000", Codecs.String, string.rep("x", 1000))
+roundTrip("String 65535", Codecs.String, string.rep("y", 65535))
+roundTrip("LongString", Codecs.LongString, string.rep("z", 70000))
+
+local function bufEq(a, b)
+    if buffer.len(a) ~= buffer.len(b) then return false end
+    return buffer.tostring(a) == buffer.tostring(b)
+end
+roundTrip("Buffer", Codecs.Buffer, buffer.fromstring("some bytes \0 with a nul"), bufEq)
+roundTrip("Buffer empty", Codecs.Buffer, buffer.create(0), bufEq)
+
+local OptU8 = Codecs.Optional(Codecs.u8)
+roundTrip("Optional nil", OptU8, nil)
+roundTrip("Optional value", OptU8, 42)
+roundTrip("Optional zero", OptU8, 0)
+
+local function arrEq(a, b)
+    if #a ~= #b then return false end
+    for i, v in b do if a[i] ~= v then return false end end
+    return true
+end
+local ArrU16 = Codecs.Array(Codecs.u16)
+roundTrip("Array empty", ArrU16, {}, arrEq)
+roundTrip("Array three", ArrU16, {1, 2, 65535}, arrEq)
+roundTrip("Array strings", Codecs.Array(Codecs.String), {"a", "", "ccc"}, arrEq)
+roundTrip("Array of arrays", Codecs.Array(ArrU16), {{1}, {}, {2, 3}}, function(a, b)
+    if #a ~= #b then return false end
+    for i, v in b do if not arrEq(a[i], v) then return false end end
+    return true
+end)
+
+-- A String over the u16 length field must be refused, not wrapped: the comment
+-- on the codec says so and it is the difference between an error and silently
+-- decoding as a different string.
+do
+    local fine = pcall(function()
+        local v = string.rep("q", 65536)
+        local b = buffer.create(70000)
+        Codecs.String.Write(b, 0, v, {})
+    end)
+    ok(not fine, "String should refuse more than 65535 bytes")
 end
 
 print(`{checks - failures}/{checks} checks passed`)

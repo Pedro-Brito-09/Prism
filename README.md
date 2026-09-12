@@ -1098,12 +1098,13 @@ Part of the suite needs no Roblox at all:
 scripts/test-pure.sh
 ```
 
-`tests/Pure.luau` covers Varint, Handles and IdPool -- plain Luau over buffers
-and numbers, and the floor the storage format stands on: every id, length and
+`tests/Pure.luau` covers Varint, Handles, IdPool and the codecs -- plain Luau over
+buffers and numbers, and the floor the format stands on: every id, length and
 count in a pack is a varint, every saved object is addressed by a persistent id,
-and every registry id comes out of a pool. 161 checks, including every byte
+and every registry id comes out of a pool. 270 checks, including every byte
 length boundary this file claims for varints, that `PersistentId` really is
-`Scene * 2^32 + Local` across the 48 bits it uses, and that a non-recycling pool
+`Scene * 2^32 + Local` across the 48 bits it uses, that every codec that does not
+need a Roblox type round trips at its boundaries, and that a non-recycling pool
 never hands out a released id twice. It fetches a pinned Luau CLI into
 `.tooling/`; CI runs it on every push.
 
