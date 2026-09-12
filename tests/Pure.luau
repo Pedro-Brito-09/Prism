@@ -21,6 +21,8 @@ local IdPool = require("../src/IdPool")
 local Codecs = require("../src/Codecs")
 local PermissionsShared = require("../src/Permissions/Shared")
 local PropertiesShared = require("../src/Properties/Shared")
+local Try = require("../src/Try")
+local CustomEnum = require("../src/CustomEnum")
 
 local failures = 0
 local checks = 0
@@ -395,6 +397,86 @@ end
 -- The wrong-type fallback (Display = 42, Order = "soon") is left to the Studio
 -- suite: it reports through Logger:Warn, and warn is a Roblox global the Luau
 -- CLI does not have.
+
+-- Try: only the paths that never reach task.wait, which the Luau CLI has no
+-- scheduler for. A first attempt that succeeds never waits, and neither does a
+-- single attempt that fails.
+do
+    local calls = 0
+    local okFlag, a, b = Try(3, function(x: number, y: number)
+        calls += 1
+        return x + y, "done"
+    end, 2, 3)
+    ok(okFlag == true, "a successful call should report true")
+    ok(a == 5 and b == "done", `results came back as {tostring(a)}, {tostring(b)}`)
+    ok(calls == 1, `a success should not retry, called {calls} times`)
+end
+
+-- The reason it uses table.pack rather than {pcall(...)}: trailing nils.
+do
+    local okFlag, first, second = Try(1, function()
+        return 1, nil
+    end)
+    ok(okFlag == true, "should succeed")
+    ok(first == 1 and second == nil, "a trailing nil should survive the round trip")
+end
+
+-- A failure with one attempt returns false and does not wait.
+do
+    local calls = 0
+    local okFlag = Try(1, function()
+        calls += 1
+        error("no")
+    end)
+    ok(okFlag == false, "a failing call should report false")
+    ok(calls == 1, `one attempt means one call, got {calls}`)
+end
+
+-- math.max(1, Attempts): zero or a negative still runs once rather than never.
+do
+    local calls = 0
+    Try(0, function() calls += 1 end)
+    ok(calls == 1, `Attempts = 0 should still run once, ran {calls}`)
+
+    calls = 0
+    Try(-5, function() calls += 1 end)
+    ok(calls == 1, `a negative Attempts should still run once, ran {calls}`)
+end
+
+-- CustomEnum: options come back sorted by id however the table was written,
+-- which is what keeps a pack byte identical between runs -- Options is built by
+-- iterating a dictionary, and that order is not stable.
+do
+    local Material = CustomEnum:Register("TestMaterial", {
+        Stone = 30,
+        Wood = 10,
+        Glass = 20,
+    })
+    ok(Material ~= nil, "Register should return the enum")
+    assert(Material)
+
+    ok(#Material.Options == 3, `expected three options, got {#Material.Options}`)
+    ok(Material.Options[1].Id == 10, `first option id was {Material.Options[1].Id}`)
+    ok(Material.Options[2].Id == 20, `second option id was {Material.Options[2].Id}`)
+    ok(Material.Options[3].Id == 30, `third option id was {Material.Options[3].Id}`)
+    ok(Material.Options[1].Value == "Wood", `lowest id should be Wood, got {Material.Options[1].Value}`)
+
+    local glass = Material:GetById(20)
+    ok(glass ~= nil and glass.Value == "Glass", "GetById should find Glass")
+    local stone = Material:GetByValue("Stone")
+    ok(stone ~= nil and stone.Id == 30, "GetByValue should find Stone")
+    ok(Material.Options[1].Parent == "TestMaterial", "an option should name its enum")
+
+    ok(CustomEnum:GetEnum("TestMaterial") == Material, "GetEnum should return the same table")
+    ok(CustomEnum:GetEnum("NoSuchEnum") == nil, "an unregistered name gives nil")
+end
+
+-- The built-in Unknown, which a decoder falls back to for an option id that no
+-- longer exists.
+do
+    ok(CustomEnum.UNKNOWN ~= nil, "UNKNOWN should exist")
+    ok(CustomEnum.UNKNOWN.Value == "Unknown", `UNKNOWN.Value was {tostring(CustomEnum.UNKNOWN.Value)}`)
+end
 
 print(`{checks - failures}/{checks} checks passed`)
 if failures > 0 then

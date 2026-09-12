@@ -7,7 +7,13 @@ return function<A..., B...>(Attempts: number, fn: (A...) -> B..., ...: A...): (b
     const Total = math.max(1, Attempts)
 
     for Attempt = 1, Total do
-        Result = table.pack(pcall(fn, ...) :: any)
+        -- No `:: any` here. A type assertion on a call truncates it to one
+        -- value exactly as parentheses would, so `table.pack(pcall(fn, ...) ::
+        -- any)` packed pcall's boolean alone and threw away everything the
+        -- wrapped call returned -- every `const Success, Stored = Try(...)` got
+        -- nil for Stored. It was not buying anything either: the one diagnostic
+        -- this file has is the same with it and without it.
+        Result = table.pack(pcall(fn, ...))
         if Result[1] then
             break
         end

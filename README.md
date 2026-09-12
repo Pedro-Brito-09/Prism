@@ -1098,11 +1098,11 @@ Part of the suite needs no Roblox at all:
 scripts/test-pure.sh
 ```
 
-`tests/Pure.luau` covers Varint, Handles, IdPool, the codecs, permission
-resolution and property layout -- everything that needs no DataModel. Much of it
-is the floor the format stands on: every id, length and count in a pack is a
-varint, every saved object is addressed by a persistent id, every registry id
-comes out of a pool. 313 checks, including every byte length boundary this file
+`tests/Pure.luau` covers Varint, Handles, IdPool, the codecs, Try, CustomEnum,
+permission resolution and property layout -- everything that needs no DataModel.
+Much of it is the floor the format stands on: every id, length and count in a
+pack is a varint, every saved object is addressed by a persistent id, every
+registry id comes out of a pool. 335 checks, including every byte length boundary this file
 claims for varints, that `PersistentId` really is `Scene * 2^32 + Local` across
 the 48 bits it uses, that every codec that does not need a Roblox type round
 trips at its boundaries, that a blacklist beats a whitelist, and that a
