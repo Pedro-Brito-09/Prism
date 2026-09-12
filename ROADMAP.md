@@ -86,12 +86,35 @@ produced it, with anything that is a decision marked *Ask*.
       means containment to every reader, and it is the one field that would have
       to mean containment if objects ever nest. Rename it to `Type`.
 
-      Twenty five sites in `src/`, interleaved with ninety three genuine
-      instance `.Parent` uses, so it is a careful rename rather than a sed. It
-      also touches a wire payload (`Data.Parent`) and a permission shape
-      (`{Scene = ..., Parent = ...}`), and the tests use it too. Worth doing
-      with the analyser watching, and worth doing before anything outside this
-      repo depends on the name.
+      Bigger than it looks, and this is the part to read before starting.
+      `Parent` carries four unrelated meanings in `src/`, and only the first
+      is being renamed:
+
+      1. `Object.Parent` -- the object's type id. This one.
+      2. `Property.Parent` -- the property's own registry id (`Prop.Parent`,
+         all through Objects and Database). Arguably misnamed too, but a
+         separate decision and a separate change.
+      3. `CustomEnum.Parent` -- the enum's name.
+      4. `Instance.Parent` -- Roblox containment: `Plr.Parent`, `Event.Parent`,
+         `Current.Parent`. Ninety three of these.
+
+      The analyser catches the typed sites: `Object` is strict, so a missed
+      `Obj.Parent` reports as a missing key. It does not catch the ones that
+      matter most. The Compressor decodes a pack into plain tables and reads
+      `Decompressed.Parent`, `Data.Parent` and `Entry.Parent` off them -- all
+      `any`, so a miss there is silent, and two of those three are properties
+      rather than objects and must not be renamed at all. `Compressor` around
+      lines 49, 228, 456 and 471-508 is where to be careful; 471 and 478 write
+      the type id into every saved object, and 496-508 read it back.
+
+      Also a permission shape (`{Scene = ..., Parent = ...}` in History/Server
+      and wherever else a create target is built), the README, and the tests.
+
+      Worth doing before anything outside this repo depends on the name, and
+      worth doing as its own branch with nothing else in it. *Ask*: whether
+      `Type` is the name -- `Object.Type` reads well but `Property.Type` is
+      already a different kind of thing (the value type, `"Number"`), so
+      `TypeId` or `Registry` may be less confusing next to it.
 
 - [ ] **The tests are not type checked.** `scripts/analyze.sh` cannot resolve
       `ReplicatedStorage.Prism.src` without a Rojo sourcemap, so every reference
