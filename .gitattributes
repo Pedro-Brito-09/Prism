@@ -1,0 +1,8 @@
+# The analyse script runs on a Linux runner. Checked out with CRLF it fails as
+# `bash\r: no such file or directory`, which reads like a missing interpreter
+# rather than a line ending, so pin it.
+*.sh text eol=lf
+*.yml text eol=lf
+*.luau text eol=lf
+*.json text eol=lf
+*.md text eol=lf

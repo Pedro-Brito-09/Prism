@@ -1121,3 +1121,28 @@ Studio API access enabled. They are currently switched on by `RUN_DATABASE` near
 the top of `tests/Server.server.luau`; set it to `false` to skip them. The suite
 uses the `PrismSelfTest` key, and its cleanup step is commented out, so records
 accumulate across runs and ids keep climbing rather than restarting at 1.
+
+## Type checking
+
+Every file is `--!strict`, and `scripts/analyze.sh` is what actually holds them
+to it:
+
+```bash
+scripts/analyze.sh
+```
+
+It fetches a pinned `luau-lsp` and the Roblox API definitions into `.tooling/`
+and runs the analyser over `src/` and `tests/`. Nothing has to be installed
+first, and nothing is left behind that `.gitignore` does not already cover. The
+same script is the whole of CI, so a push is checked exactly the way a local run
+is.
+
+This is the check the Studio pass cannot do cheaply. A wrong argument count on a
+channel, a function that returns one value where two are read, a field that
+moved — the analyser finds all of those across 20,000 lines in seconds, where
+playing the game finds them one at a time, each costing a sync and a replay.
+Run it before syncing into Studio, not after.
+
+`default.project.json` is a [Rojo](https://rojo.space) project that builds the
+layout the Tests section describes, so `rojo serve` is an alternative to syncing
+the files by hand.
