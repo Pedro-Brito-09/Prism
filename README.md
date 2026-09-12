@@ -1137,6 +1137,21 @@ first, and nothing is left behind that `.gitignore` does not already cover. The
 same script is the whole of CI, so a push is checked exactly the way a local run
 is.
 
+It fails when a file grows a diagnostic it did not have before, rather than
+when any diagnostic exists at all. `.analyze-baseline.txt` records the count
+per file, and `scripts/analyze.sh --update-baseline` rewrites it.
+
+That is a ratchet rather than a clean bill of health, and deliberately. Most of
+what is left is the default type solver reading code written for the new one:
+`type function` and `read` fields are new-solver features, `for _, X in List or
+{}` is a union the old solver will not iterate, and `pcall(fn)` binding two
+results is flagged whenever `fn` returns nothing. None of those are runtime
+faults, and the new solver reports 269 problems where the default one reports
+91 -- so switching would cost more than it bought. Real bugs still get caught,
+without the standing noise having to be cleared first.
+
+`scripts/analyze.sh --raw` prints everything, baseline or not.
+
 This is the check the Studio pass cannot do cheaply. A wrong argument count on a
 channel, a function that returns one value where two are read, a field that
 moved — the analyser finds all of those across 20,000 lines in seconds, where
