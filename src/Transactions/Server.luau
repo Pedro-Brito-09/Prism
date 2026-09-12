@@ -69,6 +69,8 @@ export type ApplyRecord = {
     Withdrew: {any},
 }
 
+const Transactions = {}
+
 -- Synchronous, and answers: taking the record means taking the suspended
 -- objects in it, so the answer has to arrive before Apply decides whether to
 -- dispose of them. A spawned listener could not say in time.
@@ -85,8 +87,6 @@ end
 -- does. This is here so a decode loop cannot be handed a length that costs more
 -- to walk than the packet cost to send.
 const MAX_OPERATIONS = 1024
-
-const Transactions = {}
 
 type PlannedCreate = {
     Object: ObjectTypes.ObjectIdentifier,
