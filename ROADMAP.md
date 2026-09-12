@@ -26,11 +26,21 @@ Read this before picking anything up. It is how every item under Done landed.
   client half. A server change the client should observe gets a fixture on the
   server — the existing ones are triggered by the client writing a marker
   (`"EvictPulse"`, `"UnregisterPulse"`, ...) on the editable fixture.
-- **There is no Luau tooling on this machine.** Nothing type checks or runs
-  the code, so reread edited functions and grep for every caller of anything
-  whose signature changed — the network layer errors on a wrong argument
-  count, so a channel's callers matter most. New channels go at the end of
-  `src/Channels.luau`, never reordered.
+- **Run the checks before syncing into Studio.** `scripts/analyze.sh` type
+  checks every file and `node scripts/check-channels.js` checks that each
+  channel is fired with the number of arguments it declares. Both fetch what
+  they need into `.tooling/`; nothing has to be installed. CI runs the same two.
+  This used to read "there is no Luau tooling on this machine", and the way
+  around it was to reread edited functions and grep for every caller of
+  anything whose signature changed. That is what the two scripts now do, and
+  they found three bugs the moment they were pointed at the code.
+- **The analyser is a ratchet, not a clean bill of health.** It fails when a
+  file grows a diagnostic it did not have before. What stands is mostly the
+  default type solver reading code written for the new one; see the Type
+  checking section of the README. Do not clear the baseline by weakening the
+  code -- if a diagnostic is deliberate, run `--update-baseline` and say why.
+- **New channels go at the end of `src/Channels.luau`, never reordered**, and
+  never reuse the slot of a removed one during a live rollout.
 - **Code style.** `--!strict`, `const` for anything not reassigned, PascalCase
   names, and comments that say why a thing is the way it is — usually what
   went wrong before, or what the obvious alternative would have broken.
@@ -40,15 +50,167 @@ Read this before picking anything up. It is how every item under Done landed.
 
 ## Queued
 
-Nothing. Everything agreed is on `main`, which makes the next thing the one the
-note at the top of this file has been holding: the framework gets played through
-in one pass, with a player in it, and the suites in `tests/` are run for the
-first time. That pass is Pedro's call.
+The playthrough still comes first: the framework gets played through in one
+pass, with a player in it, and the suites in `tests/` are run for the first
+time. That pass is Pedro's call. Three bugs that would have shown up in the
+first minute of it are fixed below, but the pass is what the queue below waits
+on -- every item here is better decided with the thing running.
 
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
+- [ ] **A drag costs an action a frame.** `Object:Set` on the client sends its
+      own `Invoke` and the server charges one action for it, so a drag at sixty
+      frames a second sits exactly on the default budget of sixty, and a gizmo
+      writing position and rotation is a hundred and twenty against it. The
+      limiter starts refusing halfway through, and each refusal rolls the
+      property back to `Confirmed` -- the value snaps backwards while the player
+      is still dragging.
+
+      The history already knows a drag is one thing: a run of sets to one
+      property with no pause longer than a second is one step. The wire does
+      not. Accumulating per object and property and flushing on a tick would
+      make it one packet and one action per flush, and the rollback story gets
+      simpler rather than harder -- there is already one `Pending` ticket per
+      property and a flush is just a later ticket.
+
+      *Ask*: the flush rate, and whether a coalesced drag still feels direct.
+      Both are things you learn by dragging something, which is why this waits
+      for the playthrough rather than being guessed at now. The ordering hazard
+      is the part to design carefully: a set left pending when a transaction
+      commits against the same object would land after it, so a commit has to
+      flush first.
+
+- [ ] **`Object.Parent` names the object's type.** `Objects:GetRegistry(object
+      .Parent)` is the type id, not a parent. In a Roblox framework `Parent`
+      means containment to every reader, and it is the one field that would have
+      to mean containment if objects ever nest. Rename it to `Type`.
+
+      Twenty five sites in `src/`, interleaved with ninety three genuine
+      instance `.Parent` uses, so it is a careful rename rather than a sed. It
+      also touches a wire payload (`Data.Parent`) and a permission shape
+      (`{Scene = ..., Parent = ...}`), and the tests use it too. Worth doing
+      with the analyser watching, and worth doing before anything outside this
+      repo depends on the name.
+
+- [ ] **The tests are not type checked.** `scripts/analyze.sh` cannot resolve
+      `ReplicatedStorage.Prism.src` without a Rojo sourcemap, so every reference
+      to Prism inside `tests/` is `any` and a typo in five and a half thousand
+      lines of never-run test code would not be caught -- in the suite that is
+      about to be run for the first time.
+
+      `rojo sourcemap default.project.json` fixes it, and `--sourcemap` then
+      reports 674 diagnostics in `tests/` and 77 rather than 91 in `src/`,
+      because the requires resolve. Almost all of the 674 are nil safety:
+      the tests call `Scene:Load()` and use the result without checking, and
+      `Load` returns `SceneInstance?`.
+
+      *Ask*: whether to take the sourcemap on. It means fetching Rojo in CI as
+      well, and a baseline dominated by noise. It was left off because a CI that
+      fails on its first run for a reason nobody trusts is worse than one that
+      checks less, and because whether those nil checks belong in the tests is
+      a style call that is not mine to make.
+
+- [ ] **An unknown object type is dropped on restore.** `Objects.restore` warns
+      and returns nil when the type is not registered, so the object vanishes
+      from the copy -- and committing that copy afterwards writes it out of the
+      pack for good. This is the opposite of what the storage format promises a
+      few paragraphs over: the wire shape exists so a reader that has never
+      heard of a type can skip it precisely and keep the rest, and then the
+      object layer deletes the record anyway.
+
+      *Ask*: keeping unknown objects opaquely and writing them back unchanged
+      costs memory and makes "what is in this copy" less answerable. The
+      alternative is to say plainly in the README that unregistering a type is
+      destructive to saved levels.
+
+- [ ] **A property the type no longer lists is dropped silently.** `Construct`
+      skips any initial value whose property is not on the type (`if not Prop
+      then continue`). Adding a property to a type is safe -- old objects get
+      the default -- but removing one and re-saving erases every value, with no
+      warning. Same *Ask* as the item above, and probably the same answer.
+
+- [ ] **The history limit counts steps, not what they hold.** `LIMIT = 100` on
+      both sides, by count only. A step can hold a withdrawn copy: every object
+      in it and every part. A hundred of those is unbounded, and the whole point
+      of the suspend-rather-than-destroy design is that a step keeps things
+      alive. A byte or object budget alongside the count would cap it.
+
+Deliberately not queued: object hierarchy and grouping, and anything spatial
+(bounding boxes, region queries, box select). A level editor generally wants
+both, and there is nothing in `src/` for either. They are also the two largest
+things that could be built here and the two most likely to be built wrong in
+the abstract. They should wait until an editor is being written against Prism
+and actually reaches for a group or a box select, so the shape is observed
+rather than guessed.
+
 ## Done
+
+- [x] **The code is checked now.** `scripts/analyze.sh` type checks every file
+      and `node scripts/check-channels.js` checks every channel's arity. Both
+      fetch what they need into a gitignored `.tooling/`, so nothing has to be
+      installed, and CI runs the same two scripts rather than a second
+      description of them that could drift.
+
+      "There is no Luau tooling on this machine" had been a standing rule here
+      and was never a property of the code -- only of what happened to be
+      installed. A pinned `luau-lsp` and the Roblox API definitions are a
+      download.
+
+      It found three bugs immediately, all of which would have stopped the
+      playthrough in its first minute.
+
+      **`Transactions.OnApplied` was written to a global.** The function sat
+      ten lines above `const Transactions = {}`, so it indexed an undeclared
+      global and threw on require: the whole server half of transactions failed
+      to load. Past that, History reads `Transactions.OnApplied` to turn a
+      committed transaction into an undo step, and it was reading a key that
+      had been written to a different table -- so nothing a player committed
+      would ever have been recorded.
+
+      **Reviving a copy put its folder back by id.** `World.Place` takes
+      `(Folder, Scene, Parent: Instance?)` and `Revive` passed `self.Id`, a
+      number, in the parent slot. Place's first act is `if Parent and
+      Parent.Parent ~= nil`, so it indexed a number and threw. That is the undo
+      of an unload, the path the history was built around. Suspend already
+      remembered the right value one field over.
+
+      **`SendLocks` sent two arrays where the channel declares three.** The
+      `Held` array -- whether there is a hold at all, which stopped being the
+      same question as who holds it once a holder could be a module or a string
+      -- was never added to this sender, so the network layer errored on the
+      argument count while revealing any scene with something held in it. The
+      same function inserted `Held.UserId` raw, which is nil for a holder that
+      is not a person, and `table.insert` of a nil leaves a hole that shifts
+      every later holder against its id.
+
+      That last one is invisible to a type checker: `Fire`, `FireAll` and
+      `Invoke` all take `...: any`. Hence the second script, which is the grep
+      this file used to ask for by hand, run over all three call forms and the
+      `Audience` paths -- 47 call sites across 32 channels -- and which also
+      refuses an alias naming a channel that does not exist and a name declared
+      twice.
+
+      The analyser is a ratchet rather than a pass/fail: 112 diagnostics stand,
+      recorded per file in `.analyze-baseline.txt`, and the build fails when a
+      file grows one. Nearly all of them are the default type solver reading
+      code written for the new one -- `type function` and `read` fields are
+      new-solver features, `for _, X in List or {}` is a union it will not
+      iterate, `pcall(fn)` binding two results is flagged whenever fn returns
+      nothing. Switching solvers is not the answer either: the new one reports
+      269 where the old one reports 91. Counts per file rather than line
+      numbers, because line numbers move whenever anything above them is
+      edited and every such edit would read as a new error.
+
+      `read` on the `Page` type did come off, because under the default solver
+      it broke the type outright and Database/Server reported `Records` and
+      `HasMore` as missing keys on every read. `FreezePage` calls
+      `table.freeze`, which is the real guarantee; the annotation restated it.
+
+      `default.project.json` came with it -- a Rojo project that builds the
+      layout the README's Tests section describes, so `rojo serve` is an
+      alternative to syncing the files by hand, and `rojo sourcemap` is what a
+      future item needs to type check the tests.
 
 - [x] **The last three edges.** All of what was left under *Small edges*.
 
