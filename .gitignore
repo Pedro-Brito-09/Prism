@@ -1,0 +1,16 @@
+# Toolchain fetched by scripts/analyze -- binaries and generated type
+# definitions, both reproducible from the versions pinned in the script.
+.tooling/
+
+# Rojo build output.
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+sourcemap.json
+
+# Wally.
+Packages/
+ServerPackages/
+DevPackages/
+wally.lock

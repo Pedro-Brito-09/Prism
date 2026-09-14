@@ -1092,6 +1092,26 @@ not — the version lives on the pack that contains them.
 
 ## Tests
 
+Part of the suite needs no Roblox at all:
+
+```bash
+scripts/test-pure.sh
+```
+
+`tests/Pure.luau` covers Varint, Handles, IdPool, the codecs, Try, CustomEnum,
+permission resolution and property layout -- everything that needs no DataModel.
+Much of it is the floor the format stands on: every id, length and count in a
+pack is a varint, every saved object is addressed by a persistent id, every
+registry id comes out of a pool. 335 checks, including every byte length boundary this file
+claims for varints, that `PersistentId` really is `Scene * 2^32 + Local` across
+the 48 bits it uses, that every codec that does not need a Roblox type round
+trips at its boundaries, that a blacklist beats a whitelist, and that a
+non-recycling pool never hands out a released id twice. It fetches a Luau CLI into
+`.tooling/`; CI runs it on every push.
+
+The rest needs a DataModel, players and replication, so Studio is the only place
+it runs.
+
 The tests run the unit suite on the server and the replication, permissions,
 optimistic-edit, transaction and lifecycle suite on one client. Sync the files into Studio
 with Roblox Script Sync using this layout:
@@ -1121,3 +1141,53 @@ Studio API access enabled. They are currently switched on by `RUN_DATABASE` near
 the top of `tests/Server.server.luau`; set it to `false` to skip them. The suite
 uses the `PrismSelfTest` key, and its cleanup step is commented out, so records
 accumulate across runs and ids keep climbing rather than restarting at 1.
+
+## Type checking
+
+Every file is `--!strict`, and `scripts/analyze.sh` is what actually holds them
+to it:
+
+```bash
+scripts/analyze.sh
+```
+
+It fetches a pinned `luau-lsp` and the Roblox API definitions into `.tooling/`
+and runs the analyser over `src/` and `tests/`. Nothing has to be installed
+first, and nothing is left behind that `.gitignore` does not already cover. The
+same script is the whole of CI, so a push is checked exactly the way a local run
+is.
+
+It fails when a file grows a diagnostic it did not have before, rather than
+when any diagnostic exists at all. `.analyze-baseline.txt` records the count
+per file, and `scripts/analyze.sh --update-baseline` rewrites it.
+
+That is a ratchet rather than a clean bill of health, and deliberately. Most of
+what is left is the default type solver reading code written for the new one:
+`type function` and `read` fields are new-solver features, `for _, X in List or
+{}` is a union the old solver will not iterate, and `pcall(fn)` binding two
+results is flagged whenever `fn` returns nothing. None of those are runtime
+faults, and the new solver reports 269 problems where the default one reports
+91 -- so switching would cost more than it bought. Real bugs still get caught,
+without the standing noise having to be cleared first.
+
+`scripts/analyze.sh --raw` prints everything, baseline or not.
+
+`node scripts/check-channels.js` is the other half, and it checks what the
+analyser structurally cannot. `Fire`, `FireAll` and `Invoke` all take `...:
+any`, so sending a channel the wrong number of arguments type checks cleanly
+and then errors at runtime -- the failure this file has warned about from the
+beginning, met until now by grepping for every caller by hand. The script does
+that grep across all three call forms, the `Audience.Fire` paths included, and
+CI runs it.
+
+It found `Objects.LocksChanged` being sent two arrays where it declares three.
+
+This is the check the Studio pass cannot do cheaply. A wrong argument count on a
+channel, a function that returns one value where two are read, a field that
+moved — the analyser finds all of those across 20,000 lines in seconds, where
+playing the game finds them one at a time, each costing a sync and a replay.
+Run it before syncing into Studio, not after.
+
+`default.project.json` is a [Rojo](https://rojo.space) project that builds the
+layout the Tests section describes, so `rojo serve` is an alternative to syncing
+the files by hand.

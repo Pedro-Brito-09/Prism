@@ -1369,17 +1369,24 @@ end
 function Objects.SendLocks(Plr: Player, List: {Object})
     const Ids = {}
     const Holders = {}
+    const Flags = {}
 
     for _, Obj in List do
         const Held = Locks[Obj.RuntimeId]
         if Held and not Obj.Destroyed then
             table.insert(Ids, Obj.RuntimeId)
-            table.insert(Holders, Held.UserId)
+
+            -- Zero where the holder is not a person, exactly as AnnounceLocks
+            -- sends it. UserId is nil for a holder that is a module or a
+            -- string, and table.insert of a nil leaves a hole that shifts
+            -- every later holder against its id.
+            table.insert(Holders, Held.UserId or 0)
+            table.insert(Flags, true)
         end
     end
 
     if #Ids > 0 then
-        Network.LocksChanged:Fire(Plr, Ids, Holders)
+        Network.LocksChanged:Fire(Plr, Ids, Holders, Flags)
     end
 end
 

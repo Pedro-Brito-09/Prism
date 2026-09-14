@@ -391,7 +391,7 @@ const function __instance_revive(self: SceneInstance): boolean
     Registry.Instances[self.Id] = self
 
     if self.Folder then
-        World.Place(self.Folder, self.Scene, self.Id)
+        World.Place(self.Folder, self.Scene, self.Parent)
     end
 
     Audience.Fire(
