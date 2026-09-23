@@ -2960,6 +2960,52 @@ const function Editor(UserId: number, Scene: any): any
     return Plr
 end
 
+T:Test("the stack is capped by what its steps hold, not only by count", function()
+    const Scene, Copy = Room("HistoryWeight")
+    const Plr = Editor(-6090, Scene)
+    const Limits = History:GetLimits()
+    History:SetLimits({Objects = 3})
+
+    const Doors = {}
+    for Index = 1, 5 do
+        Doors[Index] = Copy:Create(DoorId, {[TitleId] = `Door{Index}`})
+    end
+
+    -- Five destroys, one step each, each holding the door it took.
+    for _, Door in Doors do
+        Transactions.Apply(Plr, {{Kind = "Destroy", Target = Door.RuntimeId}} :: any)
+    end
+
+    T:Ok(not Doors[1].Suspended and not Doors[2].Suspended, "the two oldest were let go")
+    T:Ok(Doors[3].Suspended and Doors[5].Suspended, "the three that fit are still kept")
+
+    T:Ok(History:Undo(Plr), "one")
+    T:Ok(History:Undo(Plr), "two")
+    T:Ok(History:Undo(Plr), "three")
+    T:Ok(not History:CanUndo(Plr), "and no further")
+    T:Eq(#Copy:GetObjects(), 3, "the kept doors came back")
+
+    -- One step heavier than the whole budget is still the newest thing done,
+    -- and is kept: an undo that cannot reach the last action is no undo.
+    History:Clear(Plr)
+    const Ids = {}
+    for _, Obj in Copy:GetObjects() do
+        table.insert(Ids, {Kind = "Destroy", Target = Obj.RuntimeId})
+    end
+
+    const Extra = Copy:Create(DoorId)
+    table.insert(Ids, {Kind = "Destroy", Target = Extra.RuntimeId})
+    Transactions.Apply(Plr, Ids :: any)
+
+    T:Ok(History:CanUndo(Plr), "a step over the budget on its own is kept")
+    T:Ok(Extra.Suspended, "with what it holds")
+
+    History:SetLimits(Limits)
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+end)
+
 T:Test("a transaction is one step, undone and redone as a unit", function()
     const Scene, Copy = Room("HistoryUnit")
     const Plr = Editor(-6001, Scene)

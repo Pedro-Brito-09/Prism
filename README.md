@@ -748,6 +748,19 @@ server's half and the client's half do count separately, though: only the client
 can see both, and a client that has gone quiet must not be what decides how much
 the server holds on to.
 
+Steps are also capped by **what they hold**: at most 10,000 objects kept alive
+between them on each half. A step holds one object per create or destroy, and
+every object in a copy it loaded or unloaded, so a hundred unloads of a large
+room no longer keep a hundred large rooms in memory. The oldest steps go until
+the rest fit, except the newest, which is kept however much it holds. Both
+limits can be changed; each takes effect at the next step recorded:
+
+```lua
+Prism.History:SetLimits({Steps = 50, Objects = 2000})          -- client half
+Prism.History:SetLimits({Steps = 50, Objects = 2000})          -- server, every player
+Prism.History:GetLimits()                                       -- {Steps = ..., Objects = ...}
+```
+
 ### A destroy is deferred, not undone
 
 Undoing a destroy does not build a replacement. The object is **suspended**:

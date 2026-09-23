@@ -40,7 +40,11 @@ const History = {}
 -- quiet must not be what decides how much the server holds. So each side keeps
 -- its own hundred, and a player who edits only one kind of scene sees exactly
 -- that many either way.
-const LIMIT = 100
+local LIMIT = 100
+
+-- Objects this client's own steps may hold between them, beside the count. The
+-- server's twin; see HELD_LIMIT there for why a count alone limits nothing.
+local HELD_LIMIT = 10000
 
 -- How long a run of sets to one property may pause and still be one step. A
 -- drag sets every frame; two edits a few seconds apart are two actions.
@@ -81,6 +85,9 @@ type Step = {
     Entries: {Entry},
     Custom: Action?,
     Run: {Target: Types.RuntimeId, Property: number, At: number}?,
+
+    -- Objects the step keeps alive, counted against HELD_LIMIT. See Weigh.
+    Weight: number?,
 }
 
 -- One place in the order. Exactly one of the two is set: a step this client
@@ -166,22 +173,52 @@ end
 -- A step of this client's own joining the order. A server step arrives the
 -- other way round -- the server records it and says so -- and is appended when
 -- its id turns up in a picture this client has not seen before.
+-- How many objects a step keeps alive, as the server weighs its own: one per
+-- create or destroy, and every object in a copy it loaded or unloaded.
+const function Weigh(Step: Step): number
+    local Held = 0
+
+    for _, Entry in Step.Entries do
+        const Copy = Entry.Copy
+        if Copy then
+            if Copy.Suspended then
+                Held += #Copy.Suspended
+            elseif Copy.Objects then
+                for _ in Copy.Objects do
+                    Held += 1
+                end
+            end
+        elseif Entry.Kind == "Create" or Entry.Kind == "Destroy" then
+            Held += 1
+        end
+    end
+
+    return Held
+end
+
 const function Push(Step: Step)
+    Step.Weight = Weigh(Step)
     table.insert(UndoOrder, {Step = Step})
 
-    -- Past the end of what is kept, and gone for good, so it lets go of
-    -- whatever it was holding. Only this client's own steps count against this
-    -- limit; the server enforces the same one over its own.
+    -- Past the end of what is kept, by count or by what the steps hold, and
+    -- gone for good, so it lets go of whatever it was holding. Walked newest
+    -- first, so the newest step is always kept however much it holds. Only this
+    -- client's own steps count against these limits; the server enforces the
+    -- same ones over its own.
+    local Steps = 0
     local Held = 0
     for Index = #UndoOrder, 1, -1 do
         const Token = UndoOrder[Index]
-        if not Token.Step then
+        const Kept = Token.Step
+        if not Kept then
             continue
         end
 
-        Held += 1
-        if Held > LIMIT then
-            Clear(Token.Step)
+        Steps += 1
+        Held += Kept.Weight or 0
+
+        if Steps > 1 and (Steps > LIMIT or Held > HELD_LIMIT) then
+            Clear(Kept)
             table.remove(UndoOrder, Index)
         end
     end
@@ -381,6 +418,22 @@ function History:Clear()
     ClearTokens(RedoOrder)
     Network.Forget:FireAll(false)
     Listeners.Notify(Changed)
+end
+
+-- How much this client's own half keeps, as History:SetLimits does on the
+-- server for its half. Either may be left out; takes effect at the next step.
+function History:SetLimits(Limits: {Steps: number?, Objects: number?})
+    if Limits.Steps and Limits.Steps >= 1 then
+        LIMIT = math.floor(Limits.Steps)
+    end
+
+    if Limits.Objects and Limits.Objects >= 0 then
+        HELD_LIMIT = math.floor(Limits.Objects)
+    end
+end
+
+function History:GetLimits(): {Steps: number, Objects: number}
+    return {Steps = LIMIT, Objects = HELD_LIMIT}
 end
 
 -- Fired whenever either stack changes, for an editor greying its buttons.

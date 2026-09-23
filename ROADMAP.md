@@ -153,12 +153,6 @@ produced it, with anything that is a decision marked *Ask*.
       the default -- but removing one and re-saving erases every value, with no
       warning. Same *Ask* as the item above, and probably the same answer.
 
-- [ ] **The history limit counts steps, not what they hold.** `LIMIT = 100` on
-      both sides, by count only. A step can hold a withdrawn copy: every object
-      in it and every part. A hundred of those is unbounded, and the whole point
-      of the suspend-rather-than-destroy design is that a step keeps things
-      alive. A byte or object budget alongside the count would cap it.
-
 Deliberately not queued: object hierarchy and grouping, and anything spatial
 (bounding boxes, region queries, box select). A level editor generally wants
 both, and there is nothing in `src/` for either. They are also the two largest
@@ -168,6 +162,22 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **The history is capped by what its steps hold.** `LIMIT = 100` counted
+      steps only, and a step can hold a whole withdrawn copy, so a hundred of
+      them was a limit on nothing. Each step is now weighed when it is
+      recorded -- one object per create or destroy, every object in a copy it
+      loaded or unloaded -- and each half keeps at most 10,000 held objects
+      beside its hundred steps. The oldest go until the rest fit; the newest
+      is always kept, however heavy, because an undo that cannot reach the
+      last thing done is worse than one room too many in memory.
+
+      Objects rather than bytes: an object count is exact and cheap, and a
+      byte size of a live object with a part would be a guess. Weighed once,
+      not re-weighed as copies change, because what is created in a loaded
+      copy afterwards is a step of its own and weighs there.
+      `History:SetLimits({Steps, Objects})` and `GetLimits()` on both sides,
+      server-wide on the server.
 
 - [x] **The code is checked now.** `scripts/analyze.sh` type checks every file
       and `node scripts/check-channels.js` checks every channel's arity. Both

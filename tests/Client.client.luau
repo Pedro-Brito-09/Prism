@@ -1131,6 +1131,34 @@ T:Describe("History")
 
 const History = Prism.History
 
+T:Test("this client's own steps are capped by what they hold", function()
+    const Sandbox = Scenes.new({Name = "ClientHistoryWeight"})
+    if not Sandbox or not BareId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Limits = History:GetLimits()
+    History:Clear()
+    History:SetLimits({Objects = 2})
+
+    -- Three creates, one object held each once undone or kept.
+    const Made = {}
+    for Index = 1, 3 do
+        Made[Index] = Copy:Create(BareId)
+    end
+
+    T:Ok(History:Undo(), "one")
+    T:Ok(History:Undo(), "two")
+    T:Ok(not History:CanUndo(), "and the oldest create was let go")
+    T:Ok(not Made[1].Destroyed, "which leaves its object where it was")
+
+    History:SetLimits(Limits)
+    History:Clear()
+    Sandbox:Destroy()
+end)
+
 T:Test("a run of sets in a local scene is one step", function()
     const Sandbox = Scenes.new({Name = "ClientHistory"})
     if not Sandbox or not BareId or not TitleId then
