@@ -560,6 +560,91 @@ T:Test("setting the same value twice is a no-op", function()
     T:Eq(Editable:Get(TitleId), Current, "unchanged")
 end)
 
+-- TestBuilder may spend five actions a second. Thirty frames of a drag sent one
+-- by one would be refused from the sixth on; previewed, they cost the one set
+-- that ends the drag.
+T:Test("a ClientSided drag costs one action and lands where it ends", function()
+    if not Editable or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    task.wait(1.1)
+
+    const Start = Editable:Get(TitleId)
+    local Edits = 0
+    local From: any = nil
+    const Disconnect = Objects:OnEdited(function(Obj, _, Before)
+        if Obj == Editable then
+            Edits += 1
+            From = Before
+        end
+    end)
+
+    for Frame = 1, 30 do
+        T:Ok(Editable:Set(TitleId, `Drag{Frame}`, true), `frame {Frame} shown`)
+    end
+
+    T:Eq(Editable:Get(TitleId), "Drag30", "the preview is on screen")
+    T:Eq(Edits, 0, "and nobody was told of an edit")
+
+    -- The last frame's value again, which on screen changes nothing. It has to
+    -- be sent anyway: the server has never heard of it.
+    T:Ok(Editable:Set(TitleId, "Drag30"), "the drag ends")
+    T:Eq(Edits, 1, "one edit")
+    T:Eq(From, Start, "starting from before the drag")
+
+    task.wait(1)
+    T:Eq(Editable:Get(TitleId), "Drag30", "the server kept it")
+
+    Disconnect()
+end)
+
+T:Test("a drag let go where it started sends and records nothing", function()
+    if not Editable or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    const Start = Editable:Get(TitleId)
+    local Edits = 0
+    const Disconnect = Objects:OnEdited(function(Obj)
+        if Obj == Editable then
+            Edits += 1
+        end
+    end)
+
+    Editable:Set(TitleId, "Wandered", true)
+    T:Ok(Editable:Set(TitleId, Start), "cancelled")
+    T:Eq(Editable:Get(TitleId), Start, "back where it was")
+    T:Eq(Edits, 0, "and no edit was made")
+
+    Disconnect()
+end)
+
+T:Test("a refused drag rolls back to before it began", function()
+    if not Denied or not TitleId then
+        T:Ok(false, "no denied fixture")
+        return
+    end
+
+    task.wait(1.1)
+
+    const Start = Denied:Get(TitleId)
+    for Frame = 1, 10 do
+        Denied:Set(TitleId, `Refused{Frame}`, true)
+    end
+
+    -- Nothing was sent, so nothing was refused yet: a preview is not judged.
+    task.wait(0.5)
+    T:Eq(Denied:Get(TitleId), "Refused10", "the preview stands until it ends")
+
+    T:Ok(Denied:Set(TitleId, "Refused10"), "accepted locally")
+    T:Eventually(function()
+        return Denied:Get(TitleId) == Start
+    end, 3, "rolled back to the value before the drag")
+end)
+
 T:Test("an allowed destroy tears down the client object", function()
     if not Destroyable then
         T:Ok(false, "no destroy fixture")
@@ -1130,6 +1215,38 @@ end)
 T:Describe("History")
 
 const History = Prism.History
+
+T:Test("a ClientSided drag is one step however long it pauses", function()
+    const Sandbox = Scenes.new({Name = "ClientHistoryDrag"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId, {[TitleId] = "Start"})
+    History:Clear()
+
+    -- Longer than the merge window: sent as plain sets, this would be two.
+    Obj:Set(TitleId, "Held", true)
+    T:Ok(not History:CanUndo(), "a preview records nothing")
+    task.wait(1.2)
+    Obj:Set(TitleId, "Released", true)
+    Obj:Set(TitleId, "Released")
+
+    T:Ok(History:Undo(), "undone")
+    T:Eq(Obj:Get(TitleId), "Start", "back to before the drag")
+    T:Ok(not History:CanUndo(), "which was one step")
+
+    -- Let go where it began: no step at all.
+    History:Clear()
+    Obj:Set(TitleId, "Elsewhere", true)
+    Obj:Set(TitleId, "Start")
+    T:Ok(not History:CanUndo(), "a cancelled drag is not an action")
+
+    History:Clear()
+    Sandbox:Destroy()
+end)
 
 T:Test("a run of sets in a local scene is one step", function()
     const Sandbox = Scenes.new({Name = "ClientHistory"})
