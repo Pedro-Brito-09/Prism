@@ -59,28 +59,6 @@ on -- every item here is better decided with the thing running.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-- [ ] **A drag costs an action a frame.** `Object:Set` on the client sends its
-      own `Invoke` and the server charges one action for it, so a drag at sixty
-      frames a second sits exactly on the default budget of sixty, and a gizmo
-      writing position and rotation is a hundred and twenty against it. The
-      limiter starts refusing halfway through, and each refusal rolls the
-      property back to `Confirmed` -- the value snaps backwards while the player
-      is still dragging.
-
-      The history already knows a drag is one thing: a run of sets to one
-      property with no pause longer than a second is one step. The wire does
-      not. Accumulating per object and property and flushing on a tick would
-      make it one packet and one action per flush, and the rollback story gets
-      simpler rather than harder -- there is already one `Pending` ticket per
-      property and a flush is just a later ticket.
-
-      *Ask*: the flush rate, and whether a coalesced drag still feels direct.
-      Both are things you learn by dragging something, which is why this waits
-      for the playthrough rather than being guessed at now. The ordering hazard
-      is the part to design carefully: a set left pending when a transaction
-      commits against the same object would land after it, so a commit has to
-      flush first.
-
 - [ ] **`Object.Parent` names the object's type.** `Objects:GetRegistry(object
       .Parent)` is the type id, not a parent. In a Roblox framework `Parent`
       means containment to every reader, and it is the one field that would have
@@ -168,6 +146,29 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **A drag costs one action: `Object:Set(..., ClientSided)`.** On the
+      client, `Set` takes a third argument. `true` shows the value here and
+      sends nothing; the next `Set` without it sends the value it lands on,
+      once. A drag at sixty frames a second used to be sixty actions against a
+      default budget of sixty, refused half way through, with every refusal
+      snapping the value back under the player's hand.
+
+      Decided against coalescing on a timer, which is what this item proposed.
+      The wire cannot tell where a drag ends and the game can, so the game says
+      so; there is no flush rate to tune and no ordering hazard against a
+      transaction, because nothing is left pending between frames.
+
+      What a preview is and is not: `OnChange` and links fire, `OnEdited` does
+      not -- the closing set fires it once, with `Before` from before the
+      preview. The closing set is sent even when the last frame already put its
+      value on screen, and compared against what the server holds rather than
+      the last frame, so letting go where the drag began is a cancel that sends
+      nothing. A refusal returns to the confirmed value. Somebody else's edit
+      arriving mid-drag updates the confirmed value and leaves the preview
+      alone. In a scene the client owns nothing is sent either way, but the
+      history records the drag as one step however long it paused. Ignored on
+      the server.
 
 - [x] **The code is checked now.** `scripts/analyze.sh` type checks every file
       and `node scripts/check-channels.js` checks every channel's arity. Both

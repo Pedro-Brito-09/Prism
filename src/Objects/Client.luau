@@ -254,6 +254,27 @@ const Pending: {[any]: number} = setmetatable({}, {__mode = "k"}) :: any
 -- PropertyChanged.
 const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
 
+-- Properties being set with ClientSided, and the value each held before the
+-- first of those sets. A drag used to send a set per frame, which at sixty
+-- frames a second sat exactly on the default budget: the limiter refused half
+-- way through and every refusal snapped the value back while the player was
+-- still holding it. The game knows when a drag starts and ends and the wire
+-- does not, so the game says so: every frame is shown here and nowhere else,
+-- and the set that ends it is the one edit anybody hears about, starting from
+-- the value it started from. Weak keyed, like the two tables above.
+const Previewing: {[any]: {Before: any}} = setmetatable({}, {__mode = "k"}) :: any
+
+-- Starts or continues a preview: the value is shown and nothing else happens.
+-- Nobody is told of an edit, because there has not been one yet.
+const function Preview(Prop: any, Val: any): boolean
+    if not Previewing[Prop] then
+        Previewing[Prop] = {Before = Prop.Value}
+    end
+
+    const Accepted = Prop:Set(Val)
+    return Accepted
+end
+
 -- Runtime ids for objects this client made itself, counted down from the top
 -- while the server counts up from one. The two meet only if a single session
 -- mints four billion objects, and a local id never crosses the wire in any
@@ -315,7 +336,11 @@ end
 --
 -- If the server refuses (permissions, validation) the local value rolls back.
 -- If it accepts, its PropertyChanged broadcast reasserts the authoritative value.
-const function __setter(self: Object, Reference: Types.PropertyReference, Value: any?): boolean
+--
+-- ClientSided shows the value here and sends nothing; see Previewing. The next
+-- set without it sends the value it lands on, once, even when the preview had
+-- already put that value on screen.
+const function __setter(self: Object, Reference: Types.PropertyReference, Value: any?, ClientSided: boolean?): boolean
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
         return false
@@ -330,15 +355,34 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         return false
     end
 
-    const Before = Prop.Value
+    if ClientSided then
+        return Preview(Prop, Val)
+    end
+
+    -- A preview ending. What it showed was never sent, so the edit runs from
+    -- where the server last had it rather than from the frame before.
+    const Held = Previewing[Prop]
+    Previewing[Prop] = nil
+
+    const Before = if Held then Held.Before else Prop.Value
     const Accepted, Changed = Prop:Set(Val)
     if not Accepted then
+        if Held then
+            Prop:Set(Confirmed[Prop])
+        end
+
         return false
     end
 
     -- Setting a property to the value it already holds is a no-op, not a reason
-    -- to spend a round trip.
-    if not Changed then
+    -- to spend a round trip. After a preview the question is whether it differs
+    -- from what the server holds, not from the last frame: a drag let go where
+    -- it started is a cancel, and costs nothing.
+    if Held then
+        if Prop.Value == Confirmed[Prop] then
+            return true
+        end
+    elseif not Changed then
         return true
     end
 
@@ -372,7 +416,10 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
 
         Pending[Prop] = nil
 
-        if (not Ok or not Allowed) and not self.Destroyed then
+        -- A new drag started while this was in flight. The refused value is
+        -- already off screen, and the drag's own last set will be judged on
+        -- its own; snapping back now would yank it out of the player's hand.
+        if (not Ok or not Allowed) and not self.Destroyed and not Previewing[Prop] then
             Prop:Set(Confirmed[Prop])
         end
     end)
@@ -490,7 +537,11 @@ end
 --
 -- Links still fire, because a link is a listener on the property rather than
 -- anything to do with the network.
-const function __local_setter(self: Object, Reference: Types.PropertyReference, Value: any?): boolean
+--
+-- ClientSided means the same here as on a replicated object, although nothing
+-- is sent either way: the edit is told once, when the preview ends, so a drag
+-- is one step of history however long the player paused in the middle of it.
+const function __local_setter(self: Object, Reference: Types.PropertyReference, Value: any?, ClientSided: boolean?): boolean
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
         return false
@@ -501,9 +552,19 @@ const function __local_setter(self: Object, Reference: Types.PropertyReference, 
         return false
     end
 
-    const Before = Prop.Value
-    const Accepted, Changed = Prop:Set(Val)
-    if Accepted and Changed then
+    if ClientSided then
+        return Preview(Prop, Val)
+    end
+
+    const Held = Previewing[Prop]
+    Previewing[Prop] = nil
+
+    const Before = if Held then Held.Before else Prop.Value
+    const Accepted = Prop:Set(Val)
+
+    -- Against where the preview started rather than the last frame, for the
+    -- same reason as the replicated setter: let go where it began is no edit.
+    if Accepted and Prop.Value ~= Before then
         Listeners.Notify(Edited, self, Prop.Parent, Before, Prop.Value)
     end
 
@@ -1264,6 +1325,19 @@ const function ApplyChange(RuntimeId: RuntimeId, PropId: PropertyTypes.PropertyI
         -- The server has spoken, so no in-flight set may roll back over this,
         -- and this is now the value a later refusal should return to.
         Pending[Prop] = nil
+
+        -- Somebody else's edit landing under a drag. It is what a refusal or a
+        -- cancel returns to from now on, but it does not pull the value out
+        -- from under the player's hand; the set that ends the drag decides.
+        if Previewing[Prop] then
+            const Fixed = PropertyTypes:FixValue(Prop.Type, Value, Prop.Constraints)
+            if Fixed ~= nil then
+                Confirmed[Prop] = Fixed
+            end
+
+            return
+        end
+
         Prop:Set(Value)
         Confirmed[Prop] = Prop.Value
     end

@@ -133,7 +133,9 @@ export type Object = {
     -- it mirrors.
     Links: {[PropertyTypes.PropertyIdentifier]: InstanceLink}?,
 
-    Set: (self: Object, Property: PropertyReference, Value: any?) -> boolean,
+    -- ClientSided is the client's, and ignored on the server: shown here, sent
+    -- nowhere, until a set without it ends the preview. See Objects/Client.
+    Set: (self: Object, Property: PropertyReference, Value: any?, ClientSided: boolean?) -> boolean,
     Get: (self: Object, Property: PropertyReference) -> any?,
 
     -- The property instance itself, for the parts of it Get and Set do not
