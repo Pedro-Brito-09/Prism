@@ -37,6 +37,7 @@ parts every editor needs and nobody wants to write twice:
 - [Contributing](#contributing)
 - [Tests](#tests)
 - [Type checking](#type-checking)
+- [License](#license)
 
 ## Getting started
 
@@ -1424,6 +1425,9 @@ Contributions are welcome: open a pull request against `main`.
 - For anything bigger than a fix, open an issue first, or read `ROADMAP.md`,
   which lists what is planned and how the work is done.
 
+By opening a pull request you agree that your contribution is released under the
+same [MIT license](#license) as the rest of Prism.
+
 ## Tests
 
 Part of the suite needs no Roblox at all:
@@ -1529,3 +1533,9 @@ Run it before syncing into Studio, not after.
 `default.project.json` is a [Rojo](https://rojo.space) project that builds the
 layout the Tests section describes, so `rojo serve` is an alternative to syncing
 the files by hand.
+
+## License
+
+Prism is released under the [MIT License](LICENSE). Use it in any game, open or
+closed source, free or paid; keep the copyright notice in the `LICENSE` file
+with any copy of the code.
