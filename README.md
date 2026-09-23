@@ -2,14 +2,139 @@ this originally wasn't going to be vibe coded but it got too big and I lowkey di
 
 # Prism
 
-Prism is a framework made to facilitate the creation of level editors for roblox games.
+Prism is a framework for building level editors in Roblox games. It handles the
+parts every editor needs and nobody wants to write twice:
 
-`src/` is a ModuleScript folder (`init.luau` is the module itself). Require it from
-both sides; it resolves the server or client half of each subsystem for you.
+- **Typed, constrained properties** and object types built from them, with
+  templates and links that drive the instances.
+- **Scenes** — levels as documents you load, edit, save and load again, as many
+  copies at once as you like, with references between objects that survive it.
+- **Multiplayer editing** — replication, permissions per scene, locks and
+  presence, and a rate limit the server enforces.
+- **Transactions** that land whole or not at all, and **undo / redo** per
+  player across the server's scenes and the client's own.
+- **Storage** in a compact binary format that survives schema changes, and a
+  sharded DataStore database for browsing and searching levels.
+
+> **Status:** structurally complete, but not yet played through with real
+> players. Expect rough edges until that pass is done — see `ROADMAP.md`.
+
+## Contents
+
+- [Getting started](#getting-started)
+- [Properties](#properties)
+- [Objects](#objects) — [basics](#basics), [locks](#locks),
+  [dragging](#dragging-clientsided), [references](#references)
+- [Scenes](#scenes)
+- [Transactions](#transactions)
+- [History](#history)
+- [Selection](#selection)
+- [Permissions](#permissions)
+- [Database](#database)
+- [Networking](#networking)
+- [API at a glance](#api-at-a-glance)
+- [Storage format](#storage-format)
+- [Contributing](#contributing)
+- [Tests](#tests)
+- [Type checking](#type-checking)
+
+## Getting started
+
+### Requirements
+
+Prism is written in current Luau: it uses `const` and string requires
+(`require("@self/...")`). It needs a Roblox Studio recent enough to run both;
+an older one fails to parse the modules rather than failing at runtime.
+
+### Installing
+
+`src/` is a ModuleScript folder (`init.luau` is the module itself). Put it
+somewhere **both sides can see** — ReplicatedStorage, as a ModuleScript named
+`Prism` — and require it from a server script and a client script. It resolves
+the server or client half of each subsystem for you.
 
 ```lua
-local Prism = require(path.to.Prism)
+local Prism = require(ReplicatedStorage.Prism)
 ```
+
+(The [test layout](#tests) syncs the whole repo instead, so there it is
+`ReplicatedStorage.Prism.src`.)
+
+Require it on the server before any client does: the client waits for the
+server to say it is ready, and warns if it never does.
+
+### A first editor, end to end
+
+Register what exists on the server, once. Registries replicate to every client,
+including ones that join later.
+
+```lua
+-- server
+local Tint = Prism.Properties:Register({Name = "Tint", Type = "Color", DefaultValue = Color3.new(1, 1, 1)})
+
+local Crate = Prism.Objects:Register({
+    Name = "Crate",
+    Properties = {Tint},
+    Instance = ReplicatedStorage.CrateTemplate,
+    Links = {{Property = Tint, Type = "Property", Name = "Color"}},
+})
+
+Prism.Permissions:Register("Builder", {
+    Global = {Rate = 120},
+    Scene = {CanCreate = true, CanEdit = true, CanDestroy = true},
+})
+
+local Level = Prism.Scenes.new({Name = "Level 1"})
+local room = Level:Load()
+
+Players.PlayerAdded:Connect(function(player)
+    Prism.Permissions:Grant(player, "Builder")
+    Level:Grant(player, "Builder")
+end)
+```
+
+Edit from the client. A create goes through a transaction; a set is applied
+straight away and confirmed by the server afterwards.
+
+```lua
+-- client: registry ids are the server's, so look them up by name
+local function idOf(registered, name)
+    for id, registry in registered do
+        if registry.Name == name then return id end
+    end
+end
+
+local Crate = idOf(Prism.Objects:GetRegistered(), "Crate")
+local Tint = idOf(Prism.Properties:GetRegistered(), "Tint")
+
+local edit = Prism.Transactions.new()
+edit:Create(Crate, {[Tint] = Color3.new(1, 0, 0)}, roomCopyId)
+local ok, created = edit:Commit()
+
+-- Commit answers with the new runtime ids; the object itself replicates just after.
+local crate = Prism.Objects:Get(created[1])
+while not crate do
+    task.wait()
+    crate = Prism.Objects:Get(created[1])
+end
+
+crate:Set(Tint, Color3.new(0, 1, 0))
+
+Prism.History:Undo()   -- back to red
+```
+
+Save on the server when the player asks to.
+
+```lua
+-- server
+room:Commit()
+DataStore:SetAsync("Level 1", buffer.tostring(Level:Serialize()))
+```
+
+`roomCopyId` is the id of the copy the server loaded; a client hears of it
+through `Prism.Scenes:OnCopyAdded`. Registries arrive shortly after the client
+requires Prism, so wait for them before looking ids up. The sections below go
+through each piece.
 
 ## Properties
 
@@ -17,6 +142,7 @@ A property is a typed, constrained field. Register it once on the server; the
 registry replicates to every client, including late joiners.
 
 ```lua
+-- server
 local Health = Prism.Properties:Register({
     Name = "Health",
     Type = "Number",
@@ -25,15 +151,46 @@ local Health = Prism.Properties:Register({
 })
 ```
 
-Types: `Text`, `Number`, `Bool`, `Color`, `Vector`, `CFrame`, `Enum`,
-`CustomEnum`, `Object`.
+| Type | Value | Constraints |
+|---|---|---|
+| `Text` | `string` | `MinLength` (rejects), `MaxLength` (truncates) |
+| `Number` | `number` | `MinValue`, `MaxValue` (clamp), `AllowDecimals` (rounds when `false`), `Precision` (snaps to steps of it from `MinValue`) |
+| `Bool` | `boolean` | — |
+| `Color` | `Color3` | `R`, `G`, `B`, each a set of `Number` constraints on 0–255 |
+| `Vector` | `Vector3` | `X`, `Y`, `Z`, each a set of `Number` constraints |
+| `CFrame` | `CFrame` | — |
+| `Enum` | an `EnumItem` | `Enum` (required: which enum), `Whitelist`, `Blacklist` (items or names) |
+| `CustomEnum` | an option of a custom enum | `CustomEnum` (required), `Whitelist`, `Blacklist` (options or option ids) |
+| `Object` | another object | `Types` (object type ids or names) |
+
+A value that fails a rejecting constraint is refused — `Set` returns `false` —
+and one outside a clamping constraint is brought into range.
 
 `Object` is a reference to another object — a button's door, a path node's next
 node. It's stored as a local id, so it's saved and duplicated like one; see
 [References](#references) for what that buys you and what it rules out.
 
-Constraints reject or clamp depending on the constraint: `MinLength` rejects an
-invalid value, `MinValue`/`MaxValue`/`MaxLength` clamp it into range.
+A custom enum is a named list of options with ids that are saved in place of the
+values, so the values can be anything. Register it **on both sides** under the
+same name — a client checks a `CustomEnum` constraint against its own copy.
+
+```lua
+-- server and client
+local Material = Prism.CustomEnum:Register("Material", {Wood = 1, Stone = 2, Metal = 3})
+
+-- server
+local Surface = Prism.Properties:Register({
+    Name = "Surface",
+    Type = "CustomEnum",
+    DefaultValue = Material:GetByValue("Wood"),
+    Constraints = {CustomEnum = Material},
+})
+
+crate:Set(Surface, Material:GetById(2))   -- Stone
+```
+
+Option ids are whole numbers up to 65535 and, like property ids, should never be
+reused for a different option: saved data holds the id.
 
 `Display` says how a property presents itself in an editor, so a property panel
 can be generated from the registry instead of written by hand for each property.
@@ -74,6 +231,7 @@ An object type is a named set of properties, optionally backed by a template
 instance. `Objects.new` clones that template per instance.
 
 ```lua
+-- server
 local Enemy = Prism.Objects:Register({
     Name = "Enemy",
     Properties = {Health},
@@ -115,6 +273,7 @@ object that appears or goes, so neither a panel nor a server script has to poll
 `GetWorkspace()` to notice one.
 
 ```lua
+-- server or client
 local stop = Prism.Objects:OnAdded(function(object, restored)
     outliner:Add(object)
 end)
@@ -139,13 +298,62 @@ The signals are not the packets. A scene load builds its objects silently and
 sends them in one batch afterwards; `OnAdded` fires either way, because it is
 about the object existing rather than about anybody being told.
 
+### Basics
+
+Every object carries two ids: `RuntimeId`, which names this live copy of it, and
+`PersistentId`, which is saved with it and outlives a reload. See Scenes.
+
+`object.Registry` is the id of the object's type, the one `Objects:Register`
+returned; `Objects:GetRegistry(object.Registry)` gives the type itself.
+
+A link mirrors a property onto the instance. `Type = "Property"` writes a real
+instance property (the types must match), `Type = "Attribute"` writes an
+attribute. `Descendant` targets a child instead of the root.
+
+`Set`, `Get`, `OnChange` and `GetProperty` all take either the property id or
+its name, and a name costs the same as an id to resolve.
+
+`Objects:Duplicate(object, copy?)` makes a new object of the same type holding
+the same values, in the original's copy unless you name another. It gets a new
+local id and a part of its own. On the client this works for objects in scenes
+the client owns; an object the server holds is duplicated with a transaction's
+`Duplicate`, which checks create rights like any other create.
+
+`Objects:DuplicateGroup(objects, copy?)` duplicates several as one thing, which
+is not the same as calling `Duplicate` on each: references *between* the
+originals are remapped onto the copies, and references pointing outside the
+group are left alone. Duplicate a room and its buttons work its own doors;
+duplicate one lever and it still works the door it always worked.
+
+Watch a single property without paying for a signal on every property:
+
+```lua
+-- server or client
+local disconnect = enemy:OnChange(Health, function(value)
+    print("health is now", value)
+end)
+
+disconnect()
+```
+
+Watching a property the object does not carry warns and hands back a disconnect
+that does nothing, so the caller never has to guard the release.
+
+`GetProperty` returns the property instance itself, for what `Get` and `Set` do
+not cover:
+
+```lua
+enemy:GetProperty("Health").Constraints.MaxValue
+```
+
 ### Locks
 
 A client takes a lock when it starts on an object. While it holds one, nobody
-else may edit or destroy that object, so two people dragging one part no longer
-fight over it.
+else may edit or destroy that object, so two people cannot drag one part at
+once.
 
 ```lua
+-- client
 if Prism.Objects:Lock(selected) then   -- one object or a list: all or none
     -- drag
     Prism.Objects:Unlock(selected)
@@ -168,35 +376,20 @@ player to hold it with. `GetHolder` gives back whatever it was; `GetLock` gives
 the user id where the holder is a person and nil where it isn't, which is why
 `IsLocked` exists to answer the other half.
 
-A hold goes when whoever had it does. Leaving releases them, and so does being
-**evicted from the scene** or **losing edit rights on it** — all three leave
-somebody holding objects they can no longer touch and nobody else able to touch
-them either.
-A lock goes when its object goes or its holder leaves. The server's own edits
-ignore locks. The server can take locks on a player's behalf with
-`Objects:Lock(list, player)`, which is refused the same way if someone else
-holds any of them, and release anyone's with `Objects:Unlock(list)`.
+A lock is released when its object goes, or when its holder **leaves**, is
+**evicted from the scene** or **loses edit rights on it** — any of those would
+leave somebody holding objects they can no longer touch, and nobody else able to
+touch them either.
+
+The server's own edits ignore locks. The server can take locks on a player's
+behalf with `Objects:Lock(list, player)`, which is refused the same way if
+someone else holds any of them, and release anyone's with
+`Objects:Unlock(list)`.
 
 Who holds what is presence as well as a lock. It's told only to the players the
 object's scene admits, because who is editing a private level is part of the
 level. Objects in scenes a client owns are never locked; nobody else can touch
 them.
-
-Every object carries two ids: `RuntimeId`, which names this live copy of it, and
-`PersistentId`, which is saved with it and outlives a reload. See Scenes.
-
-`object.Registry` is the id of the object's type, the one `Objects:Register`
-returned; `Objects:GetRegistry(object.Registry)` gives the type itself. It was
-called `Parent` until it was renamed, because in a Roblox framework `Parent`
-reads as containment. Saved data is unaffected: the id was always written by
-position, never by name.
-
-A link mirrors a property onto the instance. `Type = "Property"` writes a real
-instance property (the types must match), `Type = "Attribute"` writes an
-attribute. `Descendant` targets a child instead of the root.
-
-`Set`, `Get`, `OnChange` and `GetProperty` all take either the property id or
-its name, and a name costs the same as an id to resolve.
 
 ### Dragging: `ClientSided`
 
@@ -205,7 +398,7 @@ client and sends nothing; the next `Set` without it sends the value it lands on,
 once. Pass it every frame of a drag and leave it off when the drag ends:
 
 ```lua
--- while the gizmo moves
+-- client, while the gizmo moves
 crate:Set(Position, pointer, true)
 
 -- on release
@@ -236,43 +429,12 @@ The argument is ignored on the server, where every set is already the real one.
 It works the same on an object in a scene the client owns, where nothing is sent
 either way but the history still records the drag as one step.
 
-`Objects:Duplicate(object, copy?)` makes a new object of the same type holding
-the same values, in the original's copy unless you name another. It gets a new
-local id and a part of its own. On the client this works for objects in scenes
-the client owns; an object the server holds is duplicated with a transaction's
-`Duplicate`, which checks create rights like any other create.
-
-`Objects:DuplicateGroup(objects, copy?)` duplicates several as one thing, which
-is not the same as calling `Duplicate` on each: references *between* the
-originals are remapped onto the copies, and references pointing outside the
-group are left alone. Duplicate a room and its buttons work its own doors;
-duplicate one lever and it still works the door it always worked.
-
-Watch a single property without paying for a signal on every property:
-
-```lua
-local disconnect = enemy:OnChange(Health, function(value)
-    print("health is now", value)
-end)
-
-disconnect()
-```
-
-Watching a property the object does not carry warns and hands back a disconnect
-that does nothing, so the caller never has to guard the release.
-
-`GetProperty` returns the property instance itself, for what `Get` and `Set` do
-not cover:
-
-```lua
-enemy:GetProperty("Health").Constraints.MaxValue
-```
-
 ### References
 
 An `Object` property points at another object.
 
 ```lua
+-- server
 local Target = Prism.Properties:Register({
     Name = "Target",
     Type = "Object",
@@ -311,16 +473,21 @@ registered name. It's checked when the target actually resolves; an id naming
 nothing is always allowed, because refusing one would make a pack restorable
 only in the order it happened to be written.
 
-Two limits worth knowing. A reference can't drive an instance member, so a
+Two things worth knowing. A reference can't drive an instance member, so a
 `Links` entry naming one is dropped at registration — a local id on a part would
-mean nothing outside its copy. And a target restored as a *new* object rather
-than under its old local id is a new object: undoing a destroy makes one, so
-references to what was destroyed stay dangling rather than snapping back.
+mean nothing outside its copy. And a reference follows one object, not its
+lookalikes: undoing a destroy brings back **that same object** under its own
+local id, so every reference to it works again (see
+[History](#a-destroy-is-deferred-not-undone)), but a duplicate or a placed copy
+is a new object with a new id, and references to the original stay on the
+original. `DuplicateGroup` and `Place` remap the references *inside* what they
+copy.
 
 Creating two objects already wired to each other takes one transaction, because
 neither id exists until the server mints it:
 
 ```lua
+-- client
 local edit = Prism.Transactions.new()
 edit:Create(Button, {}, room.Id)
     :Create(Door, {}, room.Id)
@@ -340,6 +507,7 @@ loaded as. Registering one creates data and nothing else. `Load` reads it into a
 live copy.
 
 ```lua
+-- server
 local Rooms = Prism.Scenes.new({Name = "Rooms"})
 
 local room = Rooms:Load()              -- one live copy
@@ -358,6 +526,7 @@ is no answer — ask a copy and there is.
 one.
 
 ```lua
+-- server
 local a = Rooms:Load(workspace.SlotA)   -- where this copy's folder goes
 local b = Rooms:Load(workspace.SlotB)
 
@@ -377,6 +546,7 @@ Every copy owns a folder, and every object's instance is parented into the
 folder of the copy holding it. `Load` says where that folder goes:
 
 ```lua
+-- server
 local room = Rooms:Load(workspace.SlotA)
 room.Folder                              -- the copy's own folder
 ```
@@ -411,6 +581,7 @@ with. Placing reads one **into a copy that already exists** — pasting a prefab
 into a level somebody is editing:
 
 ```lua
+-- server
 local prefab = doorway:Serialize()          -- any pack: a copy's or a scene's
 
 local made = room:Place(prefab)             -- server side, returns the new objects
@@ -429,6 +600,7 @@ A client places through a transaction, which makes it one create per object and
 so needs create rights and nothing more:
 
 ```lua
+-- client
 Prism.Transactions.new():Place(prefab, room.Id):Commit()
 ```
 
@@ -440,6 +612,7 @@ the transaction form works on a local copy as well, and is the one to reach for
 when the placement should undo as a single step:
 
 ```lua
+-- client, into a copy it owns
 Prism.Transactions.new():Place(prefab, sandbox.Id):Commit()
 ```
 
@@ -448,6 +621,7 @@ Prism.Transactions.new():Place(prefab, sandbox.Id):Commit()
 A copy can leave the world without being unloaded:
 
 ```lua
+-- server, or a client on a copy it owns
 room:Suspend()     -- out of the registries, folder out of the tree, objects held
 room:Revive()      -- back exactly as it was
 room:Dispose()     -- the end of a suspended copy: its objects, and its folder
@@ -470,6 +644,7 @@ holds them in between.
 you the committed pack to store wherever you like.
 
 ```lua
+-- server
 room:Commit()
 DataStore:SetAsync(key, buffer.tostring(Rooms:Serialize()))
 
@@ -534,6 +709,7 @@ players it admits its name, and sends them alone the objects whose type has
 `Replicate = "Admitted"`.
 
 ```lua
+-- server
 local Workshop = Prism.Scenes.new({
     Name = "Workshop",
     Private = true,
@@ -585,6 +761,7 @@ still owns the copy and its data, but it clones no templates, and each admitted
 client draws the copy itself from the template that came with the registry.
 
 ```lua
+-- server
 local Draft = Prism.Scenes.new({Name = "Draft", Admitted = {editorUserId}})
 local copy = Draft:Open()
 copy:Create(Crate, {[Tint] = Color3.new(1, 0, 0)})
@@ -600,6 +777,7 @@ Each client draws into a folder of its own, built where the server builds one
 for a copy it loads. Reparent the folder to put the copy somewhere else:
 
 ```lua
+-- client
 Prism.Scenes:OnCopyAdded(function(copyId, sceneId, folder)
     if folder then
         folder.Parent = player.PlayerGui   -- a scene made of interfaces
@@ -621,6 +799,7 @@ difference: nothing in it replicates, so its objects apply their own edits
 instead of asking for them. There is nobody to ask and nothing to roll back to.
 
 ```lua
+-- client
 local Sandbox = Prism.Scenes.new({Name = "Sandbox"})
 local preview = Sandbox:Load()
 
@@ -645,6 +824,7 @@ has already happened from one that can still be refused.
 ### Handing one to the server
 
 ```lua
+-- client
 preview:Commit()
 local ok, sceneId = Sandbox:Push("Room 4")
 ```
@@ -676,6 +856,7 @@ One packet up, one permission pass, and one thing for an editor's history to
 record.
 
 ```lua
+-- client (or server, on a player's behalf)
 local edit = Prism.Transactions.new()
 
 edit:Create(Crate, {[Health] = 50}, room.Id)
@@ -702,9 +883,9 @@ transaction while the world has not moved yet, and an operation that could not
 even be built — an unknown property, a target that is not an object — makes
 `Commit` refuse rather than send what is left.
 
-This is also the only way a client creates an object. `Objects.new` is server
-side, and until a channel asked for a create, `CanCreate` was a permission
-nothing could reach.
+This is also the only way a client creates an object in a scene the server
+owns: `Objects.new` is server side, and a transaction's `Create` is what a
+role's `CanCreate` governs.
 
 ### Not only for talking to the server
 
@@ -713,9 +894,9 @@ spot**. Same builder, same operations; `Commit` sees what it is about and either
 sends it or does the work, and a local commit does not yield because there is
 nobody to ask.
 
-That is what batching a local edit looks like. Without it every set, create and
-destroy in a scene the client owns was its own apply and its own undo step, so
-undoing a pasted prefab took it apart one object at a time.
+That is how a local edit is batched: every set, create and destroy in it is
+one apply and one undo step, so undoing a pasted prefab takes it away whole
+rather than one object at a time.
 
 ```lua
 -- A whole prefab into a copy this client owns: one edit, one undo step.
@@ -734,9 +915,9 @@ a rollback if it throws partway, and one entry in the history.
 ### Holds, and copies
 
 `Lock` and `Unlock` put taking a hold in the same list as the edit that needs
-it. Locking three objects and moving them used to be two round trips, with the
-lock able to come back refused *after* the edit was built; now it is one packet
-that either gets all three and moves them or does neither. Locks are taken
+it. Locking three objects and moving them is one packet that either gets all
+three and moves them or does neither, rather than a lock that can come back
+refused after the edit was already built. Locks are taken
 before everything else in the transaction and released after — hold these, do
 this, let go. Refused for objects in scenes the client owns, which are never
 held: nobody else can touch them.
@@ -776,6 +957,7 @@ destroyed by the same transaction that changed it is announced once, as gone.
 Undo and redo, per player. The client drives it:
 
 ```lua
+-- client
 Prism.History:Undo()      -- yields while the server answers for its half
 Prism.History:Redo()
 Prism.History:CanUndo()
@@ -785,9 +967,9 @@ Prism.History:OnChange(function() toolbar:Refresh() end)
 A step is one committed transaction, one create or destroy, or a run of
 `Object:Set` calls to one property with no pause longer than a second, so a drag
 undoes as one. A drag written with `ClientSided` is one step however long it
-paused, because only its closing set is an edit. A copy loaded or unloaded by a transaction is part of its step:
-undoing a load withdraws the copy it made, and undoing an unload puts back the
-one it took, objects and values and ids intact. Holds are not recorded — a lock
+paused, because only its closing set is an edit. A copy loaded or unloaded by a
+transaction is part of its step: undoing a load withdraws the copy it made, and
+undoing an unload puts back the one it took, objects and values and ids intact. Holds are not recorded — a lock
 is not a change to the world, and taking somebody's hold back is not an undo.
 
 Each stack keeps the last 100 steps. That count is **per player and across every
@@ -800,14 +982,17 @@ the server holds on to.
 Steps are also capped by **what they hold**: at most 10,000 objects kept alive
 between them on each half. A step holds one object per create or destroy, and
 every object in a copy it loaded or unloaded, so a hundred unloads of a large
-room no longer keep a hundred large rooms in memory. The oldest steps go until
-the rest fit, except the newest, which is kept however much it holds. Both
-limits can be changed; each takes effect at the next step recorded:
+room cannot keep a hundred large rooms in memory. The oldest steps go until the
+rest fit, except the newest, which is kept however much it holds.
+
+Both limits can be changed on each side, and take effect at the next step
+recorded. Setting them on the server applies to every player's stack; setting
+them on a client applies to that client's own half:
 
 ```lua
-Prism.History:SetLimits({Steps = 50, Objects = 2000})          -- client half
-Prism.History:SetLimits({Steps = 50, Objects = 2000})          -- server, every player
-Prism.History:GetLimits()                                       -- {Steps = ..., Objects = ...}
+-- server or client
+Prism.History:SetLimits({Steps = 50, Objects = 2000})
+Prism.History:GetLimits()     -- {Steps = 50, Objects = 2000}
 ```
 
 ### A destroy is deferred, not undone
@@ -830,11 +1015,12 @@ destroyed, because redo has to bring back *that* object.
 
 So something has to decide when a destroy is finally a destroy. That is
 `Clear`, and it runs in exactly three places: when a new action forks the redo
-stack a step was sitting on, when a step falls off the end past the 100-step
-limit, and when the player leaves (or `History:Clear()` is called). A step with
-nothing holding it lets go of whatever it was keeping, and only then are the
-values gone. **Nothing keeping it at all** — a game that never requires
-`Prism.History` — means a destroy is as immediate as it ever was.
+stack a step was sitting on, when a step falls off the end of the stack past
+either limit — the step count or the object count — and when the player leaves
+(or `History:Clear()` is called). A step with nothing holding it lets go of
+whatever it was keeping, and only then are the values gone. With **nothing
+keeping it at all** — a game that never requires `Prism.History` — a destroy is
+immediate.
 
 ### Where the steps live
 
@@ -854,8 +1040,7 @@ back its stacks, which the client reconciles against. A new action on either
 side forks the redo stack on both.
 
 Recorded server side: every transaction a player commits, every `Object:Set`
-through the single channel, and every lone `Object:Destroy` — which used to be
-the one edit nothing could take back. Commit a transaction with `Untracked = true`
+through the single channel, and every lone `Object:Destroy`. Commit a transaction with `Untracked = true`
 to keep it out. Recorded client side: creates, destroys and sets in scenes the
 client owns. A copy reading its own pack back is not an action and is not
 recorded.
@@ -874,6 +1059,7 @@ Not everything an editor does is an object. Push a step of your own and it sits
 in the same order, so one Ctrl+Z reaches it where it happened:
 
 ```lua
+-- client; on the server, History:Push(player, {...})
 Prism.History:Push({
     Undo = function() camera:GoTo(before) end,
     Redo = function() camera:GoTo(after) end,
@@ -882,11 +1068,12 @@ Prism.History:Push({
 
 The same three verbs every step has. `Clear` is optional and is the one to read
 twice: it runs when the step can no longer be reached — forked off the redo
-stack, pushed past the limit, or the player leaving — and is where an action
+stack, pushed past either limit, or the player leaving — and is where an action
 holding something of its own lets go of it, exactly as Prism's own steps
 finally destroy the objects they were keeping.
 
 ```lua
+-- client
 local snapshot = Terrain:CopyRegion(region)
 
 Prism.History:Push({
@@ -943,6 +1130,7 @@ Client side, and purely local: the server never hears about it. Entries are
 pruned on read, so an object destroyed by someone else drops out on its own.
 
 ```lua
+-- client
 Prism.Selection:Set({objectA, objectB})
 Prism.Selection:Add(runtimeId)
 Prism.Selection:Contains(objectA)
@@ -965,6 +1153,7 @@ and properties they reach, and that scene's capabilities. A player with no
 rights on a scene can do nothing there.
 
 ```lua
+-- server
 Prism.Permissions:Register("Builder", {
     Global = {Rate = 120, CanPush = true},  -- actions per second, per operation
     Scene = {
@@ -994,6 +1183,7 @@ Nothing is saved: who owns a level is your game's own record, so hand it over
 when the scene is made.
 
 ```lua
+-- server
 local level = Prism.Scenes.new({Name = "Level 4", Rights = {[ownerUserId] = "Builder"}})
 ```
 
@@ -1023,6 +1213,7 @@ boundary freezes and a new tail opens. Records never move between shards, and
 edits to different shards do not contend with each other.
 
 ```lua
+-- server
 local db = Prism.Database.new({
     Key = "Levels",
     InitialMetadata = {Prism.Properties.new(Title), Prism.Properties.new(Plays)},
@@ -1041,6 +1232,7 @@ which lets a page stop as soon as it is full — page 1 of a newest-first browse
 reads one shard however many exist.
 
 ```lua
+-- server
 db:RegisterCache("Newest", {IdOrdered = "Desc", PageSize = 50})
 
 local page = db:Get("Newest", 1)
@@ -1052,6 +1244,7 @@ record in the last shard can rank first, so stopping early would return "the
 most played level among the oldest 50,000" and look plausible while being wrong.
 
 ```lua
+-- server
 db:RegisterCache("Popular", {
     Sort = function(a, b) return a[2].Value > b[2].Value end,
     PageSize = 50,
@@ -1064,6 +1257,7 @@ db:RegisterCache("Popular", {
 Search by name and list by creator both go through it.
 
 ```lua
+-- server
 db:Find(function(record)
     return string.find(string.lower(record[1].Value), query, 1, true) ~= nil
 end, 50)
@@ -1095,6 +1289,7 @@ from the manifest order, so they match on both sides.
 ```
 
 ```lua
+-- server; a client fires and invokes the same channel object
 local Move = Prism.Networking:Get("MyFeature.Move")
 Move:Fire(player, runtimeId, Vector3.new(1, 2, 3))  -- server, targeted
 Move:FireAll(runtimeId, Vector3.new(1, 2, 3))
@@ -1111,6 +1306,45 @@ reuse a removed channel's slot during a live rollout.
 
 Invokes are client to server only. `InvokeClient` parks the calling server thread
 until the client answers, and a client that never answers holds it forever.
+
+## API at a glance
+
+What each module offers, and on which side. **S** is server, **C** is client.
+The sections above explain each one.
+
+| Module | Call | Side |
+|---|---|---|
+| `Properties` | `:Register(config)`, `:Unregister(id)` | S |
+| | `:GetRegistered()`, `:GetRegistry(id)`, `.new(id)`, `:Layout(ids, includeHidden?)` | S C |
+| `CustomEnum` | `:Register(name, options)`, `:GetEnum(name)`, `:GetRegistered()` | S C |
+| `Objects` | `.new(type, values?, copy?)`, `:Register(config)`, `:Unregister(id)` | S |
+| | `:Get(runtimeId)`, `:GetWorkspace()`, `:GetRegistered()`, `:GetRegistry(id)`, `:Resolve(copy, localId)`, `:Split(persistentId)` | S C |
+| | `:Duplicate(object, copy?)`, `:DuplicateGroup(objects, copy?)` | S C (client: scenes it owns) |
+| | `:Lock(objects)`, `:Unlock(objects)`, `:GetLock(object)`, `:IsLocked(object)` | S C (server: `:Lock(objects, holder)`) |
+| | `:GetHolder(object)`, `.OnPlayerEdited(fn)` | S |
+| | `:OnLockChanged(fn)`, `:OnEdited(fn)`, `:FromInstance(instance)` | C |
+| | `:OnAdded(fn)`, `:OnRemoved(fn)`, `.OnRetired(fn)` | S C |
+| | `.Suspend(object)`, `.Revive(object)`, `.Dispose(object)`, `.Retire(...)` | S C |
+| an object | `:Set(property, value, clientSided?)`, `:Get(property)`, `:GetProperty(property)`, `:OnChange(property, fn)`, `:Destroy()` | S C |
+| `Scenes` | `.new(config)`, `.fromBuffer(config, pack)`, `:Get(name)`, `:GetById(id)`, `:GetRegistered()` | S C |
+| | `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
+| | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
+| a scene | `:Load(parent?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
+| | `:Open()`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
+| | `:Push(name)` | C |
+| a copy | `:Create(type, values?)`, `:Place(pack)`, `:Find(localId)`, `:GetObjects()`, `:Serialize()`, `:Commit()`, `:Unload()`, `:Suspend()`, `:Revive()`, `:Dispose()` | S C |
+| `Transactions` | `.new()`, then `:Create`, `:Duplicate`, `:DuplicateGroup`, `:Place`, `:Set`, `:Destroy`, `:Lock`, `:Unlock`, `:Load`, `:Unload`, `:Commit()` | S C |
+| | `:OnCommitted(fn)` | C |
+| | `.OnApplied(fn)` | S |
+| `History` | `:Undo()`, `:Redo()`, `:CanUndo()`, `:CanRedo()`, `:Clear()`, `:Push(action)` | S C (server: the player first) |
+| | `:SetLimits(limits)`, `:GetLimits()` | S C |
+| | `:OnChange(fn)` | C |
+| `Selection` | `:Set`, `:Add`, `:Remove`, `:Contains`, `:Clear`, `:Get`, `:Query(fn)`, `:OnChange(fn)` | C |
+| `Permissions` | `:Register(name, role)`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability`, `:RevokeCapability`, `:Get(who)` | S |
+| | `:Can(...)`, `:Has(...)` | S C (server: the player first) |
+| | `:Get()`, `:GetOn(scene)`, `:OnChange(fn)` | C |
+| `Database` | `.new(config)`, then `:Create`, `:Edit`, `:Delete`, `:GetById`, `:Get(cache, page)`, `:Find(fn, count)`, `:RegisterCache(name, config)` | S |
+| `Networking` | `:Get(name)`, then `:Fire`, `:FireAll`, `:Invoke`, `.OnInvoke` | S C |
 
 ## Storage format
 
@@ -1134,8 +1368,8 @@ length-prefixed bytes.
 Numbers pick their encoding from the **value**, not the schema — a whole number
 becomes a varint, a fractional one that survives f32 becomes 4 bytes, anything
 else 8. Exact to 2^53. That is why changing `AllowDecimals` cannot corrupt
-anything, and why user ids and unix timestamps are no longer mangled by f32's
-24-bit mantissa. Setting `Precision` quantises values before they are encoded,
+anything, and why user ids and unix timestamps are not mangled by f32's 24-bit
+mantissa. Setting `Precision` quantises values before they are encoded,
 which makes them far more likely to fit the 4-byte form.
 
 Ids, lengths and counts are LEB128 varints: one byte below 128, two below 16384.
@@ -1177,6 +1411,19 @@ Objects and packs carry a format version, and readers refuse anything newer
 than they understand rather than misreading it. Individual metadata records do
 not — the version lives on the pack that contains them.
 
+## Contributing
+
+Contributions are welcome: open a pull request against `main`.
+
+- One change per pull request, on a branch named `feat/...`, `fix/...` or
+  `docs/...`, with commits written as `type(scope): what changed`.
+- Update this README in the same pull request as any change to the API.
+- Run `scripts/analyze.sh`, `node scripts/check-channels.js` and
+  `scripts/test-pure.sh` before opening it; CI runs the same three on every
+  push.
+- For anything bigger than a fix, open an issue first, or read `ROADMAP.md`,
+  which lists what is planned and how the work is done.
+
 ## Tests
 
 Part of the suite needs no Roblox at all:
@@ -1186,22 +1433,22 @@ scripts/test-pure.sh
 ```
 
 `tests/Pure.luau` covers Varint, Handles, IdPool, the codecs, Try, CustomEnum,
-permission resolution and property layout -- everything that needs no DataModel.
+permission resolution and property layout: everything that needs no DataModel.
 Much of it is the floor the format stands on: every id, length and count in a
 pack is a varint, every saved object is addressed by a persistent id, every
-registry id comes out of a pool. 335 checks, including every byte length boundary this file
+registry id comes out of a pool. It checks every byte length boundary this file
 claims for varints, that `PersistentId` really is `Scene * 2^32 + Local` across
 the 48 bits it uses, that every codec that does not need a Roblox type round
 trips at its boundaries, that a blacklist beats a whitelist, and that a
-non-recycling pool never hands out a released id twice. It fetches a Luau CLI into
-`.tooling/`; CI runs it on every push.
+non-recycling pool never hands out a released id twice. It fetches a Luau CLI
+into `.tooling/`; CI runs it on every push.
 
 The rest needs a DataModel, players and replication, so Studio is the only place
 it runs.
 
 The tests run the unit suite on the server and the replication, permissions,
-optimistic-edit, transaction and lifecycle suite on one client. Sync the files into Studio
-with Roblox Script Sync using this layout:
+optimistic-edit, transaction and lifecycle suite on one client. Sync the files
+into Studio with Roblox Script Sync using this layout:
 
 ```text
 ReplicatedStorage
@@ -1215,19 +1462,21 @@ StarterPlayer
     └── Harness                    <- tests/Harness.luau (ModuleScript)
 ```
 
-Both suites reach the harness with `require("./Harness")`, so it has to be a
-sibling of each one rather than living in a shared folder.
+Here the whole repo is synced rather than just `src/`, so the suites require
+`ReplicatedStorage.Prism.src`. Both reach the harness with `require("./Harness")`,
+so it has to be a sibling of each one rather than living in a shared folder.
 
 Then use **Test > Play** with one player. The server creates a set of
 integration fixtures and intentionally keeps them alive so the client can
-validate both live delivery and late-join replay. A failed test prints its group and
-assertion, then fails the corresponding script.
+validate both live delivery and late-join replay. A failed test prints its group
+and assertion, then fails the corresponding script.
 
-The database tests write to real DataStore and MemoryStore keys, so they need
-Studio API access enabled. They are currently switched on by `RUN_DATABASE` near
-the top of `tests/Server.server.luau`; set it to `false` to skip them. The suite
-uses the `PrismSelfTest` key, and its cleanup step is commented out, so records
-accumulate across runs and ids keep climbing rather than restarting at 1.
+> **Warning: the database tests write to real data stores.** They use the
+> DataStore and MemoryStore key `PrismSelfTest`, need Studio API access enabled,
+> and are **on by default**: `RUN_DATABASE` near the top of
+> `tests/Server.server.luau` switches them. Their cleanup step is commented out,
+> so records pile up across runs and ids keep climbing rather than restarting at
+> 1. Set `RUN_DATABASE = false` in any place whose data stores you care about.
 
 ## Type checking
 
@@ -1240,9 +1489,14 @@ scripts/analyze.sh
 
 It fetches a pinned `luau-lsp` and the Roblox API definitions into `.tooling/`
 and runs the analyser over `src/` and `tests/`. Nothing has to be installed
-first, and nothing is left behind that `.gitignore` does not already cover. The
-same script is the whole of CI, so a push is checked exactly the way a local run
-is.
+first, and nothing is left behind that `.gitignore` does not already cover. CI
+runs this script, `check-channels.js` and `test-pure.sh`, so a push is checked
+exactly the way a local run is.
+
+The tests are only lightly checked. Without a Rojo sourcemap the analyser cannot
+resolve `ReplicatedStorage.Prism.src`, so everything the suites get from Prism
+reads as `any`, and a mistake in how a test calls Prism shows up when the test
+runs rather than here. `ROADMAP.md` has the reasoning for leaving it that way.
 
 It fails when a file grows a diagnostic it did not have before, rather than
 when any diagnostic exists at all. `.analyze-baseline.txt` records the count
@@ -1253,8 +1507,8 @@ what is left is the default type solver reading code written for the new one:
 `type function` and `read` fields are new-solver features, `for _, X in List or
 {}` is a union the old solver will not iterate, and `pcall(fn)` binding two
 results is flagged whenever `fn` returns nothing. None of those are runtime
-faults, and the new solver reports 269 problems where the default one reports
-91 -- so switching would cost more than it bought. Real bugs still get caught,
+faults, and the new solver reports far more problems than the default one, so
+switching would cost more than it bought. Real bugs still get caught,
 without the standing noise having to be cleared first.
 
 `scripts/analyze.sh --raw` prints everything, baseline or not.
@@ -1262,12 +1516,9 @@ without the standing noise having to be cleared first.
 `node scripts/check-channels.js` is the other half, and it checks what the
 analyser structurally cannot. `Fire`, `FireAll` and `Invoke` all take `...:
 any`, so sending a channel the wrong number of arguments type checks cleanly
-and then errors at runtime -- the failure this file has warned about from the
-beginning, met until now by grepping for every caller by hand. The script does
-that grep across all three call forms, the `Audience.Fire` paths included, and
-CI runs it.
-
-It found `Objects.LocksChanged` being sent two arrays where it declares three.
+and then errors at runtime. The script finds every caller across all three
+call forms, the `Audience.Fire` paths included, and checks each against the
+count the channel declares.
 
 This is the check the Studio pass cannot do cheaply. A wrong argument count on a
 channel, a function that returns one value where two are read, a field that
