@@ -55,7 +55,15 @@ const History = {}
 --
 -- The oldest goes when a new one arrives past this, and goes for good:
 -- whatever it was holding is disposed.
-const LIMIT = 100
+local LIMIT = 100
+
+-- Objects the kept steps may hold between them, alongside the count above. A
+-- step can hold a whole withdrawn copy -- every object in it, and every part --
+-- so a hundred steps was a limit on nothing: a hundred unloads of a large room
+-- kept a hundred large rooms alive. The oldest steps go until what is left fits,
+-- except the newest, which is kept however much it holds: an undo that cannot
+-- take back the thing just done is worse than one room too many in memory.
+local HELD_LIMIT = 10000
 
 -- How long a run of single sets to one property may pause and still count as
 -- one step. A drag sets every frame; two edits a few seconds apart are two
@@ -118,6 +126,9 @@ type Step = {
     -- The property a run of single sets is still building, while the step is
     -- on top and recent enough to keep merging into.
     Run: {Target: ObjectTypes.RuntimeId, Property: PropertyTypes.PropertyIdentifier, At: number}?,
+
+    -- Objects the step keeps alive, counted against HELD_LIMIT. See Weigh.
+    Weight: number?,
 }
 
 type Shelf = {
@@ -239,16 +250,51 @@ const function ClearAll(Steps: {Step})
     table.clear(Steps)
 end
 
+-- How many objects a step keeps alive: one per create or destroy -- whichever
+-- way the step was last applied, one of the two is holding a suspended object
+-- -- and every object in a copy it loaded or unloaded. Weighed once, when the
+-- step is recorded; objects created in a loaded copy afterwards are steps of
+-- their own and weigh there.
+const function Weigh(Step: Step): number
+    local Held = 0
+
+    for _, Entry in Step.Entries do
+        const Copy = Entry.Copy
+        if Copy then
+            if Copy.Suspended then
+                Held += #Copy.Suspended
+            else
+                for _ in Copy.Objects do
+                    Held += 1
+                end
+            end
+        elseif Entry.Kind == "Create" or Entry.Kind == "Destroy" then
+            Held += 1
+        end
+    end
+
+    return Held
+end
+
 const function Push(Plr: Player, Shelf: Shelf, Step: Step)
+    Step.Weight = Weigh(Step)
     table.insert(Shelf.Undo, Step)
 
-    -- Past the end of what is kept. The step is gone for good, so it lets go of
-    -- what it was holding.
-    if #Shelf.Undo > LIMIT then
+    local Held = 0
+    for _, Kept in Shelf.Undo do
+        Held += Kept.Weight or 0
+    end
+
+    -- Past the end of what is kept, by count or by what the steps hold. The
+    -- step is gone for good, so it lets go of what it was holding.
+    while #Shelf.Undo > 1 and (#Shelf.Undo > LIMIT or Held > HELD_LIMIT) do
         const Oldest = table.remove(Shelf.Undo, 1)
-        if Oldest then
-            Clear(Oldest)
+        if not Oldest then
+            break
         end
+
+        Held -= Oldest.Weight or 0
+        Clear(Oldest)
     end
 
     -- A new action forks the history: everything that was undone is now
@@ -550,6 +596,23 @@ end
 function History:CanUndo(Plr: Player): boolean
     const Shelf = Shelves[Plr]
     return Shelf ~= nil and #Shelf.Undo > 0
+end
+
+-- How much each player's stack keeps: Steps by count, Objects by what the
+-- steps hold between them. Either may be left out to keep what it was. Takes
+-- effect at the next step recorded; nothing already kept is dropped by asking.
+function History:SetLimits(Limits: {Steps: number?, Objects: number?})
+    if Limits.Steps and Limits.Steps >= 1 then
+        LIMIT = math.floor(Limits.Steps)
+    end
+
+    if Limits.Objects and Limits.Objects >= 0 then
+        HELD_LIMIT = math.floor(Limits.Objects)
+    end
+end
+
+function History:GetLimits(): {Steps: number, Objects: number}
+    return {Steps = LIMIT, Objects = HELD_LIMIT}
 end
 
 function History:CanRedo(Plr: Player): boolean
