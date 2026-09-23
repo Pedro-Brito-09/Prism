@@ -21,10 +21,10 @@ jobs:
           key: tooling-luau-lsp-1.69.0-luau-0.738
 
       - name: Type check
-        run: scripts/analyze.sh
+        run: bash scripts/analyze.sh
 
       - name: Channel arity
         run: node scripts/check-channels.js
 
       - name: Tests that do not need Roblox
-        run: scripts/test-pure.sh
+        run: bash scripts/test-pure.sh
