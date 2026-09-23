@@ -116,24 +116,6 @@ produced it, with anything that is a decision marked *Ask*.
       already a different kind of thing (the value type, `"Number"`), so
       `TypeId` or `Registry` may be less confusing next to it.
 
-- [ ] **The tests are not type checked.** `scripts/analyze.sh` cannot resolve
-      `ReplicatedStorage.Prism.src` without a Rojo sourcemap, so every reference
-      to Prism inside `tests/` is `any` and a typo in five and a half thousand
-      lines of never-run test code would not be caught -- in the suite that is
-      about to be run for the first time.
-
-      `rojo sourcemap default.project.json` fixes it, and `--sourcemap` then
-      reports 674 diagnostics in `tests/` and 77 rather than 91 in `src/`,
-      because the requires resolve. Almost all of the 674 are nil safety:
-      the tests call `Scene:Load()` and use the result without checking, and
-      `Load` returns `SceneInstance?`.
-
-      *Ask*: whether to take the sourcemap on. It means fetching Rojo in CI as
-      well, and a baseline dominated by noise. It was left off because a CI that
-      fails on its first run for a reason nobody trusts is worse than one that
-      checks less, and because whether those nil checks belong in the tests is
-      a style call that is not mine to make.
-
 - [ ] **An unknown object type is dropped on restore.** `Objects.restore` warns
       and returns nil when the type is not registered, so the object vanishes
       from the copy -- and committing that copy afterwards writes it out of the
@@ -158,6 +140,15 @@ produced it, with anything that is a decision marked *Ask*.
       in it and every part. A hundred of those is unbounded, and the whole point
       of the suspend-rather-than-destroy design is that a step keeps things
       alive. A byte or object budget alongside the count would cap it.
+
+Also decided against, for now: **type checking `tests/`.** It needs a Rojo
+sourcemap (`rojo sourcemap default.project.json`, then `--sourcemap`), which
+resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
+safety -- the tests use `Scene:Load()` without checking the `SceneInstance?` it
+returns. Pedro's call was no: it means fetching Rojo in CI as well, and a
+baseline dominated by noise. `src/` is checked either way; a typo in the tests
+shows up when they are run. Revisit if the suites start failing for reasons a
+checker would have caught.
 
 Deliberately not queued: object hierarchy and grouping, and anything spatial
 (bounding boxes, region queries, box select). A level editor generally wants
