@@ -370,12 +370,23 @@ fails if anyone else holds any of the objects named. Releasing needs no rights.
 A transaction can take and release them too, in the same list as the edit they
 are for — see Transactions.
 
-**A holder need not be a player.** `Objects:Lock(list, holder)` takes a Player, a
-user id, or anything else at all — a module, a table, a string naming a tool —
-so the server can hold an object while it animates one without inventing a
-player to hold it with. `GetHolder` gives back whatever it was; `GetLock` gives
-the user id where the holder is a person and nil where it isn't, which is why
-`IsLocked` exists to answer the other half.
+**The server can hold a lock itself.** On the server, `Objects:Lock(list,
+holder)` takes a Player, a user id, or any other value naming who holds it — a
+string like `"DoorAnimator"`, a module, a table. That lets a system keep players
+off an object while it works on it, such as animating a door open, with no
+player involved:
+
+```lua
+-- server
+Prism.Objects:Lock(door, "DoorAnimator")
+-- animate the door; no player can edit it meanwhile
+Prism.Objects:Unlock(door)
+```
+
+`GetHolder(object)` gives back whatever holds it. `GetLock(object)` gives only a
+player's user id, and `nil` both when nothing holds the object and when the
+holder isn't a player — so use `IsLocked(object)` to ask whether anything holds
+it at all.
 
 A lock is released when its object goes, or when its holder **leaves**, is
 **evicted from the scene** or **loses edit rights on it** — any of those would
