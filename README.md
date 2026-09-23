@@ -1,3 +1,6 @@
+-# this originally wasn't going to be vibe coded but it got too big and I lowkey didn't spend much time debugging
+-# a lot of stuff still made by hand by me :)
+
 # Prism
 
 Prism is a framework made to facilitate the creation of level editors for roblox games.
