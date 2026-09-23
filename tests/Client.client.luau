@@ -831,6 +831,48 @@ T:Test("a copy serialises and reads back under the same ids", function()
     Sandbox:Destroy()
 end)
 
+-- A level written by a build that had a type and a property this one does not.
+T:Test("what this build cannot read survives a local save", function()
+    const Compressor = require(PRISM.Compressor)
+    const Foreign = Compressor:CompressScene(2, {
+        {
+            __type = "DecompressedObject",
+            LocalId = 1,
+            Registry = BareId,
+            Properties = {[TitleId] = "Known"},
+            Unknown = {[99991] = Compressor:CompressValue("Text", "FromElsewhere")},
+        },
+        {
+            __type = "DecompressedObject",
+            LocalId = 2,
+            Registry = 99990,
+            Properties = {[TitleId] = "Stranger"},
+        },
+    } :: any)
+
+    const Sandbox = Scenes.fromBuffer({Name = "ClientForeign"}, Foreign)
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    T:Eq(#Copy:GetObjects(), 1, "only the known object was built")
+    T:Eq(#Copy.Unknown, 1, "the other was kept")
+
+    const Obj = Copy:Find(1)
+    T:Ok(Obj and Obj.Unknown and Obj.Unknown[99991], "and so was the unreadable value")
+
+    Copy:Commit()
+
+    const _, Back = Compressor:DecompressScene(Sandbox:Serialize())
+    T:Eq(#Back, 2, "both objects are still in the pack")
+    T:Eq(Back[2] and Back[2].Registry, 99990, "the unknown one under its own type")
+    T:Ok(Back[1] and Back[1].Unknown and Back[1].Unknown[99991], "the unreadable value too")
+
+    Sandbox:Destroy()
+end)
+
 T:Test("loading twice gives two copies that do not touch each other", function()
     const Sandbox = Scenes.new({Name = "ClientTwice"})
     if not Sandbox then

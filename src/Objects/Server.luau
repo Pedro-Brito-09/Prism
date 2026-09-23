@@ -1070,13 +1070,16 @@ function Objects.restore(Target: any, Decompressed: any, Announce: boolean?): Ob
         return nil
     end
 
-    return Construct(
+    const Obj = Construct(
         Decompressed.Registry,
         Decompressed.Properties,
         ResolveInstance(Target),
         Decompressed.LocalId,
         Announce == true
     )
+
+    Obj.Unknown = Shared.Leftovers(Obj, Decompressed)
+    return Obj
 end
 
 -- A new object of the same type holding the same values: in the copy the
@@ -1087,7 +1090,12 @@ function Objects:Duplicate(Obj: Object, Target: any?): Object?
         return nil
     end
 
-    return Objects.new(Obj.Registry, Shared.Snapshot(Obj), Target or SceneRegistry.Instances[Obj.InstanceId])
+    const New = Objects.new(Obj.Registry, Shared.Snapshot(Obj), Target or SceneRegistry.Instances[Obj.InstanceId])
+
+    -- Kept values travel with the rest, or duplicating a room and deleting the
+    -- original would lose them as surely as the save used to.
+    New.Unknown = if Obj.Unknown then table.clone(Obj.Unknown) else nil
+    return New
 end
 
 -- Several objects duplicated as one thing, which is not the same as duplicating
@@ -1123,6 +1131,8 @@ function Objects:DuplicateGroup(List: {Object}, Target: any?): {Object}
             Target or SceneRegistry.Instances[Obj.InstanceId],
             false
         )
+
+        New.Unknown = if Obj.Unknown then table.clone(Obj.Unknown) else nil
 
         table.insert(Sources, Obj)
         table.insert(Made, New)

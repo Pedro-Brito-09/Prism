@@ -281,7 +281,12 @@ const function __instance_objects(self: SceneInstance): {any}
 end
 
 const function __instance_serialize(self: SceneInstance): buffer
-    const List = __instance_objects(self)
+    const List: {any} = __instance_objects(self)
+
+    -- Objects of a type this build does not have, back in beside the rest.
+    for _, Kept in (self :: any).Unknown do
+        table.insert(List, Kept)
+    end
 
     -- Sorted by local id so the same copy always produces the same bytes, for
     -- the same reason the server sorts: hash order would make two identical
@@ -290,6 +295,13 @@ const function __instance_serialize(self: SceneInstance): buffer
     table.sort(List, function(A, B)
         return A.LocalId < B.LocalId
     end)
+
+    -- Each kept record as the bytes it was read from, untouched.
+    for Index, Entry in List do
+        if Entry.__type == "DecompressedObject" then
+            List[Index] = Entry.Source
+        end
+    end
 
     return Compressor:CompressScene(self.Owner.LastId, List :: any)
 end
@@ -402,6 +414,9 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
+    -- Decoded records of objects whose type is not registered. See __load.
+    Instance_.Unknown = {}
+
     Instance_.Create = __create
     Instance_.Place = __place
     Instance_.Find = __find
@@ -447,6 +462,13 @@ const function __load(self: any, Parent: Instance?): any
     self.LastId = math.max(self.LastId, LastId :: number)
 
     for _, Object in Decompressed :: {any} do
+        -- Kept rather than dropped, exactly as on the server; see its Read.
+        if not Objects:GetRegistry(Object.Registry) then
+            Logger:Warn(`Local scene {self.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
+            table.insert(Instance_.Unknown, Object)
+            continue
+        end
+
         Objects.restore(Instance_, Object)
     end
 

@@ -78,6 +78,12 @@ export type SceneInstance = {
     -- live copy of the same scene too.
     ByLocal: {[Handles.LocalId]: ObjectTypes.Object},
 
+    -- Objects in the pack whose type this build does not have, as decoded
+    -- records. Not objects: nothing finds, draws or replicates them. They are
+    -- here so Serialize and Commit write them back where they were rather than
+    -- deleting them from the level.
+    Unknown: {any},
+
     Create: (
         self: SceneInstance,
         Reference: ObjectTypes.ObjectRegistry | ObjectTypes.ObjectIdentifier,

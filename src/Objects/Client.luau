@@ -724,7 +724,9 @@ function Objects.restore(Target: any, Decompressed: any): Object?
         return nil
     end
 
-    return Construct(Decompressed.Registry, Decompressed.Properties, Target, Decompressed.LocalId)
+    const Obj = Construct(Decompressed.Registry, Decompressed.Properties, Target, Decompressed.LocalId)
+    Obj.Unknown = Shared.Leftovers(Obj, Decompressed)
+    return Obj
 end
 
 -- A new object of the same type holding the same values, in the same copy of a
@@ -742,7 +744,9 @@ function Objects:Duplicate(Obj: Object): Object?
         return nil
     end
 
-    return Construct(Obj.Registry, Shared.Snapshot(Obj), Live, nil)
+    const New = Construct(Obj.Registry, Shared.Snapshot(Obj), Live, nil)
+    New.Unknown = if Obj.Unknown then table.clone(Obj.Unknown) else nil
+    return New
 end
 
 -- The group form, for scenes this client owns. References that point inside the
@@ -766,6 +770,7 @@ function Objects:DuplicateGroup(List: {Object}): {Object}
         end
 
         const New = Construct(Obj.Registry, Shared.Snapshot(Obj), Live, nil)
+        New.Unknown = if Obj.Unknown then table.clone(Obj.Unknown) else nil
 
         table.insert(Sources, Obj)
         table.insert(Made, New)

@@ -105,6 +105,8 @@ counts as `"Admitted"`, with a warning.
 `Objects:Unregister(id)` drops an object type on the server and on every client.
 It's refused while any object of the type is live, and it releases the
 properties the type was holding. Like property ids, the id is never reused.
+Saved objects of an unregistered type are kept as they were and written back —
+see [Storage format](#what-this-build-cannot-read-is-kept).
 
 `Objects:OnAdded` and `Objects:OnRemoved` fire on **both sides** for every
 object that appears or goes, so neither a panel nor a server script has to poll
@@ -1091,6 +1093,31 @@ reason: a registry id is written into every saved object as its type. Nor are
 scene ids, which live in the high bits of every persistent id, or an object's
 local id within its scene. Runtime ids are the exception, and only because they
 are never written down at all.
+
+### What this build cannot read is kept
+
+Skipping a record precisely is only half of it: a save that dropped what it
+skipped would delete it at the next commit. So a loaded copy keeps what it
+cannot use and writes it back unchanged.
+
+- **An object of a type that is not registered** is not built — nothing finds,
+  draws or replicates it — but the copy keeps it (`copy.Unknown`), and
+  `Serialize` and `Commit` put it back in its place by local id, byte for byte.
+  Its local id stays spent, so a new object never takes it.
+- **A value for a property the object's type no longer lists**, or for a
+  property id nobody registered, is not the object's: `Get` does not see it. It
+  is kept on the object (`object.Unknown`, tagged bytes by property id) and
+  written back by a save. Put the property back on the type and the value is
+  read again at the next load. A direct `Duplicate` carries these values.
+- **Replication never sends them**, and a pack a client pushes to the server
+  keeps nothing the server cannot read: the server writes its own packs, and it
+  does not store bytes it cannot read on a client's say-so.
+
+What is still dropped: a registered property whose **type** changed since the
+save (the registry saying something new about it, and the object carrying it
+under the new type), anything unknown in database metadata, and anything a
+**placement** or a transaction's `Duplicate` would have to carry — those build
+fresh objects of known types from known values.
 
 Objects and packs carry a format version, and readers refuse anything newer
 than they understand rather than misreading it. Individual metadata records do

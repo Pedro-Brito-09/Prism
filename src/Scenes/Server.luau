@@ -307,7 +307,13 @@ const function __place(self: SceneInstance, Pack: buffer): {ObjectTypes.Object}?
 end
 
 const function __instance_serialize(self: SceneInstance): buffer
-    const List = __instance_objects(self)
+    const List: {any} = __instance_objects(self)
+
+    -- Objects of a type this build does not have go back in beside the rest,
+    -- in their place by local id.
+    for _, Kept in (self :: any).Unknown do
+        table.insert(List, Kept)
+    end
 
     -- Sorted by local id so the same copy always produces the same bytes. Hash
     -- order would make two identical copies serialize differently, which rules
@@ -316,6 +322,13 @@ const function __instance_serialize(self: SceneInstance): buffer
     table.sort(List, function(A, B)
         return A.LocalId < B.LocalId
     end)
+
+    -- Each kept record as the bytes it was read from, untouched.
+    for Index, Entry in List do
+        if Entry.__type == "DecompressedObject" then
+            List[Index] = Entry.Source
+        end
+    end
 
     return Compressor:CompressScene(self.Owner.LastId, List :: any)
 end
@@ -456,6 +469,9 @@ const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean): Sc
     Instance_.Objects = {}
     Instance_.ByLocal = {}
 
+    -- Decoded records of objects whose type is not registered. See Read.
+    Instance_.Unknown = {}
+
     Instance_.Create = __create
     Instance_.Place = __place
     Instance_.Find = __find
@@ -512,6 +528,16 @@ const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
 
     const Restored = {}
     for _, Object in Decompressed :: {any} do
+        -- A type this build does not have: kept as the bytes it was read from,
+        -- and written back where it was by the next commit. Restoring used to
+        -- warn and leave it out, and committing the copy afterwards then wrote
+        -- it out of the pack for good.
+        if not Objects:GetRegistry(Object.Registry) then
+            Logger:Warn(`Scene {self.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
+            table.insert(Instance_.Unknown, Object)
+            continue
+        end
+
         const Obj = Objects.restore(Instance_, Object, false)
         if Obj then
             table.insert(Restored, Obj)
@@ -903,6 +929,11 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
         if not Objects:GetRegistry(Object.Registry) then
             return false, 0
         end
+
+        -- A client's pack keeps no bytes the server cannot read. A save of the
+        -- server's own keeps what an older build wrote; a packet from a client
+        -- is untrusted, and this is the server writing its own pack.
+        Object.Unknown = nil
 
         Highest = math.max(Highest, Object.LocalId)
     end

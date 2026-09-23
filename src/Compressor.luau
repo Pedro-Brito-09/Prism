@@ -48,6 +48,17 @@ export type DecompressedObject = {
 
     Registry: ObjectTypes.ObjectIdentifier,
     Properties: {[PropertyTypes.PropertyIdentifier]: any},
+
+    -- Property records this build could not place -- an id nobody registered,
+    -- or a semantic type it has never heard of -- kept as their tagged bytes so
+    -- writing the object back puts them back exactly as they were read. The
+    -- wire shape exists so a reader can step over what it does not know and
+    -- keep the rest; dropping the record anyway at the next save undid that.
+    Unknown: {[PropertyTypes.PropertyIdentifier]: buffer}?,
+
+    -- The bytes this record was read from, whole. A scene keeps them for an
+    -- object whose type is not registered, and writes them back untouched.
+    Source: buffer?,
 }
 
 const OBJECT_HEADER = "/oh"
@@ -367,20 +378,33 @@ const function WriteProperty(
     return IdSize + buffer.len(Tagged)
 end
 
-const function ReadProperty(Buf: buffer, Offset: number): (PropertyTypes.PropertyIdentifier?, any?, number)
+-- The tagged value exactly as it sits in the buffer, for a record this build
+-- cannot place but must not lose.
+const function Slice(Buf: buffer, Offset: number, Length: number): buffer
+    const Copy = buffer.create(Length)
+    buffer.copy(Copy, 0, Buf, Offset, Length)
+    return Copy
+end
+
+-- The fourth return is set instead of the value when the record is one this
+-- build cannot place: the raw tagged bytes, for the caller to keep under the id.
+-- A registered property whose type changed since the save is still dropped --
+-- that is the registry deliberately saying something new about the property,
+-- and the object carries the property under its new type either way.
+const function ReadProperty(Buf: buffer, Offset: number): (PropertyTypes.PropertyIdentifier?, any?, number, buffer?)
     const PropertyId, IdRead = Varint.Read(Buf, Offset)
     const Value, ValueRead, Type = Compressor:DecompressValue(Buf, Offset + IdRead)
     const Consumed = IdRead + ValueRead
 
     const Registry = Properties:GetRegistry(PropertyId)
     if not Registry then
-        Logger:Warn(`Skipping unregistered property id {PropertyId}.`)
-        return nil, nil, Consumed
+        Logger:Warn(`Property id {PropertyId} is not registered. Kept as saved, and written back unchanged.`)
+        return PropertyId, nil, Consumed, Slice(Buf, Offset + IdRead, ValueRead)
     end
 
     if not Type then
-        Logger:Warn(`Property {PropertyId} was saved with a type this build does not know. Skipping.`)
-        return nil, nil, Consumed
+        Logger:Warn(`Property {PropertyId} was saved with a type this build does not know. Kept as saved, and written back unchanged.`)
+        return PropertyId, nil, Consumed, Slice(Buf, Offset + IdRead, ValueRead)
     end
 
     -- The registry changed type since the save. The bytes were still read
@@ -424,11 +448,16 @@ end
 -- knows which one it is, and leaving it out is what keeps a pack portable. The
 -- runtime id is not written either, and never is: it names a live copy, and a
 -- pack describes the thing rather than any copy of it.
-function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject): buffer
+--
+-- WithUnknown writes the records the object is keeping without understanding
+-- them (see DecompressedObject.Unknown). A save wants them; replication does
+-- not -- a client has no more use for them than the server did.
+function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject, WithUnknown: boolean?): buffer
     local Size = 0
     local Count = 0
     const Buffers = {}
     const IsDecompressed = (Obj :: any).__type == "DecompressedObject"
+    const Unknown: {[number]: buffer}? = if WithUnknown then (Obj :: any).Unknown else nil
 
     -- Walked in id order rather than hash order, so the same object always
     -- produces the same bytes. Hash order meant two identical objects serialized
@@ -438,10 +467,34 @@ function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject)
         table.insert(Keys, Key)
     end
 
+    -- A value the object carries wins over one it is keeping for the same id:
+    -- the property has come back since, and what it holds now is the answer.
+    if Unknown then
+        for Key in Unknown do
+            if (Obj :: any).Properties[Key] == nil then
+                table.insert(Keys, Key)
+            end
+        end
+    end
+
     table.sort(Keys)
 
     for _, Key in Keys do
         const Entry = (Obj :: any).Properties[Key]
+
+        if Entry == nil and Unknown then
+            const Raw = Unknown[Key]
+            const IdSize = Varint.Measure(Key)
+            const Header = buffer.create(IdSize)
+            Varint.Write(Header, 0, Key)
+
+            table.insert(Buffers, Header)
+            table.insert(Buffers, Raw)
+            Size += IdSize + buffer.len(Raw)
+            Count += 1
+            continue
+        end
+
         local Id, Type, Value
 
         if IsDecompressed then
@@ -507,13 +560,22 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
         LocalId = LocalId,
         Registry = TypeId,
         Properties = {},
+        Source = CompressedObj,
     }
 
     for _ = 1, Count do
-        const Id, Value, Consumed = ReadProperty(CompressedObj, Offset)
+        const Id, Value, Consumed, Raw = ReadProperty(CompressedObj, Offset)
         Offset += Consumed
 
-        if Id then
+        if Raw and Id then
+            local Unknown = Obj.Unknown
+            if not Unknown then
+                Unknown = {}
+                Obj.Unknown = Unknown
+            end
+
+            (Unknown :: {[number]: buffer})[Id] = Raw
+        elseif Id then
             Obj.Properties[Id] = Value
         end
     end
@@ -584,10 +646,12 @@ function Compressor:DecompressMetadata(CompressedMetadata: buffer): DatabaseType
     }
 
     for _ = 1, Count do
-        const PropertyId, Value, Consumed = ReadProperty(CompressedMetadata, Offset)
+        const PropertyId, Value, Consumed, Raw = ReadProperty(CompressedMetadata, Offset)
         Offset += Consumed
 
-        if PropertyId then
+        -- Metadata does not keep what it cannot place. It is a database's own
+        -- bookkeeping rather than anybody's level, and has nowhere to hold it.
+        if PropertyId and not Raw then
             const Prop = Properties.new(PropertyId)
             Prop:Set(Value)
             table.insert(Metadata, Prop)
@@ -691,10 +755,13 @@ end
 -- stops a scene reopening a local id after the object holding it is gone.
 -- Without it, unload and load would restart the counter and the second object
 -- ever created would answer to the name the first one was saved under.
-function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object | DecompressedObject}): buffer
+--
+-- An entry that is already a buffer is an object record kept whole -- one whose
+-- type this build does not have -- and goes back in exactly as it was read.
+function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object | DecompressedObject | buffer}): buffer
     const Compressed = table.create(#Objects)
     for Index, Obj in Objects do
-        Compressed[Index] = Compressor:CompressObject(Obj)
+        Compressed[Index] = if type(Obj) == "buffer" then Obj else Compressor:CompressObject(Obj, true)
     end
 
     const Packed = Compressor:PackBuffers(Compressed)
