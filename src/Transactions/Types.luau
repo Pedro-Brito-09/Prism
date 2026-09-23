@@ -225,7 +225,7 @@ export type CommitRecord = {
     Created: {ObjectTypes.RuntimeId},
     Before: {[number]: any},
     Removed: {[number]: {
-        Parent: ObjectTypes.ObjectIdentifier,
+        Registry: ObjectTypes.ObjectIdentifier,
         Values: {[PropertyTypes.PropertyIdentifier]: any},
         Instance: ObjectTypes.SceneInstanceId,
     }},

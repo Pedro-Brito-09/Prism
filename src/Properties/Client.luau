@@ -30,7 +30,7 @@ end
 
 -- Some properties as a panel lays them out, from the Display that came with
 -- each registry. Usually an object type's list:
--- Properties:Layout(Objects:GetRegistry(object.Parent).Properties).
+-- Properties:Layout(Objects:GetRegistry(object.Registry).Properties).
 function Properties:Layout(Ids: {PropertyIdentifier}, IncludeHidden: boolean?): {Types.Section}
     return Shared.Layout(Registered, Ids, IncludeHidden)
 end

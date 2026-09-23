@@ -355,7 +355,7 @@ function Permissions:Can(Plr: Player, Action: Action, Target: Target, Property: 
         return false
     end
 
-    return Shared.Allows(Rights, Action, Target.Parent, Property)
+    return Shared.Allows(Rights, Action, Target.Registry, Property)
 end
 
 -- Whether a player holds a capability: globally with no scene named, or on

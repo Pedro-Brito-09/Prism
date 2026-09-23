@@ -332,7 +332,7 @@ const function AllowedType(Constraints: any, Target: Types.Object): boolean
         return true
     end
 
-    return table.find(Constraints.Types, Target.Parent) ~= nil
+    return table.find(Constraints.Types, Target.Registry) ~= nil
         or table.find(Constraints.Types, Target.Name) ~= nil
 end
 

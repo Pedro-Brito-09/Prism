@@ -145,7 +145,7 @@ function Shared.factory(
             return self
         end
 
-        return __create(self, Obj.Parent, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
+        return __create(self, Obj.Registry, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
     end
 
     -- Several objects duplicated as one thing. Each is a create, exactly as a
@@ -180,7 +180,7 @@ function Shared.factory(
 
         for _, Obj in Sources do
             const Before = #self.Operations
-            __create(self, Obj.Parent, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
+            __create(self, Obj.Registry, ObjectShared.Snapshot(Obj), Live or Obj.InstanceId)
 
             if #self.Operations > Before then
                 MadeBy[Obj] = #self.Operations
@@ -260,7 +260,7 @@ function Shared.factory(
             const Values, References = ObjectShared.SplitReferences(Saved.Properties)
 
             const Before = #self.Operations
-            __create(self, Saved.Parent, Values, Live)
+            __create(self, Saved.Registry, Values, Live)
 
             -- Rejected, and the transaction will refuse to commit; there is
             -- nothing to record an operation index against.

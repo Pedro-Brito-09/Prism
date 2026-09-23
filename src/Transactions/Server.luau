@@ -211,7 +211,7 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             -- exists.
             const Target = {
                 Scene = if Live then Live.Scene else Scenes:GetDefault().Id,
-                Parent = Operation.Object,
+                Registry = Operation.Object,
             }
 
             -- A copy of a scene the player was never admitted to is one they

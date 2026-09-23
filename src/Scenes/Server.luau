@@ -264,16 +264,16 @@ const function __place(self: SceneInstance, Pack: buffer): {ObjectTypes.Object}?
     const Pending: {{Object: ObjectTypes.Object, References: {[number]: any}}} = {}
 
     for _, Saved in Decompressed :: {any} do
-        if not Objects:GetRegistry(Saved.Parent) then
+        if not Objects:GetRegistry(Saved.Registry) then
             -- Skipped rather than refused, like restoring a saved object of a
             -- type this build no longer has: the rest of the pack is still a
             -- thing worth placing.
-            Logger:Warn(`Skipped an object while placing a pack: object type {Saved.Parent} is not registered.`)
+            Logger:Warn(`Skipped an object while placing a pack: object type {Saved.Registry} is not registered.`)
             continue
         end
 
         const Values, References = ObjectShared.SplitReferences(Saved.Properties)
-        const Obj = Objects.new(Saved.Parent, Values, self, false)
+        const Obj = Objects.new(Saved.Registry, Values, self, false)
 
         table.insert(Made, Obj)
         Placed[Saved.LocalId] = Obj
@@ -900,7 +900,7 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
     local Highest = 0
 
     for _, Object in Packed do
-        if not Objects:GetRegistry(Object.Parent) then
+        if not Objects:GetRegistry(Object.Registry) then
             return false, 0
         end
 

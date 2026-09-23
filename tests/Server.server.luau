@@ -1151,7 +1151,7 @@ T:Test("round trips through compression", function()
     T:Ok(Copy, "rebuilt")
 
     if Copy then
-        T:Eq(Copy.Parent, CrateId, "same registry")
+        T:Eq(Copy.Registry, CrateId, "same registry")
         T:Eq(Copy:Get(TitleId), "Compressed", "title carried")
         T:Eq(Copy:Get(HealthId), 33, "health carried")
         -- A copy, not a restore: it gets its own persistent id rather than
@@ -1614,7 +1614,7 @@ T:Test("a player with no grant on a scene can do nothing there", function()
 
     T:Ok(not Permissions:Can(Plr, "Edit", Obj), "cannot edit")
     T:Ok(not Permissions:Can(Plr, "Destroy", Obj), "cannot destroy")
-    T:Ok(not Permissions:Can(Plr, "Create", {Scene = Obj.Scene, Parent = BareId}), "cannot create")
+    T:Ok(not Permissions:Can(Plr, "Create", {Scene = Obj.Scene, Registry = BareId}), "cannot create")
 
     Obj:Destroy()
 end)
@@ -2261,13 +2261,13 @@ const function Pusher(): any
     return {UserId = -5000}
 end
 
-const function Packed(LastId: number, Entries: {{Parent: number, LocalId: number, Properties: {[number]: any}}}): buffer
+const function Packed(LastId: number, Entries: {{Registry: number, LocalId: number, Properties: {[number]: any}}}): buffer
     const Objects_ = {}
     for Index, Entry in Entries do
         Objects_[Index] = {
             __type = "DecompressedObject",
             LocalId = Entry.LocalId,
-            Parent = Entry.Parent,
+            Registry = Entry.Registry,
             Properties = Entry.Properties,
         }
     end
@@ -2280,7 +2280,7 @@ T:Test("a pack a client built becomes a scene of its own", function()
     Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted, Identifier = Commit(Ghost, "PushedRoom", Packed(1, {
-        {Parent = BareId, LocalId = 1, Properties = {[TitleId] = "Pushed"}},
+        {Registry = BareId, LocalId = 1, Properties = {[TitleId] = "Pushed"}},
     }))
 
     Permissions:Revoke(Ghost)
@@ -2323,7 +2323,7 @@ T:Test("a push role is granted to whoever pushes", function()
     Scenes:SetPushRole("TestBulk")
 
     const Accepted, Identifier = Commit(Ghost, "RoleRoom", Packed(1, {
-        {Parent = BareId, LocalId = 1, Properties = {}},
+        {Registry = BareId, LocalId = 1, Properties = {}},
     }))
 
     Scenes:SetPushRole(nil)
@@ -2347,7 +2347,7 @@ T:Test("the id space a pack claims is not taken on trust", function()
     -- One object, and a last id near the top of the space. Kept as it arrived,
     -- the scene would have room for one more object ever.
     const Accepted = Commit(Ghost, "ClaimedRoom", Packed(Handles.MAX_LOCAL - 1, {
-        {Parent = BareId, LocalId = 1, Properties = {}},
+        {Registry = BareId, LocalId = 1, Properties = {}},
     }))
 
     Permissions:Revoke(Ghost)
@@ -2369,7 +2369,7 @@ T:Test("a player who may not push cannot commit at all", function()
     Permissions:Grant(Ghost, "TestViewer")
 
     const Accepted = Commit(Ghost, "ViewerRoom", Packed(1, {
-        {Parent = BareId, LocalId = 1, Properties = {}},
+        {Registry = BareId, LocalId = 1, Properties = {}},
     }))
 
     Permissions:Revoke(Ghost)
@@ -2383,7 +2383,7 @@ T:Test("an unregistered object type refuses the pack", function()
     Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted = Commit(Ghost, "UnknownRoom", Packed(1, {
-        {Parent = 99999, LocalId = 1, Properties = {}},
+        {Registry = 99999, LocalId = 1, Properties = {}},
     }))
 
     Permissions:Revoke(Ghost)
@@ -2397,7 +2397,7 @@ T:Test("a name already taken is refused before the pack is read", function()
     Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted = Commit(Ghost, "PushedRoom", Packed(1, {
-        {Parent = BareId, LocalId = 1, Properties = {}},
+        {Registry = BareId, LocalId = 1, Properties = {}},
     }))
 
     Permissions:Revoke(Ghost)
@@ -2421,7 +2421,7 @@ T:Test("an empty name is refused", function()
     Permissions:Grant(Ghost, "TestBulk")
 
     const Accepted = Commit(Ghost, "", Packed(1, {
-        {Parent = BareId, LocalId = 1, Properties = {}},
+        {Registry = BareId, LocalId = 1, Properties = {}},
     }))
 
     Permissions:Revoke(Ghost)
@@ -2434,7 +2434,7 @@ T:Test("a pack past the object cap is refused", function()
 
     const Entries = table.create(4097)
     for Index = 1, 4097 do
-        Entries[Index] = {Parent = BareId, LocalId = Index, Properties = {}}
+        Entries[Index] = {Registry = BareId, LocalId = Index, Properties = {}}
     end
 
     const Accepted = Commit(Ghost, "HugeRoom", Packed(4097, Entries))
@@ -2450,9 +2450,9 @@ T:Test("a commit costs one action, not one per object", function()
     Permissions:Grant(Ghost, "TestBuilder") -- Rate = 5
 
     const Pack = Packed(3, {
-        {Parent = BareId, LocalId = 1, Properties = {}},
-        {Parent = BareId, LocalId = 2, Properties = {}},
-        {Parent = BareId, LocalId = 3, Properties = {}},
+        {Registry = BareId, LocalId = 1, Properties = {}},
+        {Registry = BareId, LocalId = 2, Properties = {}},
+        {Registry = BareId, LocalId = 3, Properties = {}},
     })
 
     local Allowed = 0

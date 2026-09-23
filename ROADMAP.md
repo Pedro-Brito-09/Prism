@@ -59,41 +59,6 @@ on -- every item here is better decided with the thing running.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-- [ ] **`Object.Parent` names the object's type.** `Objects:GetRegistry(object
-      .Parent)` is the type id, not a parent. In a Roblox framework `Parent`
-      means containment to every reader, and it is the one field that would have
-      to mean containment if objects ever nest. Rename it to `Type`.
-
-      Bigger than it looks, and this is the part to read before starting.
-      `Parent` carries four unrelated meanings in `src/`, and only the first
-      is being renamed:
-
-      1. `Object.Parent` -- the object's type id. This one.
-      2. `Property.Parent` -- the property's own registry id (`Prop.Parent`,
-         all through Objects and Database). Arguably misnamed too, but a
-         separate decision and a separate change.
-      3. `CustomEnum.Parent` -- the enum's name.
-      4. `Instance.Parent` -- Roblox containment: `Plr.Parent`, `Event.Parent`,
-         `Current.Parent`. Ninety three of these.
-
-      The analyser catches the typed sites: `Object` is strict, so a missed
-      `Obj.Parent` reports as a missing key. It does not catch the ones that
-      matter most. The Compressor decodes a pack into plain tables and reads
-      `Decompressed.Parent`, `Data.Parent` and `Entry.Parent` off them -- all
-      `any`, so a miss there is silent, and two of those three are properties
-      rather than objects and must not be renamed at all. `Compressor` around
-      lines 49, 228, 456 and 471-508 is where to be careful; 471 and 478 write
-      the type id into every saved object, and 496-508 read it back.
-
-      Also a permission shape (`{Scene = ..., Parent = ...}` in History/Server
-      and wherever else a create target is built), the README, and the tests.
-
-      Worth doing before anything outside this repo depends on the name, and
-      worth doing as its own branch with nothing else in it. *Ask*: whether
-      `Type` is the name -- `Object.Type` reads well but `Property.Type` is
-      already a different kind of thing (the value type, `"Number"`), so
-      `TypeId` or `Registry` may be less confusing next to it.
-
 - [ ] **The tests are not type checked.** `scripts/analyze.sh` cannot resolve
       `ReplicatedStorage.Prism.src` without a Rojo sourcemap, so every reference
       to Prism inside `tests/` is `any` and a typo in five and a half thousand
@@ -146,6 +111,22 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **`Object.Parent` is `Object.Registry`.** The field holding an object's
+      type id read as containment to anyone who knows Roblox, and would have
+      had to mean containment if objects ever nest. Renamed to `Registry`,
+      chosen over `Type` because `Property.Type` is already the value type
+      (`"Number"`), and because `Objects:GetRegistry(object.Registry)` reads as
+      what it does.
+
+      Only that one meaning moved. `Property.Parent` (a property's registry
+      id), `CustomEnum.Parent` (the enum's name) and every `Instance.Parent`
+      are untouched. The decoded object shape the Compressor hands back moved
+      with it, since the two are read interchangeably when a pack is written,
+      and so did a permission target (`{Scene = ..., Registry = ...}`) and the
+      record a client keeps of what a transaction removed. `Entry.Parent` in
+      `CompressObject`, which is a property's id, stays. Saved packs are
+      unaffected: the type id is written by position, never by name.
 
 - [x] **A drag costs one action: `Object:Set(..., ClientSided)`.** On the
       client, `Set` takes a third argument. `true` shows the value here and
