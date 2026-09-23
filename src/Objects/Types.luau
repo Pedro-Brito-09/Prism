@@ -117,6 +117,13 @@ export type Object = {
 
     Properties: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
 
+    -- Values the object was saved with that its type no longer lists, or that
+    -- this build cannot read, as their tagged bytes by property id. Never read
+    -- or replicated; written back when the object is saved, so taking a
+    -- property off a type and saving does not erase every value it held. See
+    -- Compressor's DecompressedObject.
+    Unknown: {[PropertyTypes.PropertyIdentifier]: buffer}?,
+
     -- Property name -> id, so a lookup by name costs what a lookup by id does.
     -- Built once from the registry's ordered property list.
     Names: {[string]: PropertyTypes.PropertyIdentifier},

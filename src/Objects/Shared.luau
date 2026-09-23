@@ -16,6 +16,7 @@ const Properties = if RunService:IsClient()
     else require("../Properties/Server")
 
 const PropertyTypes = require("../Properties/Types")
+const Compressor = require("../Compressor")
 const Logger = require("../Logger")
 const Types = require("./Types")
 
@@ -492,6 +493,41 @@ const function Snapshot(Obj: Types.Object): {[PropertyTypes.PropertyIdentifier]:
     return Values
 end
 
+-- What a restored object keeps of its save without understanding it: records
+-- the pack could not place at all, and values for properties its type no
+-- longer lists. Construct skips the second kind -- rightly, an object carries
+-- only its type's properties -- which used to mean removing a property from a
+-- type and saving erased every value it held, silently. Kept as tagged bytes,
+-- written back by a save and by nothing else. Nil when there is nothing.
+const function Leftovers(Obj: Types.Object, Decompressed: any): {[PropertyTypes.PropertyIdentifier]: buffer}?
+    local Kept: {[PropertyTypes.PropertyIdentifier]: buffer}? = nil
+
+    if Decompressed.Unknown then
+        Kept = table.clone(Decompressed.Unknown)
+    end
+
+    for PropertyId, Value in Decompressed.Properties do
+        if Obj.Properties[PropertyId] then
+            continue
+        end
+
+        -- Read against its registry, so the type is the one it was saved as.
+        const Registry = Properties:GetRegistry(PropertyId)
+        const Tagged = if Registry then Compressor:CompressValue(Registry.Type, Value) else nil
+        if not Tagged then
+            continue
+        end
+
+        if not Kept then
+            Kept = {}
+        end
+
+        (Kept :: {[PropertyTypes.PropertyIdentifier]: buffer})[PropertyId] = Tagged
+    end
+
+    return Kept
+end
+
 -- Releases every link an object holds. Links belong to the object rather than
 -- to the instance they drive: hanging them off an AncestryChanged handler kept
 -- every instance alive in a strongly keyed pool and never fired at all for an
@@ -532,6 +568,7 @@ return {
     BuildLinks = BuildLinks,
     ReleaseLinks = ReleaseLinks,
     Snapshot = Snapshot,
+    Leftovers = Leftovers,
 
     NO_TARGET = NO_TARGET,
     ResolveReference = ResolveReference,

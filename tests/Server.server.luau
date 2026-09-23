@@ -1340,6 +1340,131 @@ T:Test("a pack loads into a different scene without colliding", function()
     Copy:Destroy()
 end)
 
+-- A pack an older or newer build wrote: an object of a type this one never
+-- registered, and on a known object a property nobody registered plus one its
+-- type does not list. Built by hand, because nothing registered here can
+-- produce it. HealthId is registered but not on TestBare, which is what taking
+-- a property off a type leaves behind.
+const UNKNOWN_TYPE = 99990
+const UNKNOWN_PROPERTY = 99991
+
+const function Foreign(): buffer
+    return Compressor:CompressScene(3, {
+        {
+            __type = "DecompressedObject",
+            LocalId = 1,
+            Registry = BareId,
+            Properties = {[TitleId] = "Known", [HealthId] = 42},
+            Unknown = {[UNKNOWN_PROPERTY] = Compressor:CompressValue("Text", "FromElsewhere")},
+        },
+        {
+            __type = "DecompressedObject",
+            LocalId = 2,
+            Registry = UNKNOWN_TYPE,
+            Properties = {[TitleId] = "Stranger"},
+            Unknown = {[UNKNOWN_PROPERTY] = Compressor:CompressValue("Text", "StrangerToo")},
+        },
+        {
+            __type = "DecompressedObject",
+            LocalId = 3,
+            Registry = BareId,
+            Properties = {[TitleId] = "After"},
+        },
+    } :: any)
+end
+
+T:Test("an object of an unknown type survives a load and a commit", function()
+    const Scene = Scenes.fromBuffer({Name = "TestForeignType"}, Foreign())
+    const Live = Scene:Load()
+
+    T:Eq(#Live:GetObjects(), 2, "only the known objects were built")
+    T:Eq(Live:Find(2), nil, "nothing answers for the unknown one")
+    T:Eq(#Live.Unknown, 1, "but the copy kept it")
+
+    -- A new object must not take the id the kept one is saved under.
+    const Made = Live:Create(BareId)
+    T:Ok(Made.LocalId > 3, "a new object is minted past it")
+
+    Live:Commit()
+    Scene:Unload()
+
+    const _, Back = Compressor:DecompressScene(Scene:Serialize())
+    local Kept = nil
+    for _, Saved in Back do
+        if Saved.LocalId == 2 then
+            Kept = Saved
+        end
+    end
+
+    T:Ok(Kept, "still in the pack after the commit")
+    if Kept then
+        T:Eq(Kept.Registry, UNKNOWN_TYPE, "under its own type")
+        T:Eq(Kept.Properties[TitleId], "Stranger", "with its values")
+        T:Ok(Kept.Unknown and Kept.Unknown[UNKNOWN_PROPERTY], "including the ones nobody here can read")
+    end
+
+    T:Eq(Back[1].LocalId, 1, "and in its place by local id")
+    T:Eq(Back[2].LocalId, 2, "between its neighbours")
+    T:Eq(Back[3].LocalId, 3, "rather than at the end")
+
+    Scene:Destroy()
+end)
+
+T:Test("a property the type no longer lists survives a load and a commit", function()
+    const Scene = Scenes.fromBuffer({Name = "TestForeignProperty"}, Foreign())
+    const Live = Scene:Load()
+    const Obj = Live:Find(1)
+
+    T:Ok(Obj, "restored")
+    if not Obj then
+        Scene:Destroy()
+        return
+    end
+
+    T:Eq(Obj:Get(TitleId), "Known", "a listed property reads as usual")
+    T:Eq(Obj:Get(HealthId), nil, "one the type does not list is not the object's")
+    T:Ok(Obj.Unknown and Obj.Unknown[HealthId], "but it is kept")
+    T:Ok(Obj.Unknown and Obj.Unknown[UNKNOWN_PROPERTY], "and so is one nobody registered")
+
+    -- Replication is not a save: a client has no use for what it cannot read.
+    const Sent = Compressor:DecompressObject(Compressor:CompressObject(Obj))
+    T:Eq(Sent.Properties[HealthId], nil, "not replicated")
+    T:Eq(Sent.Unknown, nil, "at all")
+
+    Obj:Set(TitleId, "Edited")
+    Live:Commit()
+    Scene:Unload()
+
+    const _, Back = Compressor:DecompressScene(Scene:Serialize())
+    const Saved = Back[1]
+    T:Eq(Saved.Properties[TitleId], "Edited", "the edit landed")
+    T:Eq(Saved.Properties[HealthId], 42, "the unlisted value came back with it")
+    T:Ok(Saved.Unknown and Saved.Unknown[UNKNOWN_PROPERTY], "and the unregistered one")
+
+    -- Put back on the type, the value is the object's again. Simulated by
+    -- decoding against a registry that lists it: TestCrate carries Health.
+    const AsCrate = table.clone(Saved)
+    AsCrate.Registry = CrateId
+    const Load = Scenes.fromBuffer({Name = "TestForeignBack"}, Compressor:CompressScene(1, {AsCrate} :: any))
+    const Crate = Load:Load():Find(1)
+    T:Eq(Crate and Crate:Get(HealthId), 42, "a type that lists it reads it")
+
+    Scene:Destroy()
+    Load:Destroy()
+end)
+
+T:Test("a duplicate carries what its original was keeping", function()
+    const Scene = Scenes.fromBuffer({Name = "TestForeignDuplicate"}, Foreign())
+    const Live = Scene:Load()
+    const Obj = Live:Find(1)
+
+    const Copy = if Obj then Objects:Duplicate(Obj) else nil
+    T:Ok(Copy and Copy.Unknown and Copy.Unknown[HealthId], "kept values came along")
+    T:Ok(Copy and Obj and Copy.Unknown ~= Obj.Unknown, "as a copy, not the same table")
+
+    Scene:Destroy()
+end)
+
 T:Test("loading twice gives two equal copies", function()
     const Scene = Scenes.new({Name = "TestRoom"})
     const A = Scene:Load()
@@ -2274,6 +2399,38 @@ const function Packed(LastId: number, Entries: {{Registry: number, LocalId: numb
 
     return Compressor:CompressScene(LastId, Objects_ :: any)
 end
+
+T:Test("a pushed pack keeps nothing the server cannot read", function()
+    const Ghost = Pusher()
+    Permissions:Grant(Ghost, "TestBulk")
+
+    const Accepted = Commit(Ghost, "PushedForeign", Compressor:CompressScene(1, {
+        {
+            __type = "DecompressedObject",
+            LocalId = 1,
+            Registry = BareId,
+            Properties = {[TitleId] = "Pushed"},
+            Unknown = {[99992] = Compressor:CompressValue("Text", "Smuggled")},
+        },
+    } :: any))
+
+    Permissions:Revoke(Ghost)
+    T:Ok(Accepted, "accepted")
+
+    const Scene = Scenes:Get("PushedForeign")
+    if not Scene then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    -- A save of the server's own keeps what an older build wrote. A packet
+    -- from a client is not a save, and its unreadable bytes are not kept.
+    const _, Back = Compressor:DecompressScene(Scene:Serialize())
+    T:Eq(Back[1].Properties[TitleId], "Pushed", "the readable value landed")
+    T:Eq(Back[1].Unknown, nil, "the unreadable one did not")
+
+    Scene:Destroy()
+end)
 
 T:Test("a pack a client built becomes a scene of its own", function()
     const Ghost = Pusher()

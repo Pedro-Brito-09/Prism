@@ -77,25 +77,6 @@ produced it, with anything that is a decision marked *Ask*.
       checks less, and because whether those nil checks belong in the tests is
       a style call that is not mine to make.
 
-- [ ] **An unknown object type is dropped on restore.** `Objects.restore` warns
-      and returns nil when the type is not registered, so the object vanishes
-      from the copy -- and committing that copy afterwards writes it out of the
-      pack for good. This is the opposite of what the storage format promises a
-      few paragraphs over: the wire shape exists so a reader that has never
-      heard of a type can skip it precisely and keep the rest, and then the
-      object layer deletes the record anyway.
-
-      *Ask*: keeping unknown objects opaquely and writing them back unchanged
-      costs memory and makes "what is in this copy" less answerable. The
-      alternative is to say plainly in the README that unregistering a type is
-      destructive to saved levels.
-
-- [ ] **A property the type no longer lists is dropped silently.** `Construct`
-      skips any initial value whose property is not on the type (`if not Prop
-      then continue`). Adding a property to a type is safe -- old objects get
-      the default -- but removing one and re-saving erases every value, with no
-      warning. Same *Ask* as the item above, and probably the same answer.
-
 - [ ] **The history limit counts steps, not what they hold.** `LIMIT = 100` on
       both sides, by count only. A step can hold a withdrawn copy: every object
       in it and every part. A hundred of those is unbounded, and the whole point
@@ -111,6 +92,31 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **What this build cannot read is kept, and written back.** Two items,
+      one answer. An object of an unregistered type used to be dropped on
+      restore, and committing the copy then wrote it out of the pack for good;
+      a value for a property its type no longer lists was skipped by
+      `Construct`, so removing a property from a type and re-saving erased
+      every value it held. Both contradicted the storage format, whose wire
+      shape exists so a reader can step over what it does not know and keep
+      the rest.
+
+      Decided: keep, not document-and-drop. A copy keeps the decoded record of
+      an unknown-type object (`copy.Unknown`) and `Serialize` writes back the
+      bytes it was read from, in place by local id; its local id stays spent.
+      An object keeps values it cannot use (`object.Unknown`, tagged bytes by
+      property id) -- both unregistered property ids, which the Compressor now
+      slices out instead of dropping, and registered properties the type does
+      not list. Saves write them; replication does not. A direct `Duplicate`
+      carries them.
+
+      Still dropped, on purpose: a registered property whose type changed, and
+      unknown records in database metadata. A client's pushed pack is stripped
+      before the server re-encodes it -- the server keeps what an older build
+      of itself wrote, not unreadable bytes a client sent. Placement and a
+      transaction's `Duplicate` build fresh objects from known values and carry
+      nothing unknown.
 
 - [x] **`Object.Parent` is `Object.Registry`.** The field holding an object's
       type id read as containment to anyone who knows Roblox, and would have
