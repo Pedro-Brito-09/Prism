@@ -48,7 +48,7 @@ const Workspace: {[RuntimeId]: Object} = {}
 -- being worked on, leave it alone.
 const Locks: {[RuntimeId]: {UserId: number?, Holder: any}} = {}
 -- Never recycled, for the same reason property ids are not: a registry id is
--- written into every saved object as its Parent, so handing the same id to a
+-- written into every saved object as its Registry, so handing the same id to a
 -- different object type later makes every stored object of the old type decode
 -- as the new one.
 const Ids = IdPool.new(nil, false)
@@ -98,7 +98,7 @@ const function ReachOf(Obj: Object): Types.Reach
         return "Admitted"
     end
 
-    const Registry = Registered[Obj.Parent]
+    const Registry = Registered[Obj.Registry]
     return if Registry then Registry.Replicate else "Admitted"
 end
 
@@ -310,7 +310,7 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
 end
 
 -- Refused while any object of the type is live: each was built from this
--- registry and names it as its Parent, and a client rebuilding one would find
+-- registry and names it as its Registry, and a client rebuilding one would find
 -- nothing to build it from. Destroy them, or unload what holds them, first.
 --
 -- The id is never handed out again. Packs name it, and a later type under the
@@ -323,7 +323,7 @@ function Objects:Unregister(Identifier: ObjectIdentifier): boolean
     end
 
     for _, Obj in Workspace do
-        if Obj.Parent == Identifier and not Obj.Destroyed then
+        if Obj.Registry == Identifier and not Obj.Destroyed then
             Logger:Warn(`Cannot unregister object type {Registry.Name}: objects of it are still live.`)
             return false
         end
@@ -888,7 +888,7 @@ const function Construct(
     Obj.Scene = Instance_.Scene
     Obj.LocalId = Local
     Obj.InstanceId = Instance_.Id
-    Obj.Parent = Ref.Id
+    Obj.Registry = Ref.Id
     Obj.Name = Ref.Name
     Obj.Destroyed = false
     Obj.Properties = Props
@@ -963,7 +963,7 @@ function Objects.Revive(Obj: Object, Announce: boolean?): boolean
     end
 
     const Instance_ = SceneRegistry.Instances[Obj.InstanceId]
-    const Ref = Registered[Obj.Parent]
+    const Ref = Registered[Obj.Registry]
     if not Instance_ or not Ref then
         return false
     end
@@ -1065,13 +1065,13 @@ end
 -- Rebuilds an object under the id it was saved with. Used by a scene loading its
 -- pack; Announce is the caller's, because a load sends its objects in bulk.
 function Objects.restore(Target: any, Decompressed: any, Announce: boolean?): Object?
-    if not Registered[Decompressed.Parent] then
-        Logger:Warn(`Failed to restore object. Object type {Decompressed.Parent} is not registered.`)
+    if not Registered[Decompressed.Registry] then
+        Logger:Warn(`Failed to restore object. Object type {Decompressed.Registry} is not registered.`)
         return nil
     end
 
     return Construct(
-        Decompressed.Parent,
+        Decompressed.Registry,
         Decompressed.Properties,
         ResolveInstance(Target),
         Decompressed.LocalId,
@@ -1087,7 +1087,7 @@ function Objects:Duplicate(Obj: Object, Target: any?): Object?
         return nil
     end
 
-    return Objects.new(Obj.Parent, Shared.Snapshot(Obj), Target or SceneRegistry.Instances[Obj.InstanceId])
+    return Objects.new(Obj.Registry, Shared.Snapshot(Obj), Target or SceneRegistry.Instances[Obj.InstanceId])
 end
 
 -- Several objects duplicated as one thing, which is not the same as duplicating
@@ -1118,7 +1118,7 @@ function Objects:DuplicateGroup(List: {Object}, Target: any?): {Object}
         end
 
         const New = Objects.new(
-            Obj.Parent,
+            Obj.Registry,
             Shared.Snapshot(Obj),
             Target or SceneRegistry.Instances[Obj.InstanceId],
             false
@@ -1175,13 +1175,13 @@ function Objects.fromCompression(CompressedObj: buffer, Target: any?): Object?
         return nil
     end
 
-    if not Registered[Decompressed.Parent] then
-        Logger:Warn(`Failed to create object from compression. Object type {Decompressed.Parent} is not registered.`)
+    if not Registered[Decompressed.Registry] then
+        Logger:Warn(`Failed to create object from compression. Object type {Decompressed.Registry} is not registered.`)
         return nil
     end
 
     return Construct(
-        Decompressed.Parent,
+        Decompressed.Registry,
         Decompressed.Properties,
         ResolveInstance(Target),
         nil,

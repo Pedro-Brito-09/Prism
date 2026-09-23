@@ -18,7 +18,7 @@ export type PropertyId = number
 -- has no object yet, so it names the scene and the type it would make.
 export type Target = {
     Scene: number,
-    Parent: ObjectType,
+    Registry: ObjectType,
 }
 
 -- A whitelist that is present is exhaustive, and one that is absent constrains

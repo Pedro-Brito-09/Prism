@@ -92,7 +92,7 @@ export type Object = {
     -- a persistent id and differ here; that is what instancing a scene means.
     InstanceId: SceneInstanceId,
 
-    Parent: ObjectIdentifier,
+    Registry: ObjectIdentifier,
     Name: string,
 
     -- Destroyed, but kept whole so the destroy can be taken back. Set while

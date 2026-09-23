@@ -341,7 +341,7 @@ const function Allowed(Plr: Player, Step: Step, Forward: boolean): boolean
         elseif Present(Entry, Forward) then
             -- Bringing it back is making it: the same right a create needs, on
             -- the scene it would come back into.
-            if not Permissions:Can(Plr, "Create", {Scene = Obj.Scene, Parent = Obj.Parent}) then
+            if not Permissions:Can(Plr, "Create", {Scene = Obj.Scene, Registry = Obj.Registry}) then
                 return false
             end
         else

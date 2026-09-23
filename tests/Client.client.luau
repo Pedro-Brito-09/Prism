@@ -63,7 +63,7 @@ end
 
 const function FindLiveObject(TypeId: number, PropertyId: number, Marker: string)
     for _, Obj in Objects:GetWorkspace() do
-        if Obj.Parent == TypeId and Obj:Get(PropertyId) == Marker then
+        if Obj.Registry == TypeId and Obj:Get(PropertyId) == Marker then
             return Obj
         end
     end
@@ -463,7 +463,7 @@ T:Test("Can reflects the rights on the object's own scene", function()
 
     T:Ok(Permissions:Can("Edit", Editable), "may edit a bare object")
     T:Ok(Permissions:Can("Destroy", Editable), "and destroy one")
-    T:Ok(Permissions:Can("Create", {Scene = Editable.Scene, Parent = BareId}), "and create one")
+    T:Ok(Permissions:Can("Create", {Scene = Editable.Scene, Registry = BareId}), "and create one")
     T:Ok(not Permissions:Can("Edit", Denied), "but a crate is blacklisted")
     T:Ok(Permissions:Get().Capabilities, "capabilities rebuilt as a map")
     T:Ok(Permissions:Has("TestInvite", Editable.Scene), "and the scene's capability")
@@ -615,7 +615,7 @@ T:Test("a client creates an object, which it cannot do any other way", function(
 
     if Made then
         T:Eq(Made:Get(TitleId), "FromClient", "with the value the create carried")
-        T:Eq(Made.Parent, BareId, "of the type the create named")
+        T:Eq(Made.Registry, BareId, "of the type the create named")
     end
 end)
 
@@ -688,7 +688,7 @@ T:Test("duplicating a server object builds a create into its copy", function()
 
     T:Eq(Edit.Rejected, 0, "built")
     T:Eq(Operation.Kind, "Create", "as a create")
-    T:Eq(Operation.Object, Editable.Parent, "of the same type")
+    T:Eq(Operation.Object, Editable.Registry, "of the same type")
     T:Eq(Operation.Instance, Editable.InstanceId, "into its copy")
     T:Eq(Operation.Properties[TitleId], Editable:Get(TitleId), "holding its value")
 end)

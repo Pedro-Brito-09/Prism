@@ -48,7 +48,7 @@ const function Capture(Transaction: Transaction): ({[number]: any}, {[number]: a
             const Obj = Objects:Get(Op.Target)
             if Obj then
                 Removed[Index] = {
-                    Parent = Obj.Parent,
+                    Registry = Obj.Registry,
                     Values = ObjectShared.Snapshot(Obj),
                     Instance = Obj.InstanceId,
                 }

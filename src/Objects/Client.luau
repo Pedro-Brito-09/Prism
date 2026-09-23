@@ -691,7 +691,7 @@ const function Construct(
     Obj.Scene = Live.Scene
     Obj.LocalId = Local
     Obj.InstanceId = Live.Id
-    Obj.Parent = Ref.Id
+    Obj.Registry = Ref.Id
     Obj.Name = Ref.Name
     Obj.Local = true
     Obj.Destroyed = false
@@ -719,12 +719,12 @@ end
 -- Rebuilds an object under the id it was saved with, for a local scene reading
 -- its own pack back.
 function Objects.restore(Target: any, Decompressed: any): Object?
-    if not Registered[Decompressed.Parent] then
-        Logger:Warn(`Failed to restore object. Object type {Decompressed.Parent} is not registered.`)
+    if not Registered[Decompressed.Registry] then
+        Logger:Warn(`Failed to restore object. Object type {Decompressed.Registry} is not registered.`)
         return nil
     end
 
-    return Construct(Decompressed.Parent, Decompressed.Properties, Target, Decompressed.LocalId)
+    return Construct(Decompressed.Registry, Decompressed.Properties, Target, Decompressed.LocalId)
 end
 
 -- A new object of the same type holding the same values, in the same copy of a
@@ -742,7 +742,7 @@ function Objects:Duplicate(Obj: Object): Object?
         return nil
     end
 
-    return Construct(Obj.Parent, Shared.Snapshot(Obj), Live, nil)
+    return Construct(Obj.Registry, Shared.Snapshot(Obj), Live, nil)
 end
 
 -- The group form, for scenes this client owns. References that point inside the
@@ -765,7 +765,7 @@ function Objects:DuplicateGroup(List: {Object}): {Object}
             continue
         end
 
-        const New = Construct(Obj.Parent, Shared.Snapshot(Obj), Live, nil)
+        const New = Construct(Obj.Registry, Shared.Snapshot(Obj), Live, nil)
 
         table.insert(Sources, Obj)
         table.insert(Made, New)
@@ -833,7 +833,7 @@ function Objects.Revive(Obj: Object): boolean
     end
 
     const Live = LocalCopy[Obj]
-    const Ref = Registered[Obj.Parent]
+    const Ref = Registered[Obj.Registry]
     if not Live or not Ref or Live.Owner.Instances[Live.Id] ~= Live then
         return false
     end
@@ -1090,9 +1090,9 @@ const function AddObject(
         return
     end
 
-    const Registry = Registered[Data.Parent]
+    const Registry = Registered[Data.Registry]
     if not Registry then
-        Logger:Warn(`Received object {RuntimeId} for unregistered type {Data.Parent}.`)
+        Logger:Warn(`Received object {RuntimeId} for unregistered type {Data.Registry}.`)
         return
     end
 
@@ -1133,7 +1133,7 @@ const function AddObject(
     Obj.Scene = Scene or 0
     Obj.LocalId = Data.LocalId
     Obj.PersistentId = Handles.Join(Scene or 0, Data.LocalId)
-    Obj.Parent = Data.Parent
+    Obj.Registry = Data.Registry
     Obj.Name = Registry.Name
     Obj.Destroyed = false
     Obj.Instance = Resolved

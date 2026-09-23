@@ -46,7 +46,7 @@ export type DecompressedObject = {
     -- under two different scenes without the two colliding.
     LocalId: Handles.LocalId,
 
-    Parent: ObjectTypes.ObjectIdentifier,
+    Registry: ObjectTypes.ObjectIdentifier,
     Properties: {[PropertyTypes.PropertyIdentifier]: any},
 }
 
@@ -468,14 +468,14 @@ function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject)
         else (Obj :: ObjectTypes.Object).LocalId
 
     const PrefixSize = Varint.Measure(FORMAT_VERSION)
-        + Varint.Measure(Obj.Parent)
+        + Varint.Measure(Obj.Registry)
         + Varint.Measure(LocalId)
         + Varint.Measure(Count)
 
     const Prefix = buffer.create(PrefixSize)
 
     local At = Varint.Write(Prefix, 0, FORMAT_VERSION)
-    At += Varint.Write(Prefix, At, Obj.Parent)
+    At += Varint.Write(Prefix, At, Obj.Registry)
     At += Varint.Write(Prefix, At, LocalId)
     Varint.Write(Prefix, At, Count)
 
@@ -493,8 +493,8 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
     CheckVersion(Version, "Object")
     Offset += VersionRead
 
-    const Parent, ParentRead = Varint.Read(CompressedObj, Offset)
-    Offset += ParentRead
+    const TypeId, TypeIdRead = Varint.Read(CompressedObj, Offset)
+    Offset += TypeIdRead
 
     const LocalId, LocalIdRead = Varint.Read(CompressedObj, Offset)
     Offset += LocalIdRead
@@ -505,7 +505,7 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
     const Obj: DecompressedObject = {
         __type = "DecompressedObject",
         LocalId = LocalId,
-        Parent = Parent,
+        Registry = TypeId,
         Properties = {},
     }
 

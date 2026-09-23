@@ -235,13 +235,13 @@ const function __place(self: SceneInstance, Pack: buffer): any
     const Pending: {{Object: any, References: {[number]: any}}} = {}
 
     for _, Saved in Decompressed :: {any} do
-        if not Objects:GetRegistry(Saved.Parent) then
-            Logger:Warn(`Skipped an object while placing a pack: object type {Saved.Parent} is not registered.`)
+        if not Objects:GetRegistry(Saved.Registry) then
+            Logger:Warn(`Skipped an object while placing a pack: object type {Saved.Registry} is not registered.`)
             continue
         end
 
         const Values, References = ObjectShared.SplitReferences(Saved.Properties)
-        const Obj = Objects.new(Saved.Parent, Values, self)
+        const Obj = Objects.new(Saved.Registry, Values, self)
 
         table.insert(Made, Obj)
         Placed[Saved.LocalId] = Obj

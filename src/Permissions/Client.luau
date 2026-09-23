@@ -39,7 +39,7 @@ function Permissions:Can(Action: Action, Target: Target, Property: number?): boo
         return false
     end
 
-    return Shared.Allows(Rights, Action, Target.Parent, Property)
+    return Shared.Allows(Rights, Action, Target.Registry, Property)
 end
 
 function Permissions:Has(Capability: string, Scene: number?): boolean

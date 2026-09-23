@@ -46,7 +46,7 @@ local Speed = Prism.Properties:Register({
 })
 
 -- Grouped by category, sorted by Order, hidden properties left out.
-for _, section in Prism.Properties:Layout(Prism.Objects:GetRegistry(object.Parent).Properties) do
+for _, section in Prism.Properties:Layout(Prism.Objects:GetRegistry(object.Registry).Properties) do
     panel:AddHeader(section.Category)
     for _, registry in section.Properties do
         panel:AddField(registry, registry.Display)
@@ -180,6 +180,12 @@ them.
 
 Every object carries two ids: `RuntimeId`, which names this live copy of it, and
 `PersistentId`, which is saved with it and outlives a reload. See Scenes.
+
+`object.Registry` is the id of the object's type, the one `Objects:Register`
+returned; `Objects:GetRegistry(object.Registry)` gives the type itself. It was
+called `Parent` until it was renamed, because in a Roblox framework `Parent`
+reads as containment. Saved data is unaffected: the id was always written by
+position, never by name.
 
 A link mirrors a property onto the instance. `Type = "Property"` writes a real
 instance property (the types must match), `Type = "Attribute"` writes an
