@@ -1,4 +1,4 @@
-this originally wasn't going to be vibe coded but it got too big and I lowkey didn't spend much time debugging; a lot of stuff still made by hand by me :)
+this originally wasn't going to be vibe coded but it got too big and I lowkey didn't wanna spend much time debugging; a lot of stuff still made by hand by me :)
 
 # Prism
 
