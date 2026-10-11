@@ -424,14 +424,52 @@ T:Test("a lock is taken, announced and released", function()
     task.wait(1.1)
 
     T:Ok(Objects:Lock(Editable), "locked")
+
+    -- On the answer, not on the broadcast, which travels on the other remote
+    -- and used to land after Lock had returned.
+    T:Ok(Objects:IsLocked(Editable), "held the moment Lock returns")
+    T:Eq(Objects:GetLock(Editable), Me, "by this player")
+
     T:Eventually(function()
         return Objects:GetLock(Editable) == Me and HeardHeld
     end, 3, "announced back as this player's")
 
     T:Ok(Objects:Unlock(Editable), "released")
+    T:Ok(not Objects:IsLocked(Editable), "free the moment Unlock returns")
+
     T:Eventually(function()
         return Objects:GetLock(Editable) == nil and HeardFree
     end, 3, "announced free")
+
+    Stop()
+end)
+
+T:Test("a transaction's holds are known the moment it returns", function()
+    if not Editable or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    const Me = game:GetService("Players").LocalPlayer.UserId
+    local Heard = 0
+
+    const Stop = Objects:OnLockChanged(function(RuntimeId)
+        if RuntimeId == Editable.RuntimeId then
+            Heard += 1
+        end
+    end)
+
+    task.wait(1.1)
+    T:Ok(Transactions.new():Lock(Editable):Commit(), "locked through a transaction")
+    T:Eq(Objects:GetLock(Editable), Me, "held by this player on return")
+
+    -- The broadcast still comes, and says nothing new.
+    task.wait(0.5)
+    T:Eq(Heard, 1, "and heard once, not once from the answer and again from the broadcast")
+
+    task.wait(1.1)
+    T:Ok(Transactions.new():Set(Editable, TitleId, EDITABLE_MARKER):Unlock(Editable):Commit(), "released through a transaction")
+    T:Ok(not Objects:IsLocked(Editable), "free on return")
 
     Stop()
 end)

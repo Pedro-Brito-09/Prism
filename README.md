@@ -372,6 +372,8 @@ Prism.Objects:OnLockChanged(function(runtimeId, userId, held) ... end)
 
 Taking a lock needs edit rights on the object, costs one action per object, and
 fails if anyone else holds any of the objects named. Releasing needs no rights.
+`IsLocked` and `GetLock` answer for your own holds as soon as `Lock`, `Unlock`
+or a transaction holding them returns.
 A transaction can take and release them too, in the same list as the edit they
 are for — see Transactions.
 
