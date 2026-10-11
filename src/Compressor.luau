@@ -339,9 +339,16 @@ function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number
         const Consumed = 1 + Read + Length
         const Name, Id = ReadNamedNumber(Buf, Body + Read)
 
+        -- An enum this side has not registered is not the same as an option
+        -- that no longer exists. Collapsing both to UNKNOWN threw away which
+        -- option it was, and a client that registers its enums after the first
+        -- values arrive showed every one of them as the property's default for
+        -- the rest of the session. A pending option keeps the name and the id,
+        -- encodes back to exactly what it was read from, and is swapped for the
+        -- real option once the enum is registered. Its Value is nil until then.
         const Registered = CustomEnum:GetEnum(Name)
         if not Registered then
-            return CustomEnum.UNKNOWN, Consumed, Type
+            return CustomEnum.Pending(Name, Id), Consumed, Type
         end
 
         return Registered:GetById(Id) or CustomEnum.UNKNOWN, Consumed, Type

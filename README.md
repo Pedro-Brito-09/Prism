@@ -189,8 +189,12 @@ node. It's stored as a local id, so it's saved and duplicated like one; see
 A custom enum is a named list of options with ids that are saved in place of the
 values, so the values can be anything. Register it **on both sides** under the
 same name — a client checks a `CustomEnum` constraint against its own copy. A
-client may register it whenever it likes; until it does, it refuses every value
-of a property constrained to it, and warns once per property.
+client may register it whenever it likes. Until it does, it warns once per
+property and holds that property's values as **pending** options: the enum's
+name and the option `Id`, `Pending = true`, and no `Value`. Registering the enum
+swaps each one for the real option and fires `OnChange`. A save or a server
+that meets an enum it has not registered keeps the option the same way, rather
+than dropping which one it was.
 
 ```lua
 -- server and client

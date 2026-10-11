@@ -84,6 +84,25 @@ rather than guessed.
 
 ## Done
 
+- [x] **Values of an enum a client has not registered are kept.** Found in
+      the second playthrough: a player who joined without the game's enum
+      registered showed `Surface` as Wood, the default, while the server held
+      Stone. The decoder turned an option of an unregistered enum into
+      `UNKNOWN`, the client's unresolved constraint refused it, and the
+      property kept its default -- silently, and still after the enum was
+      registered, since the late-registration fix below resolved the
+      constraint and not the values that had already arrived.
+
+      Decided: keep the option rather than re-decode later. The decoder
+      returns `CustomEnum.Pending(name, id)` for an enum it does not know --
+      the name, the id, `Pending = true`, no `Value` -- which encodes back to
+      exactly what it was read from. Until the enum is registered a client's
+      constraint is a placeholder for that name that accepts them; when it is,
+      Objects swaps every pending value for the real option, firing
+      `OnChange` and carrying what the server confirmed with it, and `Get`
+      settles one on an object that was set aside at the time. `UNKNOWN` is
+      still what an id the registered enum does not have reads as.
+
 - [x] **A custom enum a client registers late still resolves.** Found in the
       first playthrough. The server sends a `CustomEnum` constraint by name
       and a client resolves it against its own enums when the property
