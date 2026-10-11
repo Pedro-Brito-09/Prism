@@ -79,6 +79,22 @@ rather than guessed.
 
 ## Done
 
+- [x] **`History:Clear` lands in order with the edits around it.** Found in
+      the first playthrough: a set made straight after `History:Clear()` was
+      never undoable. `Forget` crossed on the remote event and every edit on
+      the remote function, Roblox orders nothing across the two, and the set
+      arrived first -- recorded, then wiped by the clear behind it. The fork a
+      local action sends had the same race against an undo or redo invoked
+      after it.
+
+      `History.Forget` is invoked now, on the same remote as the edits, so the
+      two land in the order they were made. Nothing waits on the answer: the
+      client invokes on a spawned thread, which sends the request before
+      `Clear` returns, so neither `Clear` nor recording a local step yields.
+      Decided against having `Forget` name the newest step it means to clear:
+      the client does not yet know the id of a step the server recorded a
+      moment ago, so an edit made just before the clear would survive it.
+
 - [x] **The history is capped by what its steps hold.** `LIMIT = 100` counted
       steps only, and a step can hold a whole withdrawn copy, so a hundred of
       them was a limit on nothing. Each step is now weighed when it is

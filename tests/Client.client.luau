@@ -1666,6 +1666,35 @@ T:Test("a custom action needs both verbs", function()
     T:Ok(not History:CanUndo(), "and nothing was recorded")
 end)
 
+T:Test("clearing lands in order with the edits around it", function()
+    if not Editable or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    -- An edit straight after a clear. The clear used to cross on the remote
+    -- event and the set on the remote function, and the clear landed second
+    -- and wiped the step the set had just made.
+    Window()
+    History:Clear()
+    Editable:Set(TitleId, "ClearedBefore")
+
+    T:Eventually(function()
+        return History:CanUndo()
+    end, 3, "the edit after the clear was recorded")
+
+    task.wait(0.5)
+    T:Ok(History:CanUndo(), "and stayed recorded")
+
+    -- And the other way round: an edit straight before a clear is cleared.
+    Window()
+    Editable:Set(TitleId, EDITABLE_MARKER)
+    History:Clear()
+
+    task.wait(1)
+    T:Ok(not History:CanUndo(), "the edit before the clear went with it")
+end)
+
 T:Test("a transaction is a step the server keeps", function()
     if not BareId or not TitleId then
         T:Ok(false, "no bare registry")

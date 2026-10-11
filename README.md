@@ -1054,7 +1054,10 @@ its own or the id of one the server holds — so a single undo takes back the la
 thing the player did whichever side recorded it. An undo of a server step names
 the step it means; if that is not the one on top, the server says no and sends
 back its stacks, which the client reconciles against. A new action on either
-side forks the redo stack on both.
+side forks the redo stack on both. That fork, and `Clear`, reach the server in
+the order they happened among the player's edits, so an edit made straight
+after `Clear` is recorded and one made straight before it is cleared. Neither
+yields.
 
 Recorded server side: every transaction a player commits, every `Object:Set`
 through the single channel, and every lone `Object:Destroy`. Commit a transaction with `Untracked = true`

@@ -401,8 +401,16 @@ const Channels: {Channel} = {
         --
         -- Either way it is where deferred destroys end: a step nobody can reach
         -- is a step whose objects nothing is keeping.
+        --
+        -- Invoked rather than fired, though nothing waits on the answer. Every
+        -- edit a player makes reaches the server through the remote function,
+        -- and Roblox orders nothing between that and the remote event: a set
+        -- made just after History:Clear used to be recorded and then wiped by
+        -- a Forget that arrived behind it. On the same remote, the two land in
+        -- the order they were made.
         Name = "History.Forget",
         Args = {Codecs.Bool}, -- RedoOnly
+        Returns = {Codecs.Bool},
     },
 }
 
@@ -3197,6 +3205,19 @@ const function Weigh(Step: Step): number
     return Held
 end
 
+-- Tells the server to drop this player's redo stack, or both. Invoked on a
+-- thread of its own so neither caller yields, and spawned rather than deferred
+-- so the request leaves now: it has to reach the server ahead of any edit made
+-- after it, which also goes through the remote function, and an event used to
+-- arrive behind such an edit and wipe the step it had just recorded.
+const function Forget(RedoOnly: boolean)
+    task.spawn(function()
+        pcall(function()
+            return Network.Forget:Invoke(RedoOnly)
+        end)
+    end)
+end
+
 const function Push(Step: Step)
     Step.Weight = Weigh(Step)
     table.insert(UndoOrder, {Step = Step})
@@ -3238,7 +3259,7 @@ const function Push(Step: Step)
     end
 
     if Theirs then
-        Network.Forget:FireAll(true)
+        Forget(true)
     end
 
     ClearTokens(RedoOrder)
@@ -3417,7 +3438,7 @@ end
 function History:Clear()
     ClearTokens(UndoOrder)
     ClearTokens(RedoOrder)
-    Network.Forget:FireAll(false)
+    Forget(false)
     Listeners.Notify(Changed)
 end
 
@@ -4445,13 +4466,15 @@ Network.Redo.OnInvoke = function(Plr: Player, Step: number): boolean
     return if Shelf then Move(Plr, Shelf, Shelf.Redo, Shelf.Undo, true, Step) else false
 end
 
-Network.Forget:Connect(function(Plr: Player, RedoOnly: boolean)
+Network.Forget.OnInvoke = function(Plr: Player, RedoOnly: boolean): boolean
     if RedoOnly then
         History:Fork(Plr)
     else
         History:Clear(Plr)
     end
-end)
+
+    return true
+end
 
 -- Their stacks go with them, and so does everything those stacks were holding.
 -- Keeping them for a rejoin would mean keeping every object they had destroyed,
@@ -21450,6 +21473,35 @@ T:Test("a custom action needs both verbs", function()
     History:Clear()
     T:Ok(not History:Push({Undo = function() end} :: any), "refused without a Redo")
     T:Ok(not History:CanUndo(), "and nothing was recorded")
+end)
+
+T:Test("clearing lands in order with the edits around it", function()
+    if not Editable or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    -- An edit straight after a clear. The clear used to cross on the remote
+    -- event and the set on the remote function, and the clear landed second
+    -- and wiped the step the set had just made.
+    Window()
+    History:Clear()
+    Editable:Set(TitleId, "ClearedBefore")
+
+    T:Eventually(function()
+        return History:CanUndo()
+    end, 3, "the edit after the clear was recorded")
+
+    task.wait(0.5)
+    T:Ok(History:CanUndo(), "and stayed recorded")
+
+    -- And the other way round: an edit straight before a clear is cleared.
+    Window()
+    Editable:Set(TitleId, EDITABLE_MARKER)
+    History:Clear()
+
+    task.wait(1)
+    T:Ok(not History:CanUndo(), "the edit before the clear went with it")
 end)
 
 T:Test("a transaction is a step the server keeps", function()
