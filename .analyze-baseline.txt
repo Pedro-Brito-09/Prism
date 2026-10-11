@@ -5,7 +5,6 @@ src/History/Client.luau	1
 src/History/Server.luau	1
 src/Objects/Client.luau	10
 src/Objects/Server.luau	9
-src/Objects/Shared.luau	3
 src/Permissions/Client.luau	1
 src/Permissions/Server.luau	1
 src/Permissions/Shared.luau	6

@@ -19,7 +19,6 @@ if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
-const PRISM = (script.Parent :: Instance):WaitForChild("Prism") :: any
 const CRATE_OBJECT = "TestCrate"
 const BARE_OBJECT = "TestBare"
 const SHOWN_OBJECT = "TestShown"
@@ -32,7 +31,7 @@ const EVICT_MARKER = "EvictPulse"
 const UNREGISTER_MARKER = "UnregisterPulse"
 const TIMEOUT = 15
 
-const Prism = require(PRISM)
+const Prism = require("./Prism")
 const Harness = require("./Harness")
 
 const Transactions = Prism.Transactions
@@ -282,21 +281,21 @@ T:Test("a scene you were admitted to arrives whole", function()
     T:Eq(#Scenes:GetInstances(Admitted.Id), 1, "its copy")
 
     T:Eventually(function()
-        return FindLiveObject(BareId, TitleId, "FixtureAdmittedScenery")
+        return FindLiveObject(BareId, TitleId, "FixtureAdmitScenery")
     end, 5, "its scenery")
 
     T:Eventually(function()
-        return FindLiveObject(PrivateId, TitleId, "FixtureAdmittedPrivate")
+        return FindLiveObject(PrivateId, TitleId, "FixtureAdmitPrivate")
     end, 5, "and what is kept for the admitted")
 end)
 
 T:Test("eviction takes the name and what is kept for the admitted", function()
     const Admitted = Scenes:Get("FixtureAdmitted")
     const Scenery = if BareId and TitleId
-        then FindLiveObject(BareId, TitleId, "FixtureAdmittedScenery")
+        then FindLiveObject(BareId, TitleId, "FixtureAdmitScenery")
         else nil
     const Private = if PrivateId and TitleId
-        then FindLiveObject(PrivateId, TitleId, "FixtureAdmittedPrivate")
+        then FindLiveObject(PrivateId, TitleId, "FixtureAdmitPrivate")
         else nil
 
     if not Admitted or not Scenery or not Private or not Editable or not TitleId then
@@ -476,7 +475,7 @@ T:Test("Can reflects the rights on the object's own scene", function()
 
     -- A scene that has granted this player nothing: the admitted fixture was
     -- admitted, which is not the same thing.
-    const Scenery = if TitleId then FindLiveObject(BareId, TitleId, "FixtureAdmittedScenery") else nil
+    const Scenery = if TitleId then FindLiveObject(BareId, TitleId, "FixtureAdmitScenery") else nil
     if Scenery then
         T:Ok(not Permissions:Can("Edit", Scenery), "and nothing at all on a scene that granted nothing")
     end
@@ -536,6 +535,11 @@ T:Test("an allowed set survives the server round trip", function()
         T:Ok(false, "no editable fixture")
         return
     end
+
+    -- TestBuilder allows 5 calls a second, and the tests just before this can
+    -- spend them. A set past the budget is refused and rolls back, which reads
+    -- as this test failing, so start a fresh window first.
+    task.wait(1.1)
 
     T:Ok(Editable:Set(TitleId, "ClientAccepted"), "accepted locally")
     T:Eq(Editable:Get(TitleId), "ClientAccepted", "applied immediately")
@@ -924,7 +928,7 @@ end)
 
 -- A level written by a build that had a type and a property this one does not.
 T:Test("what this build cannot read survives a local save", function()
-    const Compressor = require(PRISM.Compressor)
+    const Compressor = Prism.Compressor
     const Foreign = Compressor:CompressScene(2, {
         {
             __type = "DecompressedObject",
@@ -1148,7 +1152,7 @@ T:Test("a replicated reference resolves to the object it names", function()
     end)
 
     const Button = WaitFor("reference button", function()
-        return FindLiveObject(ButtonId, TitleId, "FixtureReferenceButton")
+        return FindLiveObject(ButtonId, TitleId, "FixtureRefButton")
     end)
 
     if not Door or not Button then
@@ -1398,7 +1402,7 @@ T:Test("a create in a local scene undoes as the same object", function()
     History:Clear()
 end)
 
-T:Test("a destroy in a local scene undoes, and a new action ends it", function()
+T:Test("a destroy in a local scene undoes, and Clear ends it", function()
     const Sandbox = Scenes.new({Name = "ClientHistoryDestroy"})
     if not Sandbox or not BareId or not TitleId then
         T:Ok(false, "not registered")
@@ -1417,17 +1421,19 @@ T:Test("a destroy in a local scene undoes, and a new action ends it", function()
     T:Eq(Copy:Find(LocalId), Obj, "back as itself")
     T:Eq(Obj:Get(TitleId), "Doomed", "with what it held")
 
-    -- Redo it, then act again: the step is forked off the redo stack, and
-    -- nothing is left holding the object.
+    -- Redo puts the destroy back on the undo stack, so acting again forks
+    -- nothing away: the step can still be undone, and it keeps the object.
     T:Ok(History:Redo(), "redone")
     T:Ok(Obj.Suspended, "held again")
 
     Copy:Create(BareId, {[TitleId] = "Later"})
-    T:Ok(not History:CanRedo(), "the redo forked away")
+    T:Ok(Obj.Suspended, "still held by the step under the new one")
+
+    -- Clear is what lets go of it.
+    History:Clear()
     T:Eq(Obj.Suspended, nil, "and what it held is gone for good")
 
     Sandbox:Destroy()
-    History:Clear()
 end)
 
 T:Test("a local transaction applies here and is one step", function()

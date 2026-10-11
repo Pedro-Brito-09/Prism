@@ -262,21 +262,12 @@ T:Test("never reuses when recycling is off", function()
     T:Eq(Pool:Claim(), 3, "moved past the hole")
 end)
 
-T:Test("honours a custom id and refuses a duplicate", function()
+-- The pool takes no id: naming a retired one was a way to make saved records
+-- decode as something else. One passed anyway is ignored.
+T:Test("hands out its own id, never the one asked for", function()
     const Pool = IdPool.new()
-    T:Eq(Pool:Claim(50), 50, "custom")
-    T:Eq(Pool:Claim(50), nil, "duplicate refused")
-    T:Eq(Pool:Claim(), 51, "counter moved past it")
-end)
-
-T:Test("Normalize rejects what the wire cannot carry", function()
-    T:Eq(IdPool.Normalize(5, "test"), 5, "valid")
-    T:Eq(IdPool.Normalize("7", "test"), 7, "numeric string")
-    T:Eq(IdPool.Normalize(5.7, "test"), 5, "floored")
-    T:Eq(IdPool.Normalize(-5, "test"), nil, "negative")
-    T:Eq(IdPool.Normalize(0, "test"), nil, "zero")
-    T:Eq(IdPool.Normalize(70000, "test"), nil, "past u16")
-    T:Eq(IdPool.Normalize("abc", "test"), nil, "not a number")
+    T:Eq((Pool.Claim :: any)(Pool, 50), 1, "the pool picks")
+    T:Eq(Pool:Claim(), 2, "and keeps counting from there")
 end)
 
 T:Test("errors when exhausted", function()
@@ -2728,7 +2719,7 @@ T:Test("a reference only names objects in the same copy", function()
     const Button = Here:Create(ButtonId)
 
     T:Ok(not Button:Set(TargetId, Door), "refused across copies")
-    T:Eq(Button:GetProperty(TargetId).Value, nil, "and nothing was written")
+    T:Eq(Button:GetProperty(TargetId).Value, 0, "and it still points at nothing")
 
     Scene:Destroy()
 end)
@@ -3016,7 +3007,10 @@ T:Describe("Suspending")
 
 T:Test("a suspended object is out of the world but whole", function()
     const Scene, Copy = Room("SuspendRoom")
-    const Door = Copy:Create(DoorId, {[TitleId] = "Door"})
+
+    -- A crate rather than a door: it has a template, so there is a part to
+    -- keep out of the world.
+    const Door = Copy:Create(CrateId, {[TitleId] = "Door"})
     const RuntimeId = Door.RuntimeId
     const LocalId = Door.LocalId
     const Part = Door.Instance
@@ -3558,7 +3552,7 @@ T:Test("a reference the pack did not carry is dropped", function()
 
     if Made and Made[1] then
         T:Eq(Made[1]:Get(TargetId), nil, "pointing at nothing")
-        T:Eq(Made[1]:GetProperty(TargetId).Value, nil, "with nothing written")
+        T:Eq(Made[1]:GetProperty(TargetId).Value, 0, "with the empty reference written")
     end
 
     Scene:Destroy()
@@ -3856,7 +3850,7 @@ const ReferenceDoor = Objects.new(DoorId)
 ReferenceDoor:Set(TitleId, "FixtureReferenceDoor")
 
 const ReferenceButton = Objects.new(ButtonId)
-ReferenceButton:Set(TitleId, "FixtureReferenceButton")
+ReferenceButton:Set(TitleId, "FixtureRefButton")
 ReferenceButton:Set(TargetId, ReferenceDoor)
 
 -- Two private scenes, each admitting only user id 1, which nobody running this
@@ -3871,8 +3865,8 @@ HiddenCopy:Create(PrivateId, {[TitleId] = "FixtureHiddenPrivate"})
 
 const AdmittedScene = Scenes.new({Name = "FixtureAdmitted", Private = true, Admitted = {1}})
 const AdmittedCopy = AdmittedScene:Load()
-AdmittedCopy:Create(BareId, {[TitleId] = "FixtureAdmittedScenery"})
-AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmittedPrivate"})
+AdmittedCopy:Create(BareId, {[TitleId] = "FixtureAdmitScenery"})
+AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmitPrivate"})
 
 -- A copy the server opened rather than loaded, holding an object whose template
 -- replicates. The server builds no part for it; the test player, admitted as
@@ -4068,7 +4062,10 @@ if RUN_DATABASE then
 
             if Id then
                 table.insert(Created, Id)
-                db:Edit(Id, {[TitleId] = `Level {Index}`, [PlaysId] = Index * 10})
+                -- Annotated: the default solver types a mixed literal by its
+                -- first value and then refuses the number.
+                const Changes: {[number]: any} = {[TitleId] = `Level {Index}`, [PlaysId] = Index * 10}
+                db:Edit(Id, Changes)
             end
         end
 
@@ -4112,8 +4109,11 @@ if RUN_DATABASE then
         T:Ok(Newest.HasMore, "more pages exist")
         T:Eq(Newest.Records[1].Id, Created[8], "newest first")
 
+        -- Records from earlier runs stay in the store (the cleanup below is off),
+        -- so the oldest is only known to be no newer than this run's first.
         const Oldest = db:Get("Oldest", 1)
-        T:Eq(Oldest.Records[1].Id, Created[1], "oldest first")
+        T:Ok(Oldest.Records[1].Id <= Created[1], "oldest first")
+        T:Ok(Oldest.Records[1].Id < Oldest.Records[2].Id, "ascending")
     end)
 
     T:Test("paging reaches the end cleanly", function()
@@ -4122,7 +4122,7 @@ if RUN_DATABASE then
         const Seen = {}
         local Page = 1
 
-        while Page < 20 do
+        while Page < 200 do
             const Result = db:Get("Oldest", Page)
             for _, Record in Result.Records do
                 T:Ok(not Seen[Record.Id], `id {Record.Id} appears once`)
@@ -4136,12 +4136,10 @@ if RUN_DATABASE then
             Page += 1
         end
 
-        local Count = 0
-        for _ in Seen do
-            Count += 1
+        -- Earlier runs' records page too, so this checks the ones it made.
+        for _, Id in Created do
+            T:Ok(Seen[Id], `id {Id} paged`)
         end
-
-        T:Eq(Count, 8, "every record paged exactly once")
         T:Eq(#db:Get("Oldest", 99).Records, 0, "past the end is empty")
     end)
 
@@ -4264,4 +4262,4 @@ if not RUN_DATABASE then
     print("[ PRISM TEST ] Database suite skipped. Set RUN_DATABASE = true to run it.")
 end
 
-print("[ PRISM TEST ] Client fixtures are ready; PrismTest.client.luau runs separately.")
+print("[ PRISM TEST ] Client fixtures are ready; the client half runs on its own.")

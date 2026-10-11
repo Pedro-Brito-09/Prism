@@ -11,8 +11,11 @@
 
 const RunService = game:GetService("RunService")
 
-const Properties = if RunService:IsClient()
-    then require("../Properties/Client")
+-- Typed as the server half. The two halves share every member this file uses,
+-- but the default solver cannot call through a union of two module types even
+-- when their signatures match.
+const Properties: typeof(require("../Properties/Server")) = if RunService:IsClient()
+    then require("../Properties/Client") :: any
     else require("../Properties/Server")
 
 const PropertyTypes = require("../Properties/Types")
