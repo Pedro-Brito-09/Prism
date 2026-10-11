@@ -55,46 +55,11 @@ with one player (pure 335, server 211, client 62), and then two players drove
 the README's own editor flow by hand. It found three bugs, fixed under Done --
 an opened copy leaking new objects to everyone, a client not seeing its own
 holds when `Lock` returned, and edits lost straight after `History:Clear` --
-and the item below, which needs a decision rather than a fix.
+and a drag that showed nothing on a loaded copy, which needed a decision
+rather than a fix and is also under Done now.
 
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
-
-- [ ] **A `ClientSided` drag does not move the part of a loaded copy.** *Ask.*
-      The README's dragging section says a preview fires `OnChange` and links,
-      "so the part moves". That holds only for objects the client owns or
-      draws. A client builds links for an object only when it is `Local` or
-      `Drawn` (`Objects/Client.luau`, the `Shared.BuildLinks` calls); an object
-      of a copy the server made with `Load` has a part the server drives, and
-      the client wires nothing to it. So in the README's own first-editor flow
-      -- a level loaded on the server, edited by players -- a gizmo dragging a
-      crate with `Set(Spot, cframe, true)` shows nothing on the dragging
-      player's screen until the closing `Set` lands. Seen in the playthrough:
-      the property read 30 studs over while the part stayed at 0. The other
-      player saw only the final value, which is right.
-
-      Two ways out, and the choice is the *Ask*:
-
-      - **The client drives the server's part too.** Wire links on loaded
-        objects as well, so a preview writes the part locally. Roblox lets a
-        client write a replicated part's properties; the write stays on that
-        client and the server's value replicates over it the next time the
-        server changes it. The confirmed value and the server's write agree,
-        so the end of a drag is seamless. What needs checking: every incoming
-        `PropertyChanged` then writes the part twice on the client (once
-        through the link, once through replication), a refused set's rollback
-        has to put the part back as well as the value, and a client that is
-        not admitted must not end up writing parts it holds no data for -- it
-        has no object, so nothing would be wired, but say so in the code.
-      - **Say the part is the game's.** Keep links server-only for loaded
-        copies, fix the README sentence, and show the game moving the part
-        from `OnChange` while a preview is open. Cheaper, and honest, but every
-        editor built on Prism writes the same few lines and the first-editor
-        example stops being a working drag.
-
-      Leaning towards the first, because a drag that shows nothing is the
-      first thing anyone building an editor will hit, and the README already
-      promises it. Either way the README's dragging section changes with it.
 
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
@@ -115,6 +80,25 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **A `ClientSided` drag moves the part of a loaded copy.** Found in the
+      first playthrough: a client built links only for objects it owned or
+      drew, so a preview on an object of a copy the server loaded changed the
+      value and left the part where it was until the closing set came back.
+      The README promised the part moves, and a drag that shows nothing is the
+      first thing anyone building an editor would hit.
+
+      Decided: the client drives the server's part too, rather than leaving
+      it to the game. `WireServerPart` builds links on a server-built part
+      when its object arrives and whenever the part does -- they reach a
+      client in either order, and a part can stream out and back -- and
+      releases them when the part goes. A client writing a replicated part
+      changes it on that client only, and the server's write replicates over
+      it when the server changes it, to the value the client confirms anyway;
+      a refusal rolls the property back and the link puts the part back with
+      it. A client not admitted to a scene holds no object for its parts, so
+      it wires nothing to them. A fixture with a server-built, linked part has
+      the client preview and cancel a drag and watch the part follow.
 
 - [x] **`History:Clear` lands in order with the edits around it.** Found in
       the first playthrough: a set made straight after `History:Clear()` was

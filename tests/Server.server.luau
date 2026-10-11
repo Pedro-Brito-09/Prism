@@ -3837,6 +3837,11 @@ T:Describe("Client integration fixtures")
 const DeniedFixture = Objects.new(CrateId)
 DeniedFixture:Set(TitleId, "FixtureDenied")
 
+-- An object with a part the server builds and a link onto it, in the default
+-- scene. The client previews a drag on it and checks its own view of the part
+-- follows, which it used to for drawn and local parts only.
+Objects.new(ShownId, {[TitleId] = "FixtureDragged"})
+
 const EditableFixture = Objects.new(BareId)
 EditableFixture:Set(TitleId, "FixtureEditable")
 
