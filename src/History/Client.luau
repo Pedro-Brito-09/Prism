@@ -196,6 +196,19 @@ const function Weigh(Step: Step): number
     return Held
 end
 
+-- Tells the server to drop this player's redo stack, or both. Invoked on a
+-- thread of its own so neither caller yields, and spawned rather than deferred
+-- so the request leaves now: it has to reach the server ahead of any edit made
+-- after it, which also goes through the remote function, and an event used to
+-- arrive behind such an edit and wipe the step it had just recorded.
+const function Forget(RedoOnly: boolean)
+    task.spawn(function()
+        pcall(function()
+            return Network.Forget:Invoke(RedoOnly)
+        end)
+    end)
+end
+
 const function Push(Step: Step)
     Step.Weight = Weigh(Step)
     table.insert(UndoOrder, {Step = Step})
@@ -237,7 +250,7 @@ const function Push(Step: Step)
     end
 
     if Theirs then
-        Network.Forget:FireAll(true)
+        Forget(true)
     end
 
     ClearTokens(RedoOrder)
@@ -416,7 +429,7 @@ end
 function History:Clear()
     ClearTokens(UndoOrder)
     ClearTokens(RedoOrder)
-    Network.Forget:FireAll(false)
+    Forget(false)
     Listeners.Notify(Changed)
 end
 

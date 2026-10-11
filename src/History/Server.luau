@@ -789,13 +789,15 @@ Network.Redo.OnInvoke = function(Plr: Player, Step: number): boolean
     return if Shelf then Move(Plr, Shelf, Shelf.Redo, Shelf.Undo, true, Step) else false
 end
 
-Network.Forget:Connect(function(Plr: Player, RedoOnly: boolean)
+Network.Forget.OnInvoke = function(Plr: Player, RedoOnly: boolean): boolean
     if RedoOnly then
         History:Fork(Plr)
     else
         History:Clear(Plr)
     end
-end)
+
+    return true
+end
 
 -- Their stacks go with them, and so does everything those stacks were holding.
 -- Keeping them for a rejoin would mean keeping every object they had destroyed,

@@ -301,8 +301,16 @@ const Channels: {Channel} = {
         --
         -- Either way it is where deferred destroys end: a step nobody can reach
         -- is a step whose objects nothing is keeping.
+        --
+        -- Invoked rather than fired, though nothing waits on the answer. Every
+        -- edit a player makes reaches the server through the remote function,
+        -- and Roblox orders nothing between that and the remote event: a set
+        -- made just after History:Clear used to be recorded and then wiped by
+        -- a Forget that arrived behind it. On the same remote, the two land in
+        -- the order they were made.
         Name = "History.Forget",
         Args = {Codecs.Bool}, -- RedoOnly
+        Returns = {Codecs.Bool},
     },
 }
 
