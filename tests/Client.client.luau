@@ -244,32 +244,51 @@ end)
 --=============================================================================
 
 T:Test("a custom enum registered here late still resolves", function()
-    -- The server registers TestShapes and a property constrained to it. This
-    -- client registers it only now, after the property arrived, which used to
-    -- leave the constraint unresolved for the rest of the session.
+    -- The server registers TestShapes, a property constrained to it, and an
+    -- object holding Square. This client registers the enum only now, after
+    -- all three arrived. It used to show the property's default until the
+    -- server next changed it, because the value decoded to UNKNOWN and an
+    -- unresolved constraint refused it.
     const ShapeId = FindProperty("TestShape")
-    T:Ok(ShapeId, "the property arrived")
+    const ShapedType = FindObjectType("FixtureShapedType")
+    T:Ok(ShapeId and ShapedType, "the property and type arrived")
 
-    if not ShapeId then
+    if not ShapeId or not ShapedType or not TitleId then
         return
     end
 
-    const Prop = Properties.new(ShapeId)
-    const Circle = {__type = "CustomEnumOption", Id = 1, Value = "Circle", Parent = "TestShapes"}
-    T:Ok(not (Prop:Set(Circle :: any)), "refused while the enum is unknown here")
+    const Shaped = T:Eventually(function()
+        return FindLiveObject(ShapedType, TitleId, "FixtureShaped")
+    end, 5, "the object arrived")
+
+    if not Shaped then
+        return
+    end
+
+    const Before = Shaped:Get(ShapeId)
+    T:Ok(Before and Before.Pending, "held as a pending option, not the default")
+    T:Eq(Before and Before.Id, 2, "with the server's option id")
+    T:Eq(Before and Before.Value, nil, "and no Value yet")
+
+    local Heard = nil
+    const Stop = Shaped:OnChange(ShapeId, function(Value)
+        Heard = Value
+    end)
 
     const Shapes = Prism.CustomEnum:Register("TestShapes", {Circle = 1, Square = 2, Triangle = 3})
     T:Ok(Shapes, "registered here")
 
-    if not Shapes then
-        return
+    if Shapes then
+        T:Eventually(function()
+            return Shaped:Get(ShapeId) == Shapes:GetById(2)
+        end, 2, "the value became the real Square")
+
+        T:Eq(Heard, Shapes:GetById(2), "and whoever was watching heard it")
+        T:Eq(Properties:GetRegistry(ShapeId).Constraints.CustomEnum, Shapes, "the constraint resolved")
+        T:Ok(not (Properties.new(ShapeId):Set(Prism.CustomEnum.Pending("TestShapesNot", 1))), "and an option of another enum is refused")
     end
 
-    T:Eventually(function()
-        return Properties:GetRegistry(ShapeId).Constraints.CustomEnum == Shapes
-    end, 2, "the constraint resolved")
-
-    T:Ok((Prop:Set(Shapes:GetById(2))), "and an option is accepted")
+    Stop()
 end)
 
 T:Describe("Admission")

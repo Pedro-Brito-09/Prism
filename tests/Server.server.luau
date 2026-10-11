@@ -3848,6 +3848,13 @@ Objects.new(ShownId, {[TitleId] = "FixtureDragged"})
 const HeldFixture = Objects.new(BareId, {[TitleId] = "FixtureHeld"})
 Objects:Lock({HeldFixture}, "FixtureAnimator")
 
+-- An object holding an option of TestShapes, which the client registers only
+-- partway through its run. It checks the value arrives as a pending option --
+-- the enum's name and the id, no Value -- rather than as the default, and turns
+-- into Square once it registers the enum.
+const ShapedType = Objects:Register({Name = "FixtureShapedType", Properties = {TitleId, ShapeId}}) :: number
+Objects.new(ShapedType, {[TitleId] = "FixtureShaped", [ShapeId] = Shapes:GetById(2)})
+
 const EditableFixture = Objects.new(BareId)
 EditableFixture:Set(TitleId, "FixtureEditable")
 

@@ -102,6 +102,33 @@ function CustomEnum:Register<T>(Name: string, Options: EnumOptions<T>): CustomEn
     return Enum :: any
 end
 
+-- An option of an enum this side has not registered, as read off the wire or
+-- out of a save: its enum's name and its id, with no Value until the enum is
+-- registered here. It encodes back to the same name and id, so passing one on
+-- loses nothing, and it is what a client holds for a property whose enum it
+-- registers late.
+function CustomEnum.Pending<T>(Name: EnumName, Id: OptionId): RegisteredOption<T>
+    return {
+        __type = "CustomEnumOption",
+        Id = Id,
+        Value = nil :: any,
+        Parent = Name,
+        Pending = true,
+    } :: any
+end
+
+-- The registered option a pending one stands for, once its enum is registered
+-- and still has that id. Nil for anything else, including an option that is
+-- not pending.
+function CustomEnum.Settle<T>(Option: any): RegisteredOption<T>?
+    if type(Option) ~= "table" or Option.Pending ~= true then
+        return nil
+    end
+
+    const Enum = Registered[Option.Parent]
+    return if Enum then Enum:GetById(Option.Id) else nil
+end
+
 -- Fired for every enum registered from here on. A client resolves the custom
 -- enum constraints the server sent by name against this side's enums, and one
 -- registered after those properties arrived has to be resolved then.

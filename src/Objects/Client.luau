@@ -3,6 +3,7 @@ const CollectionService = game:GetService("CollectionService")
 const Players = game:GetService("Players")
 
 const Properties = require("../Properties/Client")
+const CustomEnum = require("../CustomEnum")
 const PropertyTypes = require("../Properties/Types")
 const Compressor = require("../Compressor")
 const Network = require("./Network")
@@ -376,6 +377,15 @@ const function __getter(self: Object, Reference: Types.PropertyReference): any?
     end
 
     const Value = if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+
+    -- A pending option whose enum has been registered since, on an object the
+    -- sweep below did not reach because it was set aside at the time.
+    if Prop.Type == "CustomEnum" then
+        const Settled = CustomEnum.Settle(Value)
+        if Settled then
+            return Settled
+        end
+    end
 
     -- The live object rather than the id it is stored as, exactly as on the
     -- server. Nil while the target has not replicated here yet, which is the
@@ -1381,6 +1391,37 @@ Network.LocksChanged:Connect(function(Ids: {RuntimeId}, Who: {number}, Held: {bo
 end)
 
 Network.ObjectAdded:Connect(AddObject)
+
+-- An enum registered here after values of it arrived. Those values are pending
+-- options, holding the enum's name and the option id; swapped now for the real
+-- options, so the Value is there and OnChange tells whoever is showing them.
+-- What the server last confirmed moves with it, or a refused set later would
+-- roll back to the pending option rather than the same value with its Value.
+CustomEnum:OnRegistered(function()
+    for _, Obj in Workspace do
+        for _, Prop in Obj.Properties do
+            if Prop.Type ~= "CustomEnum" then
+                continue
+            end
+
+            const Was = Prop.Value
+            const Settled = CustomEnum.Settle(Was)
+            if not Settled then
+                continue
+            end
+
+            Prop:Set(Settled)
+            if Confirmed[Prop] == Was then
+                Confirmed[Prop] = Settled
+            end
+
+            const Held = Previewing[Prop]
+            if Held and Held.Before == Was then
+                Held.Before = Settled
+            end
+        end
+    end
+end)
 
 -- The instance list carries false where an object has no instance: a nil entry
 -- would leave a hole in the array and shift every later index against the ids.

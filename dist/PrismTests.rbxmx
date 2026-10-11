@@ -1112,9 +1112,16 @@ function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number
         const Consumed = 1 + Read + Length
         const Name, Id = ReadNamedNumber(Buf, Body + Read)
 
+        -- An enum this side has not registered is not the same as an option
+        -- that no longer exists. Collapsing both to UNKNOWN threw away which
+        -- option it was, and a client that registers its enums after the first
+        -- values arrive showed every one of them as the property's default for
+        -- the rest of the session. A pending option keeps the name and the id,
+        -- encodes back to exactly what it was read from, and is swapped for the
+        -- real option once the enum is registered. Its Value is nil until then.
         const Registered = CustomEnum:GetEnum(Name)
         if not Registered then
-            return CustomEnum.UNKNOWN, Consumed, Type
+            return CustomEnum.Pending(Name, Id), Consumed, Type
         end
 
         return Registered:GetById(Id) or CustomEnum.UNKNOWN, Consumed, Type
@@ -1993,6 +2000,33 @@ function CustomEnum:Register<T>(Name: string, Options: EnumOptions<T>): CustomEn
     Registered[Name] = Enum :: any
     Listeners.Notify(OnRegistered, Enum)
     return Enum :: any
+end
+
+-- An option of an enum this side has not registered, as read off the wire or
+-- out of a save: its enum's name and its id, with no Value until the enum is
+-- registered here. It encodes back to the same name and id, so passing one on
+-- loses nothing, and it is what a client holds for a property whose enum it
+-- registers late.
+function CustomEnum.Pending<T>(Name: EnumName, Id: OptionId): RegisteredOption<T>
+    return {
+        __type = "CustomEnumOption",
+        Id = Id,
+        Value = nil :: any,
+        Parent = Name,
+        Pending = true,
+    } :: any
+end
+
+-- The registered option a pending one stands for, once its enum is registered
+-- and still has that id. Nil for anything else, including an option that is
+-- not pending.
+function CustomEnum.Settle<T>(Option: any): RegisteredOption<T>?
+    if type(Option) ~= "table" or Option.Pending ~= true then
+        return nil
+    end
+
+    const Enum = Registered[Option.Parent]
+    return if Enum then Enum:GetById(Option.Id) else nil
 end
 
 -- Fired for every enum registered from here on. A client resolves the custom
@@ -4967,6 +5001,7 @@ const CollectionService = game:GetService("CollectionService")
 const Players = game:GetService("Players")
 
 const Properties = require("../Properties/Client")
+const CustomEnum = require("../CustomEnum")
 const PropertyTypes = require("../Properties/Types")
 const Compressor = require("../Compressor")
 const Network = require("./Network")
@@ -5340,6 +5375,15 @@ const function __getter(self: Object, Reference: Types.PropertyReference): any?
     end
 
     const Value = if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+
+    -- A pending option whose enum has been registered since, on an object the
+    -- sweep below did not reach because it was set aside at the time.
+    if Prop.Type == "CustomEnum" then
+        const Settled = CustomEnum.Settle(Value)
+        if Settled then
+            return Settled
+        end
+    end
 
     -- The live object rather than the id it is stored as, exactly as on the
     -- server. Nil while the target has not replicated here yet, which is the
@@ -6345,6 +6389,37 @@ Network.LocksChanged:Connect(function(Ids: {RuntimeId}, Who: {number}, Held: {bo
 end)
 
 Network.ObjectAdded:Connect(AddObject)
+
+-- An enum registered here after values of it arrived. Those values are pending
+-- options, holding the enum's name and the option id; swapped now for the real
+-- options, so the Value is there and OnChange tells whoever is showing them.
+-- What the server last confirmed moves with it, or a refused set later would
+-- roll back to the pending option rather than the same value with its Value.
+CustomEnum:OnRegistered(function()
+    for _, Obj in Workspace do
+        for _, Prop in Obj.Properties do
+            if Prop.Type ~= "CustomEnum" then
+                continue
+            end
+
+            const Was = Prop.Value
+            const Settled = CustomEnum.Settle(Was)
+            if not Settled then
+                continue
+            end
+
+            Prop:Set(Settled)
+            if Confirmed[Prop] == Was then
+                Confirmed[Prop] = Settled
+            end
+
+            const Held = Previewing[Prop]
+            if Held and Held.Before == Was then
+                Held.Before = Settled
+            end
+        end
+    end
+end)
 
 -- The instance list carries false where an object has no instance: a nil entry
 -- would leave a hole in the array and shift every later index against the ids.
@@ -9822,10 +9897,32 @@ end
 --
 -- An enum this client has not registered yet is waited for rather than given
 -- up on: a game may register its enums after requiring Prism, and the
--- registries can arrive first. Until then the constraint is nil, which refuses
--- every value. Property instances share their registry's Constraints table, so
--- resolving it later reaches every object already holding the property.
+-- registries can arrive first. Until then the constraint is a placeholder
+-- carrying only the enum's name, which accepts the pending options the server's
+-- values decode to -- name and id, no Value -- so the client holds what the
+-- server holds rather than the default. A nil constraint used to stand in, and
+-- refused them all. Property instances share their registry's Constraints
+-- table, so resolving it later reaches every object already holding the
+-- property, and Objects swaps the pending values for the real options.
 const Waiting: {[string]: {any}} = {}
+
+const function Placeholder(Name: string): any
+    return {
+        __type = "CustomEnum",
+        Name = Name,
+        Options = {},
+        ById = {},
+        Pending = true,
+
+        GetById = function()
+            return nil
+        end,
+
+        GetByValue = function()
+            return nil
+        end,
+    }
+end
 
 const function Register(Payload: any)
     const Constraints = Payload.Constraints
@@ -9833,7 +9930,7 @@ const function Register(Payload: any)
         const Name = Constraints.CustomEnum
         const Resolved = CustomEnum:GetEnum(Name)
         if not Resolved then
-            Logger:Warn(`Property {Payload.Id} constrains to custom enum {Name}, which is not registered on this client yet. Its values are refused until it is.`)
+            Logger:Warn(`Property {Payload.Id} constrains to custom enum {Name}, which is not registered on this client yet. Its values read with no Value until it is.`)
 
             local List = Waiting[Name]
             if not List then
@@ -9844,7 +9941,7 @@ const function Register(Payload: any)
             table.insert(List, Constraints)
         end
 
-        Constraints.CustomEnum = Resolved
+        Constraints.CustomEnum = Resolved or Placeholder(Name)
     end
 
     Registered[Payload.Id] = Payload
@@ -19573,6 +19670,13 @@ Objects.new(ShownId, {[TitleId] = "FixtureDragged"})
 const HeldFixture = Objects.new(BareId, {[TitleId] = "FixtureHeld"})
 Objects:Lock({HeldFixture}, "FixtureAnimator")
 
+-- An object holding an option of TestShapes, which the client registers only
+-- partway through its run. It checks the value arrives as a pending option --
+-- the enum's name and the id, no Value -- rather than as the default, and turns
+-- into Square once it registers the enum.
+const ShapedType = Objects:Register({Name = "FixtureShapedType", Properties = {TitleId, ShapeId}}) :: number
+Objects.new(ShapedType, {[TitleId] = "FixtureShaped", [ShapeId] = Shapes:GetById(2)})
+
 const EditableFixture = Objects.new(BareId)
 EditableFixture:Set(TitleId, "FixtureEditable")
 
@@ -20279,32 +20383,51 @@ end)
 --=============================================================================
 
 T:Test("a custom enum registered here late still resolves", function()
-    -- The server registers TestShapes and a property constrained to it. This
-    -- client registers it only now, after the property arrived, which used to
-    -- leave the constraint unresolved for the rest of the session.
+    -- The server registers TestShapes, a property constrained to it, and an
+    -- object holding Square. This client registers the enum only now, after
+    -- all three arrived. It used to show the property's default until the
+    -- server next changed it, because the value decoded to UNKNOWN and an
+    -- unresolved constraint refused it.
     const ShapeId = FindProperty("TestShape")
-    T:Ok(ShapeId, "the property arrived")
+    const ShapedType = FindObjectType("FixtureShapedType")
+    T:Ok(ShapeId and ShapedType, "the property and type arrived")
 
-    if not ShapeId then
+    if not ShapeId or not ShapedType or not TitleId then
         return
     end
 
-    const Prop = Properties.new(ShapeId)
-    const Circle = {__type = "CustomEnumOption", Id = 1, Value = "Circle", Parent = "TestShapes"}
-    T:Ok(not (Prop:Set(Circle :: any)), "refused while the enum is unknown here")
+    const Shaped = T:Eventually(function()
+        return FindLiveObject(ShapedType, TitleId, "FixtureShaped")
+    end, 5, "the object arrived")
+
+    if not Shaped then
+        return
+    end
+
+    const Before = Shaped:Get(ShapeId)
+    T:Ok(Before and Before.Pending, "held as a pending option, not the default")
+    T:Eq(Before and Before.Id, 2, "with the server's option id")
+    T:Eq(Before and Before.Value, nil, "and no Value yet")
+
+    local Heard = nil
+    const Stop = Shaped:OnChange(ShapeId, function(Value)
+        Heard = Value
+    end)
 
     const Shapes = Prism.CustomEnum:Register("TestShapes", {Circle = 1, Square = 2, Triangle = 3})
     T:Ok(Shapes, "registered here")
 
-    if not Shapes then
-        return
+    if Shapes then
+        T:Eventually(function()
+            return Shaped:Get(ShapeId) == Shapes:GetById(2)
+        end, 2, "the value became the real Square")
+
+        T:Eq(Heard, Shapes:GetById(2), "and whoever was watching heard it")
+        T:Eq(Properties:GetRegistry(ShapeId).Constraints.CustomEnum, Shapes, "the constraint resolved")
+        T:Ok(not (Properties.new(ShapeId):Set(Prism.CustomEnum.Pending("TestShapesNot", 1))), "and an option of another enum is refused")
     end
 
-    T:Eventually(function()
-        return Properties:GetRegistry(ShapeId).Constraints.CustomEnum == Shapes
-    end, 2, "the constraint resolved")
-
-    T:Ok((Prop:Set(Shapes:GetById(2))), "and an option is accepted")
+    Stop()
 end)
 
 T:Describe("Admission")
