@@ -90,6 +90,26 @@ rather than guessed.
 
 ## Done
 
+- [x] **One player's undo no longer switches off everyone's history.** Found
+      under load: while one player undid the unload of a 5,000-object copy --
+      2.5 seconds, because bringing a copy back announces it a chunk a frame --
+      another player's destroy went unrecorded, and an unrecorded destroy is
+      disposed on the spot. The crate was gone for good, and their next undo
+      took back the edit before it instead. `History/Server` held one flag for
+      the whole server while any step was applied, on the belief that a step
+      never yields.
+
+      The flag guards only what a custom action does, since Prism's own
+      entries never reach a recorder, so it is now per player and set only
+      around a custom action. A step is also off its stack while it is
+      applied: a player's own new action, a clear, a fork or leaving can land
+      while it yields, and each used to reach the half-applied step -- the new
+      action was the one removed in its place, and a clear or a fork disposed
+      of what it was bringing back. Afterwards it goes back, moves on, or ends
+      if what happened meanwhile left it unreachable. Three server tests use
+      a custom action that waits, so the yield does not depend on a player
+      being connected.
+
 - [x] **Values of an enum a client has not registered are kept.** Found in
       the second playthrough: a player who joined without the game's enum
       registered showed `Surface` as Wood, the default, while the server held

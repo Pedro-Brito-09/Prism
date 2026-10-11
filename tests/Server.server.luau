@@ -3156,6 +3156,111 @@ T:Test("the stack is capped by what its steps hold, not only by count", function
     Scene:Destroy()
 end)
 
+-- A step whose undo yields, as bringing a big copy back does: it announces the
+-- copy's objects a chunk a frame. A custom action stands in for it here because
+-- its yield does not depend on anyone being connected to hear the chunks, and
+-- the server suite runs before the test player arrives.
+const function SlowStep(Plr: any, Seconds: number): {Cleared: boolean}
+    const Seen = {Cleared = false}
+    History:Push(Plr, {
+        Undo = function()
+            task.wait(Seconds)
+        end,
+
+        Redo = function() end,
+
+        Clear = function()
+            Seen.Cleared = true
+        end,
+    })
+
+    return Seen
+end
+
+T:Test("another player's edits are recorded while an undo yields", function()
+    const Scene, Copy = Room("HistoryYieldOthers")
+    const A = Editor(-6301, Scene)
+    const B = Editor(-6302, Scene)
+    const Door = Copy:Create(DoorId, {[TitleId] = "B's door"})
+
+    SlowStep(A, 0.3)
+
+    local Undone = nil
+    task.spawn(function()
+        Undone = History:Undo(A)
+    end)
+
+    T:Eq(Undone, nil, "A's undo is still running")
+
+    -- B's destroy lands in the middle of it. It used to go unrecorded, because
+    -- one flag for the whole server said a step was being applied, and an
+    -- unrecorded destroy is disposed on the spot rather than kept.
+    T:Ok(Transactions.Apply(B, {{Kind = "Destroy", Target = Door.RuntimeId}} :: any), "B destroyed a door")
+    T:Ok(History:CanUndo(B), "and it was recorded as B's")
+
+    T:Eventually(function()
+        return Undone ~= nil
+    end, 3, "A's undo finished")
+
+    T:Ok(History:Undo(B), "B undoes the destroy")
+    T:Eq(Objects:Get(Door.RuntimeId), Door, "and the same door is back")
+
+    History:Clear(A)
+    History:Clear(B)
+    Scene:Destroy()
+end)
+
+T:Test("a clear while an undo yields leaves nothing to redo", function()
+    const Scene = Room("HistoryYieldClear")
+    const A = Editor(-6303, Scene)
+    const Seen = SlowStep(A, 0.3)
+
+    local Undone = nil
+    task.spawn(function()
+        Undone = History:Undo(A)
+    end)
+
+    -- The step is off the stack while it runs, so the clear cannot reach it.
+    -- It used to be put on the redo stack afterwards regardless, surviving a
+    -- clear that came after it.
+    History:Clear(A)
+
+    T:Eventually(function()
+        return Undone ~= nil
+    end, 3, "the undo finished")
+
+    T:Ok(not History:CanRedo(A), "nothing to redo")
+    T:Ok(not History:CanUndo(A), "nothing to undo")
+    T:Ok(Seen.Cleared, "and the step was cleared, letting go of what it held")
+
+    Scene:Destroy()
+end)
+
+T:Test("a fork while an undo yields leaves the undone step unreachable", function()
+    const Scene = Room("HistoryYieldFork")
+    const A = Editor(-6304, Scene)
+    const Seen = SlowStep(A, 0.3)
+
+    local Undone = nil
+    task.spawn(function()
+        Undone = History:Undo(A)
+    end)
+
+    -- A new action in a scene the client owns forks this half too. With the
+    -- redo stack empty at that moment the fork used to do nothing, and the
+    -- step then landed on the redo stack, redoable past the newer action.
+    History:Fork(A)
+
+    T:Eventually(function()
+        return Undone ~= nil
+    end, 3, "the undo finished")
+
+    T:Ok(not History:CanRedo(A), "not redoable past the newer action")
+    T:Ok(Seen.Cleared, "and cleared")
+
+    Scene:Destroy()
+end)
+
 T:Test("a transaction is one step, undone and redone as a unit", function()
     const Scene, Copy = Room("HistoryUnit")
     const Plr = Editor(-6001, Scene)

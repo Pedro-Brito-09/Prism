@@ -135,10 +135,18 @@ type Shelf = {
     Undo: {Step},
     Redo: {Step},
 
-    -- One step at a time for this player. Prism's own entries never yield, but
-    -- a custom action is the game's code and may; a second undo starting
-    -- meanwhile would reverse a step the first has not finished with.
+    -- One step at a time for this player. A step can yield: bringing back a
+    -- copy announces its objects in chunks, a frame apiece, and a custom action
+    -- is the game's code. A second undo starting meanwhile would reverse a step
+    -- the first has not finished with.
     Busy: boolean?,
+
+    -- Counted up whenever the redo stack is dropped (Forked: a new action, or
+    -- a fork from the client) or both stacks are (Wiped: Clear). A step being
+    -- applied is off its stack while it runs, and these are how it learns, once
+    -- it is done, whether it still has anywhere to go back to.
+    Forked: number,
+    Wiped: number,
 
     -- Step ids are per player and only climb. The client names the step it
     -- believes is on top, and an id that has been reused would let a stale
@@ -152,18 +160,24 @@ type Shelf = {
 -- moved on without them.
 const Shelves: {[Player]: Shelf} = {}
 
--- Set while a step is being applied, so nothing done in the course of reversing
--- one is recorded as a new action. Prism's own entries reach past the recorders
--- anyway -- they write to properties and objects directly -- but a custom
--- action is the game's code, free to use the ordinary API, and every edit it
--- made while undoing would otherwise land on the stack on top of the step doing
--- the undoing.
-local Applying = false
+-- The players whose custom action is running, so nothing it does is recorded
+-- as a new action of theirs. A custom action is the game's code, free to use the
+-- ordinary API, and every edit it made while undoing would otherwise land on the
+-- stack on top of the step doing the undoing. Prism's own entries need no such
+-- guard: they write to properties and objects directly and never reach a
+-- recorder.
+--
+-- Per player, and only around a custom action. This was one flag for the whole
+-- server, held for every step, and a step can yield -- bringing a copy back
+-- announces its objects a chunk a frame. For as long as one player's undo of an
+-- unload ran, nobody else's edits were recorded, and a destroy that landed in
+-- that window was disposed on the spot rather than kept for its undo.
+const Applying: {[Player]: true} = {}
 
 const function ShelfFor(Plr: Player): Shelf
     local Shelf = Shelves[Plr]
     if not Shelf then
-        Shelf = {Undo = {}, Redo = {}, Next = 1, Busy = false}
+        Shelf = {Undo = {}, Redo = {}, Next = 1, Busy = false, Forked = 0, Wiped = 0}
         Shelves[Plr] = Shelf
     end
 
@@ -301,6 +315,7 @@ const function Push(Plr: Player, Shelf: Shelf, Step: Step)
     -- unreachable, and every object those steps were keeping alive against a
     -- redo that will never come goes with them.
     ClearAll(Shelf.Redo)
+    Shelf.Forked += 1
     Announce(Plr)
 end
 
@@ -413,13 +428,13 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
             return false
         end
 
-        -- Recording is off while it runs. A custom verb is free to move objects
-        -- around through the ordinary API, and every one of those would
-        -- otherwise be recorded as a fresh action on top of the step being
-        -- reversed -- a stack that grows every time it is undone.
-        Applying = true
+        -- Recording is off for this player while it runs. A custom verb is
+        -- free to move objects around through the ordinary API, and every one
+        -- of those would otherwise be recorded as a fresh action on top of the
+        -- step being reversed -- a stack that grows every time it is undone.
+        Applying[Plr] = true
         const Ok, Err = pcall(if Forward then Custom.Redo else Custom.Undo)
-        Applying = false
+        Applying[Plr] = nil
 
         if not Ok then
             -- Left where it was, like any other refusal, so the player can try
@@ -446,8 +461,6 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
     if not Permissions:Consume(Plr, 1) then
         return false
     end
-
-    Applying = true
 
     const Changes: {{Object: Object, Property: PropertyTypes.PropertyIdentifier, Value: buffer}} = {}
 
@@ -504,8 +517,6 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
         end
     end
 
-    Applying = false
-
     if #Announced > 0 then
         Objects.AnnounceChanged(Announced)
     end
@@ -528,31 +539,56 @@ const function Move(Plr: Player, Shelf: Shelf, From: {Step}, To: {Step}, Forward
         return false
     end
 
-    -- Wrapped, and not only to answer the caller: Apply turns recording off
-    -- while it runs, and an error escaping it would leave this player's edits
-    -- going unrecorded for the rest of the session.
+    -- Off its stack while it runs. Applying can yield, and in that time this
+    -- player can make a new action, fork or clear their history, or leave. Each
+    -- of those used to reach the step mid-apply: a new action landed on top and
+    -- was the one removed afterwards in its place, and a fork or a clear
+    -- disposed of objects the step was in the middle of bringing back.
+    table.remove(From)
+    const Pushed = Shelf.Next
+    const Forked = Shelf.Forked
+    const Wiped = Shelf.Wiped
+
+    -- Wrapped, and not only to answer the caller: a custom action turns its
+    -- player's recording off while it runs, and an error escaping it would
+    -- leave their edits going unrecorded for the rest of the session.
     Shelf.Busy = true
     const Ok, Result = pcall(Apply, Plr, Step, Forward)
     Shelf.Busy = false
-    Applying = false
+    Applying[Plr] = nil
 
     if not Ok then
         Logger:Warn(`A history step failed to apply and was left on the stack: {Result}`)
-        return false
     end
 
-    if not Result then
-        return false
+    const Moved = Ok and Result == true
+
+    -- Somewhere the step can no longer be reached from: the player left, or
+    -- cleared everything, or it would land on a redo stack a new action has
+    -- forked since. It ends here and lets go of what it holds, as it would
+    -- have had it still been on the stack when that happened.
+    const Gone = Shelves[Plr] ~= Shelf or Shelf.Wiped ~= Wiped
+    const Destination = if Moved then To else From
+    const Unreachable = Gone or (Destination == Shelf.Redo and Shelf.Forked ~= Forked)
+
+    if Unreachable then
+        Clear(Step)
+    elseif Moved then
+        -- A step that has moved is finished; a later set starts a run of its own.
+        Step.Run = nil
+        table.insert(To, Step)
+    else
+        -- Refused, so back where it was: under whatever this player recorded
+        -- while it was being tried, which happened after it.
+        const Since = if From == Shelf.Undo then Shelf.Next - Pushed else 0
+        table.insert(From, math.max(1, #From - Since + 1), Step)
     end
 
-    table.remove(From)
+    if not Gone then
+        Announce(Plr)
+    end
 
-    -- A step that has moved is finished; a later set starts a run of its own.
-    Step.Run = nil
-    table.insert(To, Step)
-
-    Announce(Plr)
-    return true
+    return Moved and not Unreachable
 end
 
 --=============================================================================
@@ -631,6 +667,7 @@ function History:Clear(Plr: Player)
 
     ClearAll(Shelf.Undo)
     ClearAll(Shelf.Redo)
+    Shelf.Wiped += 1
     Announce(Plr)
 end
 
@@ -640,7 +677,14 @@ end
 -- fork.
 function History:Fork(Plr: Player)
     const Shelf = Shelves[Plr]
-    if not Shelf or #Shelf.Redo == 0 then
+    if not Shelf then
+        return
+    end
+
+    -- Counted even with nothing on the redo stack: a redo being applied right
+    -- now is off it, and has to learn it was forked.
+    Shelf.Forked += 1
+    if #Shelf.Redo == 0 then
         return
     end
 
@@ -656,7 +700,7 @@ end
 -- packet, one permission pass, one thing to take back. Taking the record means
 -- taking the objects its destroys suspended, so this answers true.
 Transactions.OnApplied(function(Plr: Player, Record): boolean
-    if Applying then
+    if Applying[Plr] then
         return false
     end
 
@@ -715,7 +759,7 @@ end)
 -- A single set, and a run of them to one property merged into one step, so a
 -- drag undoes as the drag it was rather than as a hundred frames.
 Objects.OnPlayerEdited(function(Plr, Obj, Property, Before, After)
-    if Applying then
+    if Applying[Plr] then
         return
     end
 
@@ -765,7 +809,7 @@ Objects.OnRetired(function(Plr, Obj): boolean
     -- destroys something as part of undoing is destroying it for good, because
     -- the step it is part of is the thing that would have to bring it back and
     -- that step is already busy being that.
-    if not Plr or Applying then
+    if not Plr or Applying[Plr] then
         return false
     end
 
