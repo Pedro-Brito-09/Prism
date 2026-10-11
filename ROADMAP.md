@@ -61,6 +61,12 @@ holds when `Lock` returned, and edits lost straight after `History:Clear` --
 and a drag that showed nothing on a loaded copy, which needed a decision
 rather than a fix and is also under Done now.
 
+A second playthrough the same day, with three players, ran every suite on the
+merged result and went over everything again by hand -- references, duplicate
+and place, copies set aside and brought back, unloads undone, pushes. It found
+two more, both under Done: a private scene admitting nobody was public, and a
+client showed the default for values of an enum it had not registered.
+
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 

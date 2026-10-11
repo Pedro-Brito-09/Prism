@@ -16,9 +16,9 @@ parts every editor needs and nobody wants to write twice:
 - **Storage** in a compact binary format that survives schema changes, and a
   sharded DataStore database for browsing and searching levels.
 
-> **Status:** structurally complete, and played through once with two players
-> in Studio. That pass found five bugs, all fixed, and every suite in `tests/`
-> runs green. It has not shipped in a live game yet — see `ROADMAP.md`.
+> **Status:** structurally complete, and played through twice in Studio, with
+> two players and then three. Those passes found seven bugs, all fixed, and
+> every suite in `tests/` runs green. It has not shipped in a live game yet — see `ROADMAP.md`.
 
 ## Contents
 
