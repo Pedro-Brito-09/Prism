@@ -50,14 +50,51 @@ Read this before picking anything up. It is how every item under Done landed.
 
 ## Queued
 
-The playthrough still comes first: the framework gets played through in one
-pass, with a player in it, and the suites in `tests/` are run for the first
-time. That pass is Pedro's call. Three bugs that would have shown up in the
-first minute of it are fixed below, but the pass is what the queue below waits
-on -- every item here is better decided with the thing running.
+The first playthrough happened on 2026-10-11: every suite in `tests/` ran green
+with one player (pure 335, server 211, client 62), and then two players drove
+the README's own editor flow by hand. It found three bugs, fixed under Done --
+an opened copy leaking new objects to everyone, a client not seeing its own
+holds when `Lock` returned, and edits lost straight after `History:Clear` --
+and the item below, which needs a decision rather than a fix.
 
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
+
+- [ ] **A `ClientSided` drag does not move the part of a loaded copy.** *Ask.*
+      The README's dragging section says a preview fires `OnChange` and links,
+      "so the part moves". That holds only for objects the client owns or
+      draws. A client builds links for an object only when it is `Local` or
+      `Drawn` (`Objects/Client.luau`, the `Shared.BuildLinks` calls); an object
+      of a copy the server made with `Load` has a part the server drives, and
+      the client wires nothing to it. So in the README's own first-editor flow
+      -- a level loaded on the server, edited by players -- a gizmo dragging a
+      crate with `Set(Spot, cframe, true)` shows nothing on the dragging
+      player's screen until the closing `Set` lands. Seen in the playthrough:
+      the property read 30 studs over while the part stayed at 0. The other
+      player saw only the final value, which is right.
+
+      Two ways out, and the choice is the *Ask*:
+
+      - **The client drives the server's part too.** Wire links on loaded
+        objects as well, so a preview writes the part locally. Roblox lets a
+        client write a replicated part's properties; the write stays on that
+        client and the server's value replicates over it the next time the
+        server changes it. The confirmed value and the server's write agree,
+        so the end of a drag is seamless. What needs checking: every incoming
+        `PropertyChanged` then writes the part twice on the client (once
+        through the link, once through replication), a refused set's rollback
+        has to put the part back as well as the value, and a client that is
+        not admitted must not end up writing parts it holds no data for -- it
+        has no object, so nothing would be wired, but say so in the code.
+      - **Say the part is the game's.** Keep links server-only for loaded
+        copies, fix the README sentence, and show the game moving the part
+        from `OnChange` while a preview is open. Cheaper, and honest, but every
+        editor built on Prism writes the same few lines and the first-editor
+        example stops being a working drag.
+
+      Leaning towards the first, because a drag that shows nothing is the
+      first thing anyone building an editor will hit, and the README already
+      promises it. Either way the README's dragging section changes with it.
 
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
