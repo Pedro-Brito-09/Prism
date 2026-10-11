@@ -16,8 +16,9 @@ parts every editor needs and nobody wants to write twice:
 - **Storage** in a compact binary format that survives schema changes, and a
   sharded DataStore database for browsing and searching levels.
 
-> **Status:** structurally complete, but not yet played through with real
-> players. Expect rough edges until that pass is done — see `ROADMAP.md`.
+> **Status:** structurally complete, and played through once with two players
+> in Studio. That pass found five bugs, all fixed, and every suite in `tests/`
+> runs green. It has not shipped in a live game yet — see `ROADMAP.md`.
 
 ## Contents
 
@@ -137,8 +138,11 @@ room:Commit()
 DataStore:SetAsync("Level 1", buffer.tostring(Level:Serialize()))
 ```
 
-`roomCopyId` is the id of the copy the server loaded; a client hears of it
-through `Prism.Scenes:OnCopyAdded`. Registries arrive shortly after the client
+`roomCopyId` is the id of the copy the server loaded. A client hears of a copy
+through `Prism.Scenes:OnCopyAdded` as it arrives, and finds one that is already
+here with `Prism.Scenes:GetInstances(Prism.Scenes:Get("Level 1").Id)`, which
+lists the live copies of a server scene. `OnCopyAdded` does not replay copies
+that arrived before it was connected. Registries arrive shortly after the client
 requires Prism, so wait for them before looking ids up. The sections below go
 through each piece.
 
@@ -168,6 +172,12 @@ local Health = Prism.Properties:Register({
 | `Enum` | an `EnumItem` | `Enum` (required: which enum), `Whitelist`, `Blacklist` (items or names) |
 | `CustomEnum` | an option of a custom enum | `CustomEnum` (required), `Whitelist`, `Blacklist` (options or option ids) |
 | `Object` | another object | `Types` (object type ids or names) |
+
+A `Color` is held and saved at 8 bits per channel, the 0–255 its constraints
+are written in: each channel is scaled to 0–255 and rounded down, so
+`Color3.new(0.5, 0, 0)` reads back with a red of 127/255, about 0.498. A color
+made with `Color3.fromRGB` comes back exactly, and so does any color that has
+been through a set once. Compare colors after a set, not the value passed in.
 
 A value that fails a rejecting constraint is refused — `Set` returns `false` —
 and one outside a clamping constraint is brought into range.
@@ -1347,7 +1357,7 @@ The sections above explain each one.
 |---|---|---|
 | `Properties` | `:Register(config)`, `:Unregister(id)` | S |
 | | `:GetRegistered()`, `:GetRegistry(id)`, `.new(id)`, `:Layout(ids, includeHidden?)` | S C |
-| `CustomEnum` | `:Register(name, options)`, `:GetEnum(name)`, `:GetRegistered()` | S C |
+| `CustomEnum` | `:Register(name, options)`, `:GetEnum(name)`, `:GetRegistered()`, `:OnRegistered(fn)` | S C |
 | `Objects` | `.new(type, values?, copy?)`, `:Register(config)`, `:Unregister(id)` | S |
 | | `:Get(runtimeId)`, `:GetWorkspace()`, `:GetRegistered()`, `:GetRegistry(id)`, `:Resolve(copy, localId)`, `:Split(persistentId)` | S C |
 | | `:Duplicate(object, copy?)`, `:DuplicateGroup(objects, copy?)` | S C (client: scenes it owns) |
@@ -1359,7 +1369,7 @@ The sections above explain each one.
 | an object | `:Set(property, value, clientSided?)`, `:Get(property)`, `:GetProperty(property)`, `:OnChange(property, fn)`, `:Destroy()` | S C |
 | `Scenes` | `.new(config)`, `.fromBuffer(config, pack)`, `:Get(name)`, `:GetById(id)`, `:GetRegistered()` | S C |
 | | `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
-| | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
+| | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:GetInstances(sceneId)`, `:GetInstanceScene(copyId)`, `:GetObjects(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
 | a scene | `:Load(parent?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
 | | `:Open()`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
 | | `:Push(name)` | C |
