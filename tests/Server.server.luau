@@ -3842,6 +3842,12 @@ DeniedFixture:Set(TitleId, "FixtureDenied")
 -- follows, which it used to for drawn and local parts only.
 Objects.new(ShownId, {[TitleId] = "FixtureDragged"})
 
+-- Held by the server itself for the whole run, under a holder that is not a
+-- person. The client checks it refuses an edit to it on the spot rather than
+-- showing the edit and snapping back when the server says no.
+const HeldFixture = Objects.new(BareId, {[TitleId] = "FixtureHeld"})
+Objects:Lock({HeldFixture}, "FixtureAnimator")
+
 const EditableFixture = Objects.new(BareId)
 EditableFixture:Set(TitleId, "FixtureEditable")
 

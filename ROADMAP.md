@@ -81,6 +81,19 @@ rather than guessed.
 
 ## Done
 
+- [x] **An edit to an object someone else holds is refused on the spot.**
+      Found in the first playthrough: a client's `Set` on an object another
+      player held applied, showed, went to the server, was refused and snapped
+      back -- a flicker on every attempt, though the client had been told of
+      the hold. `Set`, a `ClientSided` preview and `Destroy` now answer false
+      without sending when this client knows someone else holds the object,
+      and a preview open when the hold arrived is put back. The server still
+      decides; this only stops showing an edit that is bound to be refused.
+
+      Decided against folding locks into `Permissions:Can`. It answers for
+      rights, which a game reads to build a role editor as much as to grey out
+      a tool, and a hold is not a right. The README says to ask `IsLocked` too.
+
 - [x] **A `ClientSided` drag moves the part of a loaded copy.** Found in the
       first playthrough: a client built links only for objects it owned or
       drew, so a preview on an object of a copy the server loaded changed the
