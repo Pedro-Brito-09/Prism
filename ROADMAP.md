@@ -3,11 +3,11 @@
 Agreed work, in the order it makes sense to build it. Ticked when it lands on
 `main`.
 
-Nothing here waits on Studio. The suites in `tests/` are written alongside the
-work and left unrun on purpose — the framework gets played through in one pass
-once it is structurally finished, so a ticked item means the work landed and
-reads right, never that it was run with a player in it. Do not suggest running
-them; that pass is Pedro's call and comes after the queue below is empty.
+The suites in `tests/` are run now. Until the first playthrough on 2026-10-11
+they were written alongside the work and left unrun on purpose, so an item ticked
+before it means the work landed and read right, not that it ran with a player
+in it. Every item since was run in Studio before it was ticked: the pure suite,
+and the server and client suites with one player.
 
 ## How the work is done
 
@@ -21,11 +21,14 @@ Read this before picking anything up. It is how every item under Done landed.
   updated in the same commit as the code. On this file, the item moves from
   Queued to the top of Done, rewritten as what was built and the decisions
   taken, not what was planned.
-- **Tests are written, not run.** `tests/Server.server.luau` holds server tests
+- **Tests are written and run.** `tests/Server.server.luau` holds server tests
   and the fixtures the client checks; `tests/Client.client.luau` holds the
   client half. A server change the client should observe gets a fixture on the
   server — the existing ones are triggered by the client writing a marker
   (`"EvictPulse"`, `"UnregisterPulse"`, ...) on the editable fixture.
+  Before an item is ticked, insert `dist/PrismTests.rbxmx` into an empty place
+  and Play with one player; both suites end with a pass count. A fix lands with
+  a test that fails without it.
 - **Run the checks before syncing into Studio.** `scripts/analyze.sh` type
   checks every file and `node scripts/check-channels.js` checks that each
   channel is fired with the number of arguments it declares. Both fetch what
