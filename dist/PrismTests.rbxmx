@@ -1893,6 +1893,7 @@ return Compressor
 					<string name="Name">CustomEnum</string>
 					<ProtectedString name="Source"><![CDATA[--!strict
 const Logger = require("./Logger")
+const Listeners = require("./Listeners")
 
 export type EnumName = string
 export type OptionId = number
@@ -1918,6 +1919,7 @@ const MAX_OPTION_ID = 65535
 
 const CustomEnum = {}
 const Registered: {[EnumName]: CustomEnum<any>} = {}
+const OnRegistered: {(Enum: CustomEnum<any>) -> ()} = {}
 
 -- Indexed rather than scanned: the compressor calls this for every CustomEnum
 -- property it decodes.
@@ -1989,7 +1991,15 @@ function CustomEnum:Register<T>(Name: string, Options: EnumOptions<T>): CustomEn
     }
 
     Registered[Name] = Enum :: any
+    Listeners.Notify(OnRegistered, Enum)
     return Enum :: any
+end
+
+-- Fired for every enum registered from here on. A client resolves the custom
+-- enum constraints the server sent by name against this side's enums, and one
+-- registered after those properties arrived has to be resolved then.
+function CustomEnum:OnRegistered(Callback: (Enum: CustomEnum<any>) -> ()): () -> ()
+    return Listeners.Watch(OnRegistered, Callback, "custom enums")
 end
 
 function CustomEnum:GetEnum<T>(Name: string): CustomEnum<T>?
@@ -9809,12 +9819,29 @@ end
 -- The server sends a CustomEnum constraint as the enum's name, because the enum
 -- table carries methods and a remote cannot serialize a function. Resolve it
 -- back into the local registry so IsValid can compare against it.
+--
+-- An enum this client has not registered yet is waited for rather than given
+-- up on: a game may register its enums after requiring Prism, and the
+-- registries can arrive first. Until then the constraint is nil, which refuses
+-- every value. Property instances share their registry's Constraints table, so
+-- resolving it later reaches every object already holding the property.
+const Waiting: {[string]: {any}} = {}
+
 const function Register(Payload: any)
     const Constraints = Payload.Constraints
     if Payload.Type == "CustomEnum" and Constraints and type(Constraints.CustomEnum) == "string" then
-        const Resolved = CustomEnum:GetEnum(Constraints.CustomEnum)
+        const Name = Constraints.CustomEnum
+        const Resolved = CustomEnum:GetEnum(Name)
         if not Resolved then
-            Logger:Warn(`Property {Payload.Id} constrains to custom enum {Constraints.CustomEnum}, which is not registered on this client.`)
+            Logger:Warn(`Property {Payload.Id} constrains to custom enum {Name}, which is not registered on this client yet. Its values are refused until it is.`)
+
+            local List = Waiting[Name]
+            if not List then
+                List = {}
+                Waiting[Name] = List
+            end
+
+            table.insert(List, Constraints)
         end
 
         Constraints.CustomEnum = Resolved
@@ -9822,6 +9849,18 @@ const function Register(Payload: any)
 
     Registered[Payload.Id] = Payload
 end
+
+CustomEnum:OnRegistered(function(Enum)
+    const List = Waiting[Enum.Name]
+    if not List then
+        return
+    end
+
+    Waiting[Enum.Name] = nil
+    for _, Constraints in List do
+        Constraints.CustomEnum = Enum
+    end
+end)
 
 Network.PropertyRegistered:Connect(Register)
 
@@ -20216,6 +20255,35 @@ end)
 --=============================================================================
 -- Admission
 --=============================================================================
+
+T:Test("a custom enum registered here late still resolves", function()
+    -- The server registers TestShapes and a property constrained to it. This
+    -- client registers it only now, after the property arrived, which used to
+    -- leave the constraint unresolved for the rest of the session.
+    const ShapeId = FindProperty("TestShape")
+    T:Ok(ShapeId, "the property arrived")
+
+    if not ShapeId then
+        return
+    end
+
+    const Prop = Properties.new(ShapeId)
+    const Circle = {__type = "CustomEnumOption", Id = 1, Value = "Circle", Parent = "TestShapes"}
+    T:Ok(not (Prop:Set(Circle :: any)), "refused while the enum is unknown here")
+
+    const Shapes = Prism.CustomEnum:Register("TestShapes", {Circle = 1, Square = 2, Triangle = 3})
+    T:Ok(Shapes, "registered here")
+
+    if not Shapes then
+        return
+    end
+
+    T:Eventually(function()
+        return Properties:GetRegistry(ShapeId).Constraints.CustomEnum == Shapes
+    end, 2, "the constraint resolved")
+
+    T:Ok((Prop:Set(Shapes:GetById(2))), "and an option is accepted")
+end)
 
 T:Describe("Admission")
 
