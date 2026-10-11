@@ -18336,9 +18336,8 @@ end)
 -- Scene commits from a client
 --=============================================================================
 
--- The three ways a hold goes without its holder letting go. Each leaves
--- somebody holding objects they can no longer touch and nobody else able to
--- touch them either, which is why none of them may keep a hold.
+-- A holder leaving. Losing the right and losing admission have tests of their
+-- own above; leaving had none, though it is the commonest of the three.
 
 T:Test("a holder's holds all go when they leave, and nobody else's", function()
     const Holder = Ghost(-3201)
@@ -18360,41 +18359,6 @@ T:Test("a holder's holds all go when they leave, and nobody else's", function()
 
     A:Destroy()
     B:Destroy()
-end)
-
-T:Test("losing edit rights on a scene releases the holds there and only there", function()
-    const Holder = Ghost(-3203)
-    const Here = Scenes.new({Name = "RightsLostHere"})
-    const There = Scenes.new({Name = "RightsLostThere"})
-    Here:Grant(Holder, "TestBulk")
-    There:Grant(Holder, "TestBulk")
-
-    const InHere = (Here:Load() :: any):Create(BareId)
-    const InThere = (There:Load() :: any):Create(BareId)
-    T:Ok(Objects:Lock({InHere, InThere}, Holder), "held in both")
-
-    -- A role with no verbs: they may still look, but not edit.
-    Here:Grant(Holder, "TestViewer")
-
-    T:Ok(not Objects:IsLocked(InHere), "the hold where they lost the right is gone")
-    T:Eq(Objects:GetLock(InThere), -3203, "the other is kept")
-
-    Here:Destroy()
-    There:Destroy()
-end)
-
-T:Test("evicting someone releases what they held in that scene", function()
-    const Holder = Ghost(-3204)
-    const Scene = Scenes.new({Name = "EvictHolds", Private = true, Admitted = {-3204}})
-    Scene:Grant(Holder, "TestBulk")
-
-    const Obj = (Scene:Load() :: any):Create(BareId)
-    T:Ok(Objects:Lock({Obj}, Holder), "held")
-
-    Scene:Evict(-3204)
-    T:Ok(not Objects:IsLocked(Obj), "released when they were evicted")
-
-    Scene:Destroy()
 end)
 
 --=============================================================================
