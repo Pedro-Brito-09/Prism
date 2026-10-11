@@ -404,6 +404,36 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
     return true, Ids
 end
 
+-- The holds an applied transaction took and let go of, recorded from its answer
+-- rather than left to the broadcast, which travels on the other remote and can
+-- land after Commit has returned. Releases run last, so an object both locked
+-- and unlocked ends free. A destroyed object's hold went with it, and recording
+-- one would leave an entry for an id the removal may already have cleared.
+const function RecordHolds(Operations: {any})
+    const Gone: {[number]: true} = {}
+    const Final: {[number]: boolean} = {}
+
+    for _, Op in Operations do
+        if Op.Kind == "Destroy" then
+            Gone[Op.Target] = true
+        elseif Op.Kind == "Lock" and Final[Op.Target] == nil then
+            Final[Op.Target] = true
+        elseif Op.Kind == "Unlock" then
+            Final[Op.Target] = false
+        end
+    end
+
+    const Taken, Released = {}, {}
+    for Target, IsHeld in Final do
+        if not Gone[Target] then
+            table.insert(if IsHeld then Taken else Released, Target)
+        end
+    end
+
+    Objects.RecordHolds(Taken, true)
+    Objects.RecordHolds(Released, false)
+end
+
 const New = Shared.factory(Objects, function(Transaction: Transaction)
     -- A scene this client owns is this client's to edit, so there is nothing
     -- to send and nothing to wait for: this returns having already done it.
@@ -434,6 +464,8 @@ const New = Shared.factory(Objects, function(Transaction: Transaction)
     const Ids = Created or {}
 
     if Applied == true then
+        RecordHolds(Transaction.Operations)
+
         Listeners.Notify(Committed, {
             Transaction = Transaction,
             Created = Ids,

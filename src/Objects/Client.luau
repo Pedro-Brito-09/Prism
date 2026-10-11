@@ -1,5 +1,6 @@
 --!strict
 const CollectionService = game:GetService("CollectionService")
+const Players = game:GetService("Players")
 
 const Properties = require("../Properties/Client")
 const PropertyTypes = require("../Properties/Types")
@@ -108,6 +109,22 @@ const Locks: {[RuntimeId]: true} = {}
 const Holders: {[RuntimeId]: number} = {}
 const LockChanged: {(RuntimeId: RuntimeId, UserId: number?, Held: boolean) -> ()} = {}
 
+-- One object's hold as this client now knows it, from whichever of two places
+-- says so first: the answer to its own Lock or Unlock, or the broadcast. Both
+-- arrive for this client's own holds, so listeners hear a change once rather
+-- than the same hold twice.
+const function Record(Identifier: RuntimeId, IsHeld: boolean, UserId: number?)
+    const Holder = if IsHeld then UserId else nil
+    if (Locks[Identifier] == true) == IsHeld and Holders[Identifier] == Holder then
+        return
+    end
+
+    Locks[Identifier] = if IsHeld then true else nil
+    Holders[Identifier] = Holder
+
+    Listeners.Notify(LockChanged, Identifier, Holder, IsHeld)
+end
+
 const function Named(Refs: Object | {Object}): {Object}
     return if (Refs :: any).RuntimeId ~= nil then {Refs :: Object} else Refs :: {Object}
 end
@@ -137,7 +154,20 @@ function Objects:Lock(Refs: Object | {Object}): boolean
         return Network.Lock:Invoke(Ids)
     end)
 
-    return Ok and Granted == true
+    if not Ok or Granted ~= true then
+        return false
+    end
+
+    -- Recorded from the answer rather than left to the broadcast. The answer
+    -- comes back on the remote function and the broadcast on the remote event,
+    -- and Roblox orders nothing across the two, so IsLocked used to say free
+    -- for a moment after Lock had said yes.
+    const Me = Players.LocalPlayer.UserId
+    for _, Identifier in Ids do
+        Record(Identifier, true, Me)
+    end
+
+    return true
 end
 
 -- Lets go of what this player holds among the objects named. False if any of
@@ -152,7 +182,27 @@ function Objects:Unlock(Refs: Object | {Object}): boolean
         return Network.Unlock:Invoke(Ids)
     end)
 
-    return Ok and Released == true
+    if not Ok or Released ~= true then
+        return false
+    end
+
+    -- True means nobody else holds any of them, so every one named is free
+    -- now: this player let go of it or nobody held it. A false answer released
+    -- some and not others, and which is left to the broadcast.
+    for _, Identifier in Ids do
+        Record(Identifier, false, nil)
+    end
+
+    return true
+end
+
+-- The same, for a transaction the server applied: it takes and releases holds
+-- in its own packet and has the same answer to record ahead of the broadcast.
+function Objects.RecordHolds(Ids: {RuntimeId}, IsHeld: boolean)
+    const Me = if IsHeld then Players.LocalPlayer.UserId else nil
+    for _, Identifier in Ids do
+        Record(Identifier, IsHeld, Me)
+    end
 end
 
 -- The user id holding an object, or nil when it is free, when the holder is not
@@ -1270,10 +1320,7 @@ Network.LocksChanged:Connect(function(Ids: {RuntimeId}, Who: {number}, Held: {bo
         const UserId = Who[Index]
 
         -- Zero is nobody rather than free: Held is what says free.
-        Locks[Identifier] = if IsHeld then true else nil
-        Holders[Identifier] = if IsHeld and UserId ~= 0 then UserId else nil
-
-        Listeners.Notify(LockChanged, Identifier, Holders[Identifier], IsHeld)
+        Record(Identifier, IsHeld, if UserId ~= 0 then UserId else nil)
     end
 end)
 

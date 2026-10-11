@@ -79,6 +79,20 @@ rather than guessed.
 
 ## Done
 
+- [x] **A client knows its own holds when `Lock` returns.** Found in the first
+      playthrough: right after `Objects:Lock` answered true, `IsLocked` and
+      `GetLock` on the same client still said free, every time, and likewise
+      after `Unlock`. The client only learned holds from the broadcast, which
+      travels on the remote event while the answer comes back on the remote
+      function, and Roblox orders nothing across the two. `Lock`, `Unlock` and
+      an applied transaction now record their own answer; the broadcast still
+      lands and agrees. `OnLockChanged` fires on a change only, so a hold is
+      heard once rather than once from each. A transaction's holds come from
+      its operations: releases run last, so an object locked and unlocked in
+      one ends free, and a destroyed object's hold is not recorded at all.
+      An `Unlock` answered false released some and not others, and which is
+      still left to the broadcast.
+
 - [x] **The history is capped by what its steps hold.** `LIMIT = 100` counted
       steps only, and a step can hold a whole withdrawn copy, so a hundred of
       them was a limit on nothing. Each step is now weighed when it is
