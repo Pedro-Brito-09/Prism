@@ -67,6 +67,16 @@ and place, copies set aside and brought back, unloads undone, pushes. It found
 two more, both under Done: a private scene admitting nobody was public, and a
 client showed the default for values of an enum it had not registered.
 
+A stress pass followed. Every suite ran with the client on a poor network
+(150 ms each way, 100 ms jitter, 0.5% loss), and the races fixed earlier were
+repeated ten times each under the same conditions. Three players hammered one
+property at once and converged. A 5,000-object level was loaded, replayed to
+late joiners -- one on the poor network -- unloaded and undone, and pushed at
+the size limits; a crate 5,000 studs out streamed in and out. Thirty database
+creates ran at once. It found three more bugs, all under Done -- one player's
+undo switched off everyone's history, concurrent creates stranded records, and
+a large load stopped the server -- and a holder leaving had no test.
+
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
