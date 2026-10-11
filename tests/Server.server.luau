@@ -3882,6 +3882,18 @@ AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmitPrivate"})
 -- A copy the server opened rather than loaded, holding an object whose template
 -- replicates. The server builds no part for it; the test player, admitted as
 -- they arrive, draws one.
+-- Private and admitting nobody at all, the state a level editor starts in.
+-- Every other private fixture admits user id 1, and an empty list used to read
+-- as public: this one was sent whole to every player and editable by anyone
+-- with rights on it. The test player is granted rights here as they arrive and
+-- never admitted, so the client checks it gets the scenery and nothing else,
+-- and that its edit to the scenery is refused.
+const ClosedScene = Scenes.new({Name = "FixtureClosed", Private = true})
+const ClosedCopy = ClosedScene:Load()
+ClosedCopy:Create(BareId, {[TitleId] = "FixtureClosedScenery"})
+ClosedCopy:Create(PrivateId, {[TitleId] = "FixtureClosedPrivate"})
+ClosedScene:Open():Create(ShownId, {[TitleId] = "FixtureClosedOpened"})
+
 const OpenedScene = Scenes.new({Name = "FixtureOpened", Private = true, Admitted = {1}})
 OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
 
@@ -3909,6 +3921,7 @@ const function AssignBuilder(Plr: Player)
     Scenes:GetDefault():Grant(Plr, "TestBuilder")
     AdmittedScene:Admit(Plr)
     OpenedScene:Admit(Plr)
+    ClosedScene:Grant(Plr, "TestBuilder")
 end
 
 for _, Plr in Players:GetPlayers() do

@@ -10848,8 +10848,8 @@ return Replication
 -- Every packet about a scene used to go out with FireAll, so every player heard
 -- about every scene. That is fine for a game with one level and wrong for a
 -- place several people build in at once. A scene now admits players by user id,
--- and one that has admitted nobody is public -- which is what every scene that
--- existed before this already was.
+-- and one that is not private admits everybody -- which is what every scene
+-- that existed before this already was.
 --
 -- A player holds a scene at one of two reaches, named for the Replicate field
 -- on an object type. Everyone is what every player is owed of every scene the
@@ -10914,7 +10914,16 @@ function Audience.Sees(Plr: Player, Scene: number): boolean
         return false
     end
 
-    return next(Owner.Admitted) == nil or Owner.Admitted[Plr.UserId] == true
+    -- The flag, not the list. This read the list -- an empty one meaning public
+    -- -- from before scenes had a Private flag, and never moved over, so a
+    -- private scene that admitted nobody yet, the state an editor starts in,
+    -- was sent whole to every player and editable by anyone with rights on
+    -- it. Evicting the last admitted player threw it open the same way.
+    if not Owner.Private then
+        return true
+    end
+
+    return Owner.Admitted[Plr.UserId] == true
 end
 
 -- Whether a player holds a scene at a reach, and, given a token, whether they
@@ -19598,6 +19607,18 @@ AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmitPrivate"})
 -- A copy the server opened rather than loaded, holding an object whose template
 -- replicates. The server builds no part for it; the test player, admitted as
 -- they arrive, draws one.
+-- Private and admitting nobody at all, the state a level editor starts in.
+-- Every other private fixture admits user id 1, and an empty list used to read
+-- as public: this one was sent whole to every player and editable by anyone
+-- with rights on it. The test player is granted rights here as they arrive and
+-- never admitted, so the client checks it gets the scenery and nothing else,
+-- and that its edit to the scenery is refused.
+const ClosedScene = Scenes.new({Name = "FixtureClosed", Private = true})
+const ClosedCopy = ClosedScene:Load()
+ClosedCopy:Create(BareId, {[TitleId] = "FixtureClosedScenery"})
+ClosedCopy:Create(PrivateId, {[TitleId] = "FixtureClosedPrivate"})
+ClosedScene:Open():Create(ShownId, {[TitleId] = "FixtureClosedOpened"})
+
 const OpenedScene = Scenes.new({Name = "FixtureOpened", Private = true, Admitted = {1}})
 OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
 
@@ -19625,6 +19646,7 @@ const function AssignBuilder(Plr: Player)
     Scenes:GetDefault():Grant(Plr, "TestBuilder")
     AdmittedScene:Admit(Plr)
     OpenedScene:Admit(Plr)
+    ClosedScene:Grant(Plr, "TestBuilder")
 end
 
 for _, Plr in Players:GetPlayers() do
@@ -20311,6 +20333,33 @@ T:Test("a scene you were not admitted to sends only what replicates to everyone"
     end
 
     T:Eq(FindLiveObject(PrivateId, TitleId, "FixtureHiddenPrivate"), nil, "not what is kept for the admitted")
+end)
+
+T:Test("a private scene that admits nobody keeps everything but its scenery", function()
+    if not BareId or not PrivateId or not ShownId or not TitleId then
+        T:Ok(false, "no registries")
+        return
+    end
+
+    const Scenery = T:Eventually(function()
+        return FindLiveObject(BareId, TitleId, "FixtureClosedScenery")
+    end, 5, "its scenery arrived, as every player is owed it")
+
+    T:Eq(Scenes:Get("FixtureClosed"), nil, "not its name")
+    T:Eq(FindLiveObject(PrivateId, TitleId, "FixtureClosedPrivate"), nil, "not what is kept for the admitted")
+    T:Eq(FindLiveObject(ShownId, TitleId, "FixtureClosedOpened"), nil, "not its opened copy")
+
+    if not Scenery then
+        return
+    end
+
+    -- Rights on the scene, but not admitted to it: the server refuses the edit
+    -- as though the object were not there, and the value comes back.
+    task.wait(1.1)
+    Scenery:Set(TitleId, "ClosedEdit")
+    T:Eventually(function()
+        return Scenery:Get(TitleId) == "FixtureClosedScenery"
+    end, 3, "an edit to it was refused and rolled back")
 end)
 
 T:Test("a scene you were admitted to arrives whole", function()

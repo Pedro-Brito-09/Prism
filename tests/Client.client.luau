@@ -300,6 +300,33 @@ T:Test("a scene you were not admitted to sends only what replicates to everyone"
     T:Eq(FindLiveObject(PrivateId, TitleId, "FixtureHiddenPrivate"), nil, "not what is kept for the admitted")
 end)
 
+T:Test("a private scene that admits nobody keeps everything but its scenery", function()
+    if not BareId or not PrivateId or not ShownId or not TitleId then
+        T:Ok(false, "no registries")
+        return
+    end
+
+    const Scenery = T:Eventually(function()
+        return FindLiveObject(BareId, TitleId, "FixtureClosedScenery")
+    end, 5, "its scenery arrived, as every player is owed it")
+
+    T:Eq(Scenes:Get("FixtureClosed"), nil, "not its name")
+    T:Eq(FindLiveObject(PrivateId, TitleId, "FixtureClosedPrivate"), nil, "not what is kept for the admitted")
+    T:Eq(FindLiveObject(ShownId, TitleId, "FixtureClosedOpened"), nil, "not its opened copy")
+
+    if not Scenery then
+        return
+    end
+
+    -- Rights on the scene, but not admitted to it: the server refuses the edit
+    -- as though the object were not there, and the value comes back.
+    task.wait(1.1)
+    Scenery:Set(TitleId, "ClosedEdit")
+    T:Eventually(function()
+        return Scenery:Get(TitleId) == "FixtureClosedScenery"
+    end, 3, "an edit to it was refused and rolled back")
+end)
+
 T:Test("a scene you were admitted to arrives whole", function()
     const Admitted = Scenes:Get("FixtureAdmitted")
     T:Ok(Admitted, "its registry")
