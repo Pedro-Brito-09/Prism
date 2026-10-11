@@ -2928,6 +2928,86 @@ end)
 -- Object signals
 --=============================================================================
 
+T:Describe("Large loads")
+
+-- A pack of crates, which have a part to clone and links to wire, so reading
+-- one costs what a real level does.
+const function CratePack(Name: string, Count: number): any
+    const Source = Scenes.new({Name = Name})
+    const Copy = Source:Load() :: any
+    for Index = 1, Count do
+        Copy:Create(CrateId, {[HealthId] = Index % 100})
+    end
+
+    Copy:Commit()
+    Source:Unload()
+    return Source
+end
+
+T:Test("a large load does not hold the server for its whole length", function()
+    const Scene = CratePack("LargeLoad", 4000)
+
+    -- task.spawn hands control back at the read's first yield, so timing it
+    -- times the longest stretch the load holds the server without a break.
+    -- Frame gaps would be the wrong measure here: the test player can join
+    -- mid-load, and the engine spawning a character is a long frame of its
+    -- own. Before the read was budgeted, the first stretch was the whole load.
+    local Copy: any = nil
+    const Started = os.clock()
+    task.spawn(function()
+        Copy = Scene:Load()
+    end)
+
+    const FirstStretch = os.clock() - Started
+    T:Ok(FirstStretch < 0.05, `the first stretch was short, {math.floor(FirstStretch * 1000)} ms`)
+    T:Eq(Copy, nil, "and the load was still going after it")
+
+    T:Eventually(function()
+        return Copy ~= nil
+    end, 15, "the load finished")
+
+    if Copy then
+        T:Eq(#Copy:GetObjects(), 4000, "every object was read")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("a copy taken away while it is read gets nothing more", function()
+    const Scene = CratePack("LargeLoadAbandoned", 3000)
+
+    local Copy: any = nil
+    task.spawn(function()
+        Copy = Scene:Load()
+    end)
+
+    -- The read has yielded at least once by now; unloading every copy of the
+    -- scene takes the one being read with it.
+    task.wait()
+    Scene:Unload()
+
+    T:Eventually(function()
+        return Copy ~= nil
+    end, 5, "the read stopped")
+
+    if Copy then
+        T:Ok(Scenes:GetInstance(Copy.Id) == nil, "the copy is gone")
+
+        local Live = 0
+        for _, Obj in Objects:GetWorkspace() do
+            if Obj.InstanceId == Copy.Id then
+                Live += 1
+            end
+        end
+
+        T:Eq(Live, 0, "and nothing was built into it after")
+    end
+
+    Scene:Destroy()
+end)
+
+--=============================================================================
+
 T:Describe("Object signals")
 
 T:Test("added and removed fire for every object, however it came and went", function()
