@@ -84,6 +84,21 @@ rather than guessed.
 
 ## Done
 
+- [x] **A private scene that admits nobody is private.** Found in the second
+      playthrough: `Workshop`, made with `Private = true` and no one admitted
+      yet -- the state the README says a level editor starts in -- was sent
+      whole to every player, name and admitted-only objects and opened copy,
+      and a player with rights but no admission could edit it. `Scene:Admits`
+      read the `Private` flag, but `Audience.Sees`, which every packet and
+      every edit check asks, still read the admitted list, an empty one
+      meaning public, from before the flag existed. Evicting the last admitted
+      player threw a scene open the same way. `Sees` reads the flag now.
+
+      No test caught it because every private fixture admitted user id 1, so
+      the list was never empty. A fixture now admits nobody and grants the test
+      player rights, and the client checks it gets only the scenery and that
+      its edit to it is refused.
+
 - [x] **A custom enum a client registers late still resolves.** Found in the
       first playthrough. The server sends a `CustomEnum` constraint by name
       and a client resolves it against its own enums when the property

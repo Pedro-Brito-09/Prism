@@ -4,8 +4,8 @@
 -- Every packet about a scene used to go out with FireAll, so every player heard
 -- about every scene. That is fine for a game with one level and wrong for a
 -- place several people build in at once. A scene now admits players by user id,
--- and one that has admitted nobody is public -- which is what every scene that
--- existed before this already was.
+-- and one that is not private admits everybody -- which is what every scene
+-- that existed before this already was.
 --
 -- A player holds a scene at one of two reaches, named for the Replicate field
 -- on an object type. Everyone is what every player is owed of every scene the
@@ -70,7 +70,16 @@ function Audience.Sees(Plr: Player, Scene: number): boolean
         return false
     end
 
-    return next(Owner.Admitted) == nil or Owner.Admitted[Plr.UserId] == true
+    -- The flag, not the list. This read the list -- an empty one meaning public
+    -- -- from before scenes had a Private flag, and never moved over, so a
+    -- private scene that admitted nobody yet, the state an editor starts in,
+    -- was sent whole to every player and editable by anyone with rights on
+    -- it. Evicting the last admitted player threw it open the same way.
+    if not Owner.Private then
+        return true
+    end
+
+    return Owner.Admitted[Plr.UserId] == true
 end
 
 -- Whether a player holds a scene at a reach, and, given a token, whether they
