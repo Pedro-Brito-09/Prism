@@ -90,6 +90,17 @@ rather than guessed.
 
 ## Done
 
+- [x] **A large load no longer stops the server.** Found under load: reading
+      a 5,000-object level held the server for 570 ms in one frame, every
+      player's frame with it. The announcement after it was already chunked;
+      building the objects was not. The read now yields whenever it has run
+      for 1/120 s, and stops if the copy was unloaded or set aside while it
+      waited. `Load` already yielded while it announced, so callers see
+      nothing new. Measured with the player connected, 4,000 crates load over
+      about two seconds with no frame above 50 ms. Suite tests time the load's
+      first uninterrupted stretch -- frame gaps would also count the engine
+      spawning a joining player's character -- and unload a copy mid-read.
+
 - [x] **Records created at once all land where they can be found.** Found
       under load: thirty `Database:Create` calls at once against a small
       shard limit put all thirty in shard 1 while the manifest said shard 1

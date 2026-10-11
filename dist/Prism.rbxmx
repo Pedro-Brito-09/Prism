@@ -12443,6 +12443,11 @@ end
 -- Scenes
 --=============================================================================
 
+-- How long reading a pack may run in one frame before it waits for the next.
+-- Building every object at once held the server for over half a second on a
+-- five thousand object level, every player's frame with it.
+const READ_BUDGET = 1 / 120
+
 -- Load and Open are one reading of the pack, and differ only in whether the
 -- server builds the parts.
 const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
@@ -12470,7 +12475,23 @@ const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
     self.LastId = math.max(self.LastId, LastId :: number)
 
     const Restored = {}
+    local Since = os.clock()
+
     for _, Object in Decompressed :: {any} do
+        -- A frame's worth at a time. Load already yields while it announces
+        -- what it read, so a caller sees nothing new, only a server that keeps
+        -- running. Taken away while it was being read -- unloaded, or set aside
+        -- -- and nothing more goes into it; what was read is announced below
+        -- only if it is still there, which it is not.
+        if os.clock() - Since > READ_BUDGET then
+            task.wait()
+            Since = os.clock()
+
+            if Registry.Instances[Instance_.Id] ~= Instance_ then
+                break
+            end
+        end
+
         -- A type this build does not have: kept as the bytes it was read from,
         -- and written back where it was by the next commit. Restoring used to
         -- warn and leave it out, and committing the copy afterwards then wrote
