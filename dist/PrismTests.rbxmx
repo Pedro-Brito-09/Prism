@@ -5943,6 +5943,32 @@ function Objects.Retire(Obj: Object)
     Dispose(Obj)
 end
 
+-- Links on a part the server built, so this client's own view of the object
+-- reaches the part it sees. Without them a ClientSided drag on an object of a
+-- loaded copy moved nothing on the dragging client: the value changed and the
+-- part stayed where it was until the closing set came back from the server.
+--
+-- Writing a replicated part from a client changes it on this client alone, and
+-- the server's write replicates over it the next time the server changes it --
+-- to the same value, since the server's write is what Confirmed holds. A
+-- refusal rolls the property back, and the link puts the part back with it.
+--
+-- A local or drawn part is wired where it is built and never comes through here.
+-- Safe to repeat, because Track runs again on a part that streams back in.
+const function WireServerPart(Obj: any)
+    if Obj.Local or Obj.Drawn then
+        return
+    end
+
+    Shared.ReleaseLinks(Obj.Links)
+    Obj.Links = nil
+
+    const Registry = Registered[Obj.Registry]
+    if Obj.Instance and Registry then
+        Obj.Links = Shared.BuildLinks(Obj.Instance, Registry.Links, Obj.Properties)
+    end
+end
+
 -- A tagged part has arrived: file it, and hand it to its object if that object
 -- is already here. The two halves reach a client in either order -- the object
 -- travels over the remote, the part over ordinary replication -- so whichever
@@ -5960,6 +5986,7 @@ const function Track(Inst: Instance)
     const Obj = Workspace[RuntimeId]
     if Obj and not Obj.Destroyed then
         Obj.Instance = Inst
+        WireServerPart(Obj)
     end
 end
 
@@ -5981,6 +6008,9 @@ const function Untrack(Inst: Instance)
     const Obj = Workspace[RuntimeId]
     if Obj and Obj.Instance == Inst then
         Obj.Instance = nil
+
+        -- Nothing left to drive; Track wires it again if the part comes back.
+        WireServerPart(Obj)
     end
 end
 
@@ -6223,10 +6253,14 @@ const function AddObject(
 
     -- A drawn part is driven from here, through the links that came with the
     -- registry. Wired after the values land, as on the server, so the part
-    -- starts at the object's value rather than the template's.
+    -- starts at the object's value rather than the template's. A part the
+    -- server built is wired too, for what this client shows ahead of the
+    -- server: an optimistic set, or a ClientSided preview.
     if Into then
         Obj.Drawn = true
         Obj.Links = Shared.BuildLinks(Resolved, Registry.Links, Obj.Properties)
+    else
+        WireServerPart(Obj)
     end
 
     Obj.Set = __setter
@@ -19458,6 +19492,11 @@ T:Describe("Client integration fixtures")
 const DeniedFixture = Objects.new(CrateId)
 DeniedFixture:Set(TitleId, "FixtureDenied")
 
+-- An object with a part the server builds and a link onto it, in the default
+-- scene. The client previews a drag on it and checks its own view of the part
+-- follows, which it used to for drawn and local parts only.
+Objects.new(ShownId, {[TitleId] = "FixtureDragged"})
+
 const EditableFixture = Objects.new(BareId)
 EditableFixture:Set(TitleId, "FixtureEditable")
 
@@ -20576,6 +20615,33 @@ T:Test("a ClientSided drag costs one action and lands where it ends", function()
     T:Eq(Editable:Get(TitleId), "Drag30", "the server kept it")
 
     Disconnect()
+end)
+
+T:Test("a preview moves a part the server built, on this client", function()
+    if not ShownId or not TitleId then
+        T:Ok(false, "no shown registry")
+        return
+    end
+
+    const Dragged = T:Eventually(function()
+        const Obj = FindLiveObject(ShownId, TitleId, "FixtureDragged")
+        return if Obj and Obj.Instance then Obj else nil
+    end, 5, "the object and its part arrived")
+
+    if not Dragged then
+        return
+    end
+
+    T:Ok(not Dragged.Drawn and not Dragged.Local, "a part the server built")
+
+    -- The link writes the part the moment the preview does. It used to wait
+    -- for the server, which a preview never asks.
+    T:Ok(Dragged:Set(TitleId, "DragPreview", true), "previewed")
+    T:Eq(Dragged.Instance:GetAttribute(FIXTURE_PROPERTY), "DragPreview", "the part shows the preview")
+
+    -- Let go where it started: nothing is sent, and the part goes back.
+    T:Ok(Dragged:Set(TitleId, "FixtureDragged"), "cancelled")
+    T:Eq(Dragged.Instance:GetAttribute(FIXTURE_PROPERTY), "FixtureDragged", "the part is back")
 end)
 
 T:Test("a drag let go where it started sends and records nothing", function()

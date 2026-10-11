@@ -671,6 +671,33 @@ T:Test("a ClientSided drag costs one action and lands where it ends", function()
     Disconnect()
 end)
 
+T:Test("a preview moves a part the server built, on this client", function()
+    if not ShownId or not TitleId then
+        T:Ok(false, "no shown registry")
+        return
+    end
+
+    const Dragged = T:Eventually(function()
+        const Obj = FindLiveObject(ShownId, TitleId, "FixtureDragged")
+        return if Obj and Obj.Instance then Obj else nil
+    end, 5, "the object and its part arrived")
+
+    if not Dragged then
+        return
+    end
+
+    T:Ok(not Dragged.Drawn and not Dragged.Local, "a part the server built")
+
+    -- The link writes the part the moment the preview does. It used to wait
+    -- for the server, which a preview never asks.
+    T:Ok(Dragged:Set(TitleId, "DragPreview", true), "previewed")
+    T:Eq(Dragged.Instance:GetAttribute(FIXTURE_PROPERTY), "DragPreview", "the part shows the preview")
+
+    -- Let go where it started: nothing is sent, and the part goes back.
+    T:Ok(Dragged:Set(TitleId, "FixtureDragged"), "cancelled")
+    T:Eq(Dragged.Instance:GetAttribute(FIXTURE_PROPERTY), "FixtureDragged", "the part is back")
+end)
+
 T:Test("a drag let go where it started sends and records nothing", function()
     if not Editable or not TitleId then
         T:Ok(false, "no editable fixture")

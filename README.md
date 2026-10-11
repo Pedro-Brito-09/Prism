@@ -433,7 +433,9 @@ paused in it.
 - **Nothing else sees the preview.** `OnChange` and links fire, so the part
   moves; `Objects:OnEdited` does not, because no edit has been made yet. The
   closing `Set` fires it once, with `Before` being the value from before the
-  preview began.
+  preview began. That holds for a part the server built too: a client drives
+  its links on every part it can see, writing only its own view of the part,
+  which the server's value replaces once the edit lands or is refused.
 - **Cancelling** is ending the preview on the value it started from: that sends
   nothing and records nothing.
 - **A refusal** of the closing `Set` rolls back to what the server holds, as any
