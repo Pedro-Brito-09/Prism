@@ -2363,6 +2363,33 @@ end)
 -- Scene commits from a client
 --=============================================================================
 
+-- A holder leaving. Losing the right and losing admission have tests of their
+-- own above; leaving had none, though it is the commonest of the three.
+
+T:Test("a holder's holds all go when they leave, and nobody else's", function()
+    const Holder = Ghost(-3201)
+    const Other = Ghost(-3202)
+    const A = Scenes.new({Name = "LeaveA"})
+    const B = Scenes.new({Name = "LeaveB"})
+    const InA = (A:Load() :: any):Create(BareId)
+    const InB = (B:Load() :: any):Create(BareId)
+    const Theirs = (B:GetInstances()[1] :: any):Create(BareId)
+
+    T:Ok(Objects:Lock({InA, InB}, Holder), "held in two scenes")
+    T:Ok(Objects:Lock({Theirs}, Other), "and someone else holds one too")
+
+    -- What Players.PlayerRemoving runs for a player who leaves.
+    Objects.ReleaseFor(Holder)
+
+    T:Ok(not Objects:IsLocked(InA) and not Objects:IsLocked(InB), "both of theirs are free")
+    T:Eq(Objects:GetLock(Theirs), -3202, "the other holder keeps theirs")
+
+    A:Destroy()
+    B:Destroy()
+end)
+
+--=============================================================================
+
 T:Describe("Scene commits")
 
 -- The handler is a plain function on the manifest entry, so it can be called
