@@ -18336,6 +18336,69 @@ end)
 -- Scene commits from a client
 --=============================================================================
 
+-- The three ways a hold goes without its holder letting go. Each leaves
+-- somebody holding objects they can no longer touch and nobody else able to
+-- touch them either, which is why none of them may keep a hold.
+
+T:Test("a holder's holds all go when they leave, and nobody else's", function()
+    const Holder = Ghost(-3201)
+    const Other = Ghost(-3202)
+    const A = Scenes.new({Name = "LeaveA"})
+    const B = Scenes.new({Name = "LeaveB"})
+    const InA = (A:Load() :: any):Create(BareId)
+    const InB = (B:Load() :: any):Create(BareId)
+    const Theirs = (B:GetInstances()[1] :: any):Create(BareId)
+
+    T:Ok(Objects:Lock({InA, InB}, Holder), "held in two scenes")
+    T:Ok(Objects:Lock({Theirs}, Other), "and someone else holds one too")
+
+    -- What Players.PlayerRemoving runs for a player who leaves.
+    Objects.ReleaseFor(Holder)
+
+    T:Ok(not Objects:IsLocked(InA) and not Objects:IsLocked(InB), "both of theirs are free")
+    T:Eq(Objects:GetLock(Theirs), -3202, "the other holder keeps theirs")
+
+    A:Destroy()
+    B:Destroy()
+end)
+
+T:Test("losing edit rights on a scene releases the holds there and only there", function()
+    const Holder = Ghost(-3203)
+    const Here = Scenes.new({Name = "RightsLostHere"})
+    const There = Scenes.new({Name = "RightsLostThere"})
+    Here:Grant(Holder, "TestBulk")
+    There:Grant(Holder, "TestBulk")
+
+    const InHere = (Here:Load() :: any):Create(BareId)
+    const InThere = (There:Load() :: any):Create(BareId)
+    T:Ok(Objects:Lock({InHere, InThere}, Holder), "held in both")
+
+    -- A role with no verbs: they may still look, but not edit.
+    Here:Grant(Holder, "TestViewer")
+
+    T:Ok(not Objects:IsLocked(InHere), "the hold where they lost the right is gone")
+    T:Eq(Objects:GetLock(InThere), -3203, "the other is kept")
+
+    Here:Destroy()
+    There:Destroy()
+end)
+
+T:Test("evicting someone releases what they held in that scene", function()
+    const Holder = Ghost(-3204)
+    const Scene = Scenes.new({Name = "EvictHolds", Private = true, Admitted = {-3204}})
+    Scene:Grant(Holder, "TestBulk")
+
+    const Obj = (Scene:Load() :: any):Create(BareId)
+    T:Ok(Objects:Lock({Obj}, Holder), "held")
+
+    Scene:Evict(-3204)
+    T:Ok(not Objects:IsLocked(Obj), "released when they were evicted")
+
+    Scene:Destroy()
+end)
+
+--=============================================================================
+
 T:Describe("Scene commits")
 
 -- The handler is a plain function on the manifest entry, so it can be called
