@@ -90,6 +90,24 @@ rather than guessed.
 
 ## Done
 
+- [x] **Records created at once all land where they can be found.** Found
+      under load: thirty `Database:Create` calls at once against a small
+      shard limit put all thirty in shard 1 while the manifest said shard 1
+      ended at id 10, so eighteen of them could not be found by id -- stored,
+      and unreachable. Every create read the tail from the manifest and
+      appended to it after another had sealed it, and the seal lived only in
+      the manifest, a different key, so a shard write could not tell.
+
+      A shard now seals in its own key metadata, at the highest id actually
+      in it, in the same `UpdateAsync` that reads it, and a create refuses a
+      sealed shard: it writes the boundary into the manifest itself -- which
+      also closes the gap another server's seal can leave -- and tries the new
+      tail. Every shard write hands the key's metadata and user ids back,
+      since `UpdateAsync` clears what a transform does not return. Shards
+      written before this have no metadata and read as unsealed, which is
+      what they are. A suite test runs twenty creates at once on a key of its
+      own and finds every one by id.
+
 - [x] **One player's undo no longer switches off everyone's history.** Found
       under load: while one player undid the unload of a 5,000-object copy --
       2.5 seconds, because bringing a copy back announces it a chunk a frame --

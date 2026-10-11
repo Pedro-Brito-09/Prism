@@ -2079,8 +2079,14 @@ return CustomEnum
 --
 -- Ids come from a monotonic counter, so a record never changes shard: when the
 -- tail shard approaches the value limit its boundary freezes and a new tail
--- opens. Nothing is moved, merged or rebalanced, and sealing is a single write
--- to the manifest, so there is no multi key transaction to get wrong.
+-- opens. Nothing is moved, merged or rebalanced.
+--
+-- A seal is written twice, and the shard is the one that counts. The shard's
+-- key metadata takes Sealed = its last id, in the same UpdateAsync that reads
+-- its records, so no create can append to it afterwards: a create refuses a
+-- sealed shard, writes the boundary into the manifest itself, and moves on to
+-- the new tail. The manifest is where readers look the boundary up, and it may
+-- lag the shard for a moment; anyone who meets the gap closes it.
 --
 -- This also removes the write contention of the old single key layout, where
 -- every edit in the game did UpdateAsync against the same key: read the whole
@@ -2163,6 +2169,25 @@ const function ShardKey<T>(self: Database<T>, Index: number): string
     return `{self.Key}:{Index}`
 end
 
+-- A shard key's metadata and user ids, handed back by every write to it.
+-- UpdateAsync clears whatever its transform does not return, and the metadata
+-- is where a shard says it is sealed.
+const function MetadataOf(KeyInfo: any): {[string]: any}
+    const Ok, Metadata = pcall(function()
+        return KeyInfo:GetMetadata()
+    end)
+
+    return if Ok and type(Metadata) == "table" then Metadata else {}
+end
+
+const function UserIdsOf(KeyInfo: any): {number}
+    const Ok, UserIds = pcall(function()
+        return KeyInfo:GetUserIds()
+    end)
+
+    return if Ok and type(UserIds) == "table" then UserIds else {}
+end
+
 const function PageKey<T>(self: Database<T>, Cache: string, Page: number): string
     return `{self.Key}:{Cache}:{Page}`
 end
@@ -2206,29 +2231,26 @@ const function ShardForId(Manifest: Manifest, Id: number): number
     return Manifest.Count
 end
 
--- Freezes the tail shard at its current highest id and opens a new one. A single
--- manifest write, so a reader either sees the old shard set or the new one.
-const function Seal<T>(self: Database<T>, LastId: number)
+-- The manifest half of a seal: shard Index ends at Boundary and the next one
+-- opens. Idempotent, and by index, because several creates can meet the same
+-- sealed shard and each of them writes what it found.
+const function Seal<T>(self: Database<T>, Index: number, Boundary: number)
     const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, MANIFEST_KEY, function(Old)
         const Count = if type(Old) == "table" then math.max(1, Old.Count or 1) else 1
         const Boundaries = if type(Old) == "table" then (Old.Boundaries or {}) else {}
 
-        -- Idempotent: if the newest boundary already covers this id, another
-        -- server sealed the same tail first and there is nothing to do.
-        const Newest = Boundaries[#Boundaries]
-        if Newest and Newest >= LastId then
+        if #Boundaries >= Index then
             return nil
         end
 
         const Next = table.clone(Boundaries)
-        table.insert(Next, LastId)
-        return {Count = Count + 1, Boundaries = Next}
+        table.insert(Next, Boundary)
+        return {Count = math.max(Count, Index + 1), Boundaries = Next}
     end)
 
     if Success then
         self.Manifest = nil
         self.ManifestExpiry = 0
-        Logger:Log(`Sealed shard for {self.Key} at id {LastId}.`)
     end
 end
 
@@ -2253,6 +2275,39 @@ const function DecodeShard(Packed: any): ({Metadata}, number, boolean)
     end
 
     return Records :: {Metadata}, LastId :: number, true
+end
+
+-- Closes shard Index at the highest id actually in it. The id the closing
+-- create was handed is not that: other creates can append between its write and
+-- this one, and a boundary below their ids stranded them in a shard the
+-- manifest said ended earlier, where nothing looking them up by id would ever
+-- go. Read and marked in one UpdateAsync, so nothing appends after the read.
+const function SealShard<T>(self: Database<T>, Index: number)
+    local Boundary: number? = nil
+
+    Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old: any, KeyInfo: any): ...any
+        Boundary = nil
+        const Metadata = MetadataOf(KeyInfo)
+        if Metadata.Sealed then
+            Boundary = Metadata.Sealed
+            return nil
+        end
+
+        const _, LastId, Ok = DecodeShard(Old)
+        if not Ok or not Old then
+            return nil
+        end
+
+        Boundary = LastId
+        const Next = table.clone(Metadata)
+        Next.Sealed = LastId
+        return Old, UserIdsOf(KeyInfo), Next
+    end)
+
+    if Boundary then
+        Seal(self, Index, Boundary)
+        Logger:Log(`Sealed shard {Index} of {self.Key} at id {Boundary}.`)
+    end
 end
 
 -- Get and Find hand cached record tables straight back to callers. Without this,
@@ -2616,50 +2671,79 @@ const function BuildMetadata<T>(self: Database<T>, Id: number): Metadata
     return New :: any
 end
 
+-- How many sealed tails a create will chase before giving up. Each one it meets
+-- was sealed by a create that got in first, so this only runs out under a burst
+-- of creates far beyond what a tail holds.
+const CREATE_ROUNDS = 10
+
 const function __create<T>(self: Database<T>): (boolean, number?)
-    -- Read through rather than trusting the cached copy. A stale manifest here
-    -- means appending to a tail another server already sealed, stranding the new
-    -- record in a shard whose boundary no longer covers its id. Creates are rare
-    -- enough that the extra request does not matter.
-    const Manifest = GetManifest(self, true)
-    const Index = Manifest.Count
+    for _ = 1, CREATE_ROUNDS do
+        -- Read through rather than trusting the cached copy, and still checked
+        -- against the shard itself below: the manifest can be behind a seal.
+        const Manifest = GetManifest(self, true)
+        const Index = Manifest.Count
 
-    -- A fresh tail shard has no records, so its id counter continues from the
-    -- boundary the previous shard was sealed at.
-    const Floor = Manifest.Boundaries[Index - 1] or 0
+        -- A fresh tail shard has no records, so its id counter continues from
+        -- the boundary the previous shard was sealed at.
+        const Floor = Manifest.Boundaries[Index - 1] or 0
 
-    local Created: number? = nil
-    local Size = 0
+        local Created: number? = nil
+        local SealedAt: number? = nil
+        local Size = 0
 
-    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old)
-        const Records, StoredLastId, Ok = DecodeShard(Old)
-        if not Ok then
-            return nil
+        const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old: any, KeyInfo: any): ...any
+            Created = nil
+            SealedAt = nil
+
+            -- Sealed since the manifest was read, here or on another server.
+            -- Appending would put a record past the boundary readers look it
+            -- up by, so this one goes to the next shard instead.
+            const Metadata = MetadataOf(KeyInfo)
+            if Metadata.Sealed then
+                SealedAt = Metadata.Sealed
+                return nil
+            end
+
+            const Records, StoredLastId, Ok = DecodeShard(Old)
+            if not Ok then
+                return nil
+            end
+
+            const LastId = math.max(StoredLastId, Floor) + 1
+
+            table.insert(Records, BuildMetadata(self, LastId))
+
+            const Packed = Compressor:CompressMetadatas(LastId, Records)
+            Created = LastId
+            Size = buffer.len(Packed)
+            return Packed, UserIdsOf(KeyInfo), Metadata
+        end)
+
+        if SealedAt then
+            -- The manifest may not say so yet. Writing it here, rather than
+            -- waiting for whoever sealed the shard, means a create never spins
+            -- on a gap another server left.
+            Seal(self, Index, SealedAt)
+            continue
         end
 
-        const LastId = math.max(StoredLastId, Floor) + 1
+        if not Success or not Created then
+            return false, nil
+        end
 
-        table.insert(Records, BuildMetadata(self, LastId))
+        AfterWrite(self)
 
-        const Packed = Compressor:CompressMetadatas(LastId, Records)
-        Created = LastId
-        Size = buffer.len(Packed)
-        return Packed
-    end)
+        -- Outside the transform: UpdateAsync may run its callback more than
+        -- once, and a seal must happen once per commit.
+        if Size >= self.ShardLimit then
+            SealShard(self, Index)
+        end
 
-    if not Success then
-        return false, nil
+        return true, Created
     end
 
-    AfterWrite(self)
-
-    -- Sealing is deliberately outside the transform: UpdateAsync may run its
-    -- callback more than once, and a seal must happen exactly once per commit.
-    if Size >= self.ShardLimit and Created then
-        Seal(self, Created)
-    end
-
-    return true, Created
+    Logger:Warn(`Gave up creating a record in {self.Key}: every tail it reached had just been sealed.`)
+    return false, nil
 end
 
 const function __edit<T>(self: Database<T>, Id: number, ToChange: {[PropertyTypes.PropertyIdentifier]: any}): boolean
@@ -2690,7 +2774,7 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[PropertyType
     local Found = false
     local Dirty = false
 
-    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old)
+    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old: any, KeyInfo: any): ...any
         -- Rebuilt from Old on every attempt: UpdateAsync can retry, and carrying
         -- state across attempts would apply an edit twice.
         Found = false
@@ -2747,7 +2831,8 @@ const function __edit<T>(self: Database<T>, Id: number, ToChange: {[PropertyType
             return nil
         end
 
-        return Compressor:CompressMetadatas(LastId, Records)
+        -- The metadata goes back with it: it is what says the shard is sealed.
+        return Compressor:CompressMetadatas(LastId, Records), UserIdsOf(KeyInfo), MetadataOf(KeyInfo)
     end)
 
     if Dirty and Success then
@@ -2765,7 +2850,7 @@ const function __delete<T>(self: Database<T>, Id: number): boolean
     const Index = LocateShard(self, Id)
     local Found = false
 
-    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old)
+    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old: any, KeyInfo: any): ...any
         Found = false
         if not Old then
             return nil
@@ -2788,8 +2873,9 @@ const function __delete<T>(self: Database<T>, Id: number): boolean
             return nil
         end
 
-        -- LastId is preserved so a deleted id is never handed out again.
-        return Compressor:CompressMetadatas(LastId, Records)
+        -- LastId is preserved so a deleted id is never handed out again, and
+        -- the metadata so a sealed shard stays sealed.
+        return Compressor:CompressMetadatas(LastId, Records), UserIdsOf(KeyInfo), MetadataOf(KeyInfo)
     end)
 
     if Found and Success then
@@ -20114,6 +20200,52 @@ if RUN_DATABASE then
         -- boundary lookup and the multi shard walk agree.
         for _, Id in Created do
             T:Ok(db:GetById(Id) ~= nil, `id {Id} still reachable`)
+        end
+    end)
+
+    -- Creates that run at once, on one server, against a tail that seals every
+    -- couple of records. Each used to read the same tail from the manifest and
+    -- append to it after another had sealed it, leaving records past the
+    -- boundary readers look them up by: thirty at once left eighteen of them
+    -- unreachable by id. Its own key, so a burst does not reshape the shards
+    -- the tests above and below walk.
+    T:Test("creates at once all land where they can be found", function()
+        const Burst = Prism.Database.new({
+            Key = `{DATABASE_KEY}Burst`,
+            InitialMetadata = {Title, Plays},
+            ShardLimit = 120,
+            Expiration = 1,
+        })
+
+        const Ids = {}
+        local Pending = 20
+        for _ = 1, 20 do
+            task.spawn(function()
+                const Ok, Id = Burst:Create()
+                if Ok and Id then
+                    table.insert(Ids, Id)
+                end
+
+                Pending -= 1
+            end)
+        end
+
+        T:Eventually(function()
+            return Pending == 0
+        end, 120, "every create finished", 0.5)
+
+        T:Eq(#Ids, 20, "every create succeeded")
+
+        const Seen = {}
+        for _, Id in Ids do
+            T:Ok(not Seen[Id], `id {Id} handed out once`)
+            Seen[Id] = true
+        end
+
+        Burst:Refresh()
+        for _, Id in Ids do
+            const Record = Burst:GetById(Id)
+            T:Ok(Record and Record.Id == Id, `id {Id} found by id`)
         end
     end)
 
