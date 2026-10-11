@@ -12,8 +12,8 @@
 --
 -- Run with scripts/test-pure.sh, which CI also runs.
 --
--- Not synced into Studio: default.project.json maps the two suites and the
--- harness by name, and this is deliberately not among them.
+-- Not in Studio: scripts/build.js puts the two suites and the harness in
+-- PrismTests.rbxmx, and this is deliberately not among them.
 
 local Varint = require("../src/Varint")
 local Handles = require("../src/Handles")

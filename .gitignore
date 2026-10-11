@@ -2,11 +2,13 @@
 # definitions, both reproducible from the versions pinned in the script.
 .tooling/
 
-# Rojo build output.
+# Place and model files, except the models scripts/build.js writes: those are
+# what a place inserts, so they are committed.
 *.rbxl
 *.rbxlx
 *.rbxm
 *.rbxmx
+!dist/*.rbxmx
 sourcemap.json
 
 # Wally.

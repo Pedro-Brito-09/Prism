@@ -49,17 +49,22 @@ an older one fails to parse the modules rather than failing at runtime.
 
 ### Installing
 
-`src/` is a ModuleScript folder (`init.luau` is the module itself). Put it
-somewhere **both sides can see** — ReplicatedStorage, as a ModuleScript named
-`Prism` — and require it from a server script and a client script. It resolves
-the server or client half of each subsystem for you.
+Insert [`dist/Prism.rbxmx`](dist/Prism.rbxmx) into ReplicatedStorage: drag it
+into Studio, or right-click ReplicatedStorage → **Insert from File**. It is one
+ModuleScript called `Prism`, with nothing to move and nothing to set. Require it
+from a server script and a client script; it resolves the server or client half
+of each subsystem for you.
 
 ```lua
 local Prism = require(ReplicatedStorage.Prism)
 ```
 
-(The [test layout](#tests) syncs the whole repo instead, so there it is
-`ReplicatedStorage.Prism.src`.)
+It can live anywhere **both sides can see**; ReplicatedStorage is the usual
+place. To update, delete the old `Prism` and insert the new one.
+
+The source is `src/` (`init.luau` is the module itself), and
+`node scripts/build.js` rebuilds the models in `dist/` from it. CI fails a push
+that changes the source without rebuilding them.
 
 Require it on the server before any client does: the client waits for the
 server to say it is ready, and warns if it never does.
@@ -1462,24 +1467,21 @@ The rest needs a DataModel, players and replication, so Studio is the only place
 it runs.
 
 The tests run the unit suite on the server and the replication, permissions,
-optimistic-edit, transaction and lifecycle suite on one client. Sync the files
-into Studio with Roblox Script Sync using this layout:
+optimistic-edit, transaction and lifecycle suite on one client. Insert
+[`dist/PrismTests.rbxmx`](dist/PrismTests.rbxmx) into ReplicatedStorage in an
+empty place. It brings its own copy of Prism:
 
 ```text
 ReplicatedStorage
-└── Prism                          <- the repo root, so src/ sits inside it
-ServerScriptService
-├── Server                         <- tests/Server.server.luau
-└── Harness                        <- tests/Harness.luau (ModuleScript)
-StarterPlayer
-└── StarterPlayerScripts
-    ├── Client                     <- tests/Client.client.luau
-    └── Harness                    <- tests/Harness.luau (ModuleScript)
+└── PrismTests
+    ├── Prism                      <- src/
+    ├── Harness                    <- tests/Harness.luau
+    ├── Server                     <- tests/Server.server.luau (RunContext Server)
+    └── Client                     <- tests/Client.client.luau (RunContext Client)
 ```
 
-Here the whole repo is synced rather than just `src/`, so the suites require
-`ReplicatedStorage.Prism.src`. Both reach the harness with `require("./Harness")`,
-so it has to be a sibling of each one rather than living in a shared folder.
+Both suites are Scripts with RunContext set, so they run from where they are,
+and every require is relative to the model.
 
 Then use **Test > Play** with one player. The server creates a set of
 integration fixtures and intentionally keeps them alive so the client can
@@ -1508,8 +1510,8 @@ first, and nothing is left behind that `.gitignore` does not already cover. CI
 runs this script, `check-channels.js` and `test-pure.sh`, so a push is checked
 exactly the way a local run is.
 
-The tests are only lightly checked. Without a Rojo sourcemap the analyser cannot
-resolve `ReplicatedStorage.Prism.src`, so everything the suites get from Prism
+The tests are only lightly checked. The analyser reads files, not the model, so
+it cannot resolve the suites' `require("./Prism")`, and everything the suites get from Prism
 reads as `any`, and a mistake in how a test calls Prism shows up when the test
 runs rather than here. `ROADMAP.md` has the reasoning for leaving it that way.
 
@@ -1538,12 +1540,8 @@ count the channel declares.
 This is the check the Studio pass cannot do cheaply. A wrong argument count on a
 channel, a function that returns one value where two are read, a field that
 moved — the analyser finds all of those across 20,000 lines in seconds, where
-playing the game finds them one at a time, each costing a sync and a replay.
-Run it before syncing into Studio, not after.
-
-`default.project.json` is a [Rojo](https://rojo.space) project that builds the
-layout the Tests section describes, so `rojo serve` is an alternative to syncing
-the files by hand.
+playing the game finds them one at a time, each costing a rebuild and a replay.
+Run it before taking a build into Studio, not after.
 
 ## License
 

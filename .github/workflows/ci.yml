@@ -28,3 +28,10 @@ jobs:
 
       - name: Tests that do not need Roblox
         run: bash scripts/test-pure.sh
+
+      # The models in dist/ are what a place inserts, so a push that changes the
+      # source without rebuilding them would ship the old code.
+      - name: Models are current
+        run: |
+          node scripts/build.js
+          git diff --exit-code -- dist || { echo "dist/ is stale: run node scripts/build.js and commit it."; exit 1; }

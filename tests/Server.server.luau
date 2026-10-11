@@ -2,9 +2,9 @@
 --[[
     Prism test suite -- server half.
 
-    Put this in ServerScriptService with Harness.luau beside it, and point PRISM
-    below at wherever you synced the repo. Run it alongside Client.client.luau
-    with one test player.
+    Ships in PrismTests.rbxmx beside the client half, Harness and its own copy
+    of Prism, and runs with RunContext Server from wherever the model sits. Run
+    it with one test player.
 
     The Database section is on: it writes to real DataStore and MemoryStore keys
     and needs Studio API access enabled. Set RUN_DATABASE to false to skip it.
@@ -15,16 +15,15 @@ const Players = game:GetService("Players")
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 const ServerStorage = game:GetService("ServerStorage")
 
-const PRISM = ReplicatedStorage:WaitForChild("Prism").src
 const RUN_DATABASE = true
 const DATABASE_KEY = "PrismSelfTest"
 
-const Prism = require(PRISM)
+const Prism = require("./Prism")
 const Harness = require("./Harness")
 
 const Networking = Prism.Networking
 const Properties = Prism.Properties
-const PropertyTypes = require(PRISM.Properties.Types)
+const PropertyTypes = require("./Prism/Properties/Types")
 const Compressor = Prism.Compressor
 const Permissions = Prism.Permissions
 const CustomEnum = Prism.CustomEnum

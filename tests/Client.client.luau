@@ -2,8 +2,8 @@
 --[[
     Prism test suite -- client half.
 
-    Put this in StarterPlayerScripts with Harness.luau beside it, and run the
-    server half alongside it.
+    Ships in PrismTests.rbxmx beside the server half, Harness and its own copy
+    of Prism, and runs with RunContext Client from wherever the model sits.
     It verifies the things a server-only test cannot: that the ready handshake
     actually delivers, registries and live objects replicate, permissions
     update, and accepted/refused edits converge on the server's decision.
@@ -13,7 +13,13 @@
 
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-const PRISM = ReplicatedStorage:WaitForChild("Prism").src
+-- Running from ReplicatedStorage, this can start before the rest of the model
+-- has replicated, and Prism's requires resolve by child name.
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+const PRISM = (script.Parent :: Instance):WaitForChild("Prism") :: any
 const CRATE_OBJECT = "TestCrate"
 const BARE_OBJECT = "TestBare"
 const SHOWN_OBJECT = "TestShown"

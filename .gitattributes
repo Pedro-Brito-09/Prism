@@ -6,3 +6,6 @@
 *.luau text eol=lf
 *.json text eol=lf
 *.md text eol=lf
+
+# Built with LF sources, so CI can check they are current byte for byte.
+*.rbxmx text eol=lf

@@ -59,14 +59,15 @@ on -- every item here is better decided with the thing running.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-Also decided against, for now: **type checking `tests/`.** It needs a Rojo
-sourcemap (`rojo sourcemap default.project.json`, then `--sourcemap`), which
-resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
+Also decided against, for now: **type checking `tests/`.** It needs a
+sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
 safety -- the tests use `Scene:Load()` without checking the `SceneInstance?` it
-returns. Pedro's call was no: it means fetching Rojo in CI as well, and a
-baseline dominated by noise. `src/` is checked either way; a typo in the tests
+returns. Pedro's call was no: it means a baseline dominated by noise. `src/` is checked either way; a typo in the tests
 shows up when they are run. Revisit if the suites start failing for reasons a
-checker would have caught.
+checker would have caught. `default.project.json` is gone now that the models
+in `dist/` are the product, but `scripts/build.js` already knows the mapping
+from files to instances and could write `sourcemap.json` itself, so Rojo is no
+longer needed for it.
 
 Deliberately not queued: object hierarchy and grouping, and anything spatial
 (bounding boxes, region queries, box select). A level editor generally wants
