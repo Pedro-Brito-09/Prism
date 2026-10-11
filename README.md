@@ -374,6 +374,11 @@ Taking a lock needs edit rights on the object, costs one action per object, and
 fails if anyone else holds any of the objects named. Releasing needs no rights.
 `IsLocked` and `GetLock` answer for your own holds as soon as `Lock`, `Unlock`
 or a transaction holding them returns.
+
+On a client, `Set` and `Destroy` on an object someone else holds are refused on
+the spot — `false`, and nothing shown — rather than applied and taken back when
+the server says no. `Permissions:Can` answers for rights alone, so a tool greyed
+out for an object nobody may edit should ask `IsLocked` as well.
 A transaction can take and release them too, in the same list as the edit they
 are for — see Transactions.
 

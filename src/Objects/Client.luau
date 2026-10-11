@@ -125,6 +125,14 @@ const function Record(Identifier: RuntimeId, IsHeld: boolean, UserId: number?)
     Listeners.Notify(LockChanged, Identifier, Holder, IsHeld)
 end
 
+-- Whether someone other than this player holds an object, as far as this client
+-- has been told. The server refuses an edit to it whatever this says; asking
+-- here first is what keeps an edit that is bound to be refused from showing on
+-- screen and then snapping back.
+const function HeldByOther(RuntimeId: RuntimeId): boolean
+    return Locks[RuntimeId] == true and Holders[RuntimeId] ~= Players.LocalPlayer.UserId
+end
+
 const function Named(Refs: Object | {Object}): {Object}
     return if (Refs :: any).RuntimeId ~= nil then {Refs :: Object} else Refs :: {Object}
 end
@@ -396,6 +404,18 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         return false
     end
 
+    -- Held by somebody else: the server would refuse it, and an optimistic set
+    -- would show the value and then take it back. A preview already open when
+    -- the hold was taken is put back now, since nothing can land it.
+    if HeldByOther(self.RuntimeId) then
+        if Previewing[Prop] then
+            Previewing[Prop] = nil
+            Prop:Set(Confirmed[Prop])
+        end
+
+        return false
+    end
+
     -- A reference given as the target object, resolved to the id that is
     -- actually stored before anything is applied or sent. Refused here rather
     -- than by the server, which would cost a round trip to be told what this
@@ -478,7 +498,9 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
 end
 
 const function __destroy(self: Object): boolean
-    if self.Destroyed then
+    -- Not worth the round trip: the server refuses a destroy of an object
+    -- somebody else holds, and this client already knows they do.
+    if self.Destroyed or HeldByOther(self.RuntimeId) then
         return false
     end
 

@@ -444,6 +444,33 @@ T:Test("a lock is taken, announced and released", function()
     Stop()
 end)
 
+T:Test("an object someone else holds refuses an edit on the spot", function()
+    if not BareId or not TitleId then
+        T:Ok(false, "no bare registry")
+        return
+    end
+
+    const Held = T:Eventually(function()
+        const Obj = FindLiveObject(BareId, TitleId, "FixtureHeld")
+        return if Obj and Objects:IsLocked(Obj) then Obj else nil
+    end, 5, "the held fixture arrived, held")
+
+    if not Held then
+        return
+    end
+
+    T:Eq(Objects:GetLock(Held), nil, "by something that is not a person")
+
+    T:Ok(not Held:Set(TitleId, "Grabbed"), "a set is refused")
+    T:Eq(Held:Get(TitleId), "FixtureHeld", "and never shown")
+
+    T:Ok(not Held:Set(TitleId, "Grabbed", true), "so is a preview")
+    T:Eq(Held:Get(TitleId), "FixtureHeld", "which is not shown either")
+
+    T:Ok(not Held:Destroy(), "and a destroy")
+    T:Ok(not Held.Destroyed, "which left it where it was")
+end)
+
 T:Test("a transaction's holds are known the moment it returns", function()
     if not Editable or not TitleId then
         T:Ok(false, "no editable fixture")
