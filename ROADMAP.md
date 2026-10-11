@@ -81,6 +81,17 @@ rather than guessed.
 
 ## Done
 
+- [x] **A custom enum a client registers late still resolves.** Found in the
+      first playthrough. The server sends a `CustomEnum` constraint by name
+      and a client resolves it against its own enums when the property
+      arrives; an enum the client registered afterwards was never looked up
+      again, so the constraint stayed nil and refused every value for the
+      session -- and registries usually arrive before a game's own client
+      code has run far. `CustomEnum:OnRegistered` fires for each enum
+      registered, and the client resolves whatever was waiting for it. Property
+      instances share their registry's `Constraints` table, so objects already
+      holding the property are fixed by the same write.
+
 - [x] **An edit to an object someone else holds is refused on the spot.**
       Found in the first playthrough: a client's `Set` on an object another
       player held applied, showed, went to the server, was refused and snapped

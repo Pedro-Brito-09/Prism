@@ -178,7 +178,9 @@ node. It's stored as a local id, so it's saved and duplicated like one; see
 
 A custom enum is a named list of options with ids that are saved in place of the
 values, so the values can be anything. Register it **on both sides** under the
-same name — a client checks a `CustomEnum` constraint against its own copy.
+same name — a client checks a `CustomEnum` constraint against its own copy. A
+client may register it whenever it likes; until it does, it refuses every value
+of a property constrained to it, and warns once per property.
 
 ```lua
 -- server and client

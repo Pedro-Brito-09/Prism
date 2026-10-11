@@ -1,5 +1,6 @@
 --!strict
 const Logger = require("./Logger")
+const Listeners = require("./Listeners")
 
 export type EnumName = string
 export type OptionId = number
@@ -25,6 +26,7 @@ const MAX_OPTION_ID = 65535
 
 const CustomEnum = {}
 const Registered: {[EnumName]: CustomEnum<any>} = {}
+const OnRegistered: {(Enum: CustomEnum<any>) -> ()} = {}
 
 -- Indexed rather than scanned: the compressor calls this for every CustomEnum
 -- property it decodes.
@@ -96,7 +98,15 @@ function CustomEnum:Register<T>(Name: string, Options: EnumOptions<T>): CustomEn
     }
 
     Registered[Name] = Enum :: any
+    Listeners.Notify(OnRegistered, Enum)
     return Enum :: any
+end
+
+-- Fired for every enum registered from here on. A client resolves the custom
+-- enum constraints the server sent by name against this side's enums, and one
+-- registered after those properties arrived has to be resolved then.
+function CustomEnum:OnRegistered(Callback: (Enum: CustomEnum<any>) -> ()): () -> ()
+    return Listeners.Watch(OnRegistered, Callback, "custom enums")
 end
 
 function CustomEnum:GetEnum<T>(Name: string): CustomEnum<T>?

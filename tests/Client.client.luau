@@ -243,6 +243,35 @@ end)
 -- Admission
 --=============================================================================
 
+T:Test("a custom enum registered here late still resolves", function()
+    -- The server registers TestShapes and a property constrained to it. This
+    -- client registers it only now, after the property arrived, which used to
+    -- leave the constraint unresolved for the rest of the session.
+    const ShapeId = FindProperty("TestShape")
+    T:Ok(ShapeId, "the property arrived")
+
+    if not ShapeId then
+        return
+    end
+
+    const Prop = Properties.new(ShapeId)
+    const Circle = {__type = "CustomEnumOption", Id = 1, Value = "Circle", Parent = "TestShapes"}
+    T:Ok(not (Prop:Set(Circle :: any)), "refused while the enum is unknown here")
+
+    const Shapes = Prism.CustomEnum:Register("TestShapes", {Circle = 1, Square = 2, Triangle = 3})
+    T:Ok(Shapes, "registered here")
+
+    if not Shapes then
+        return
+    end
+
+    T:Eventually(function()
+        return Properties:GetRegistry(ShapeId).Constraints.CustomEnum == Shapes
+    end, 2, "the constraint resolved")
+
+    T:Ok((Prop:Set(Shapes:GetById(2))), "and an option is accepted")
+end)
+
 T:Describe("Admission")
 
 T:Test("a scene you were not admitted to sends only what replicates to everyone", function()

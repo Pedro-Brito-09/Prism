@@ -38,12 +38,29 @@ end
 -- The server sends a CustomEnum constraint as the enum's name, because the enum
 -- table carries methods and a remote cannot serialize a function. Resolve it
 -- back into the local registry so IsValid can compare against it.
+--
+-- An enum this client has not registered yet is waited for rather than given
+-- up on: a game may register its enums after requiring Prism, and the
+-- registries can arrive first. Until then the constraint is nil, which refuses
+-- every value. Property instances share their registry's Constraints table, so
+-- resolving it later reaches every object already holding the property.
+const Waiting: {[string]: {any}} = {}
+
 const function Register(Payload: any)
     const Constraints = Payload.Constraints
     if Payload.Type == "CustomEnum" and Constraints and type(Constraints.CustomEnum) == "string" then
-        const Resolved = CustomEnum:GetEnum(Constraints.CustomEnum)
+        const Name = Constraints.CustomEnum
+        const Resolved = CustomEnum:GetEnum(Name)
         if not Resolved then
-            Logger:Warn(`Property {Payload.Id} constrains to custom enum {Constraints.CustomEnum}, which is not registered on this client.`)
+            Logger:Warn(`Property {Payload.Id} constrains to custom enum {Name}, which is not registered on this client yet. Its values are refused until it is.`)
+
+            local List = Waiting[Name]
+            if not List then
+                List = {}
+                Waiting[Name] = List
+            end
+
+            table.insert(List, Constraints)
         end
 
         Constraints.CustomEnum = Resolved
@@ -51,6 +68,18 @@ const function Register(Payload: any)
 
     Registered[Payload.Id] = Payload
 end
+
+CustomEnum:OnRegistered(function(Enum)
+    const List = Waiting[Enum.Name]
+    if not List then
+        return
+    end
+
+    Waiting[Enum.Name] = nil
+    for _, Constraints in List do
+        Constraints.CustomEnum = Enum
+    end
+end)
 
 Network.PropertyRegistered:Connect(Register)
 
