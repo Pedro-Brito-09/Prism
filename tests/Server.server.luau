@@ -4251,6 +4251,52 @@ if RUN_DATABASE then
         end
     end)
 
+    -- Creates that run at once, on one server, against a tail that seals every
+    -- couple of records. Each used to read the same tail from the manifest and
+    -- append to it after another had sealed it, leaving records past the
+    -- boundary readers look them up by: thirty at once left eighteen of them
+    -- unreachable by id. Its own key, so a burst does not reshape the shards
+    -- the tests above and below walk.
+    T:Test("creates at once all land where they can be found", function()
+        const Burst = Prism.Database.new({
+            Key = `{DATABASE_KEY}Burst`,
+            InitialMetadata = {Title, Plays},
+            ShardLimit = 120,
+            Expiration = 1,
+        })
+
+        const Ids = {}
+        local Pending = 20
+        for _ = 1, 20 do
+            task.spawn(function()
+                const Ok, Id = Burst:Create()
+                if Ok and Id then
+                    table.insert(Ids, Id)
+                end
+
+                Pending -= 1
+            end)
+        end
+
+        T:Eventually(function()
+            return Pending == 0
+        end, 120, "every create finished", 0.5)
+
+        T:Eq(#Ids, 20, "every create succeeded")
+
+        const Seen = {}
+        for _, Id in Ids do
+            T:Ok(not Seen[Id], `id {Id} handed out once`)
+            Seen[Id] = true
+        end
+
+        Burst:Refresh()
+        for _, Id in Ids do
+            const Record = Burst:GetById(Id)
+            T:Ok(Record and Record.Id == Id, `id {Id} found by id`)
+        end
+    end)
+
     T:Test("id ordered paging walks in both directions", function()
         db:Refresh()
 
