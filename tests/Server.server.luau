@@ -3874,6 +3874,14 @@ AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmitPrivate"})
 const OpenedScene = Scenes.new({Name = "FixtureOpened", Private = true, Admitted = {1}})
 OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
 
+-- An opened copy the test player is never admitted to. Its object is created
+-- when the client writes the opened marker, after the player has joined: an
+-- object already there at join goes down the replay, which always checked, and
+-- it was a live create that used to reach every player in the server. A
+-- control object follows it into the default scene, so the client knows when
+-- the hidden one would have arrived.
+const OpenedHiddenCopy = Scenes.new({Name = "FixtureOpenedHidden", Private = true, Admitted = {1}}):Open()
+
 -- A property and a type the client watches go. Registered here so they reach
 -- the client with everything else, and unregistered when the client writes the
 -- unregister marker, by which point it has seen them arrive.
@@ -3905,6 +3913,12 @@ EditableFixture:OnChange(TitleId, function(Value)
     if Value == "UnregisterPulse" then
         Objects:Unregister(DoomedType)
         Properties:Unregister(DoomedProperty)
+        return
+    end
+
+    if Value == "OpenedPulse" then
+        OpenedHiddenCopy:Create(ShownId, {[TitleId] = "FixtureOpenedLeak"})
+        Objects.new(BareId, {[TitleId] = "FixtureOpenedControl"})
         return
     end
 

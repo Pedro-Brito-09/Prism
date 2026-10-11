@@ -79,6 +79,19 @@ rather than guessed.
 
 ## Done
 
+- [x] **An object created in an opened copy goes only to the admitted.** Found
+      in the first playthrough: `copy:Create` on an opened private copy sent
+      the object, values and all, to every player in the server, filed under a
+      copy they had never been told of. `Enter` announced with the type's
+      `Replicate` while every other packet about an object asked `ReachOf`,
+      which keeps an opened copy's objects for the admitted whatever their type
+      says. It asks `ReachOf` now, which also covers `Objects.Revive`, the
+      other caller -- undoing a destroy in an opened copy leaked the same way.
+      Transactions never leaked: their creates go out through
+      `AnnounceAll`, which already asked. A client test has the server create
+      into an opened copy the player is never admitted to, behind a control
+      object, and checks only the control arrives.
+
 - [x] **The history is capped by what its steps hold.** `LIMIT = 100` counted
       steps only, and a step can hold a whole withdrawn copy, so a hundred of
       them was a limit on nothing. Each step is now weighed when it is
