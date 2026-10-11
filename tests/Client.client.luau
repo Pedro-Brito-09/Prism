@@ -29,6 +29,7 @@ const EDITABLE_MARKER = "FixtureEditable"
 const DESTROY_MARKER = "FixtureDestroy"
 const EVICT_MARKER = "EvictPulse"
 const UNREGISTER_MARKER = "UnregisterPulse"
+const OPENED_MARKER = "OpenedPulse"
 const TIMEOUT = 15
 
 const Prism = require("./Prism")
@@ -359,6 +360,28 @@ T:Test("a loaded copy is the server's to draw", function()
 
     T:Eq(Scenes:GetFolder(Editable.InstanceId), nil, "so this client keeps no folder for it")
     T:Ok(not Editable.Drawn, "and drew nothing")
+end)
+
+T:Test("an object created in an opened copy reaches only the admitted", function()
+    if not Editable or not ShownId or not BareId or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    -- The server creates the hidden object and then the control when the
+    -- editable fixture carries the marker. Both go down the same remote, so by
+    -- the time the control is here the hidden one would have been too.
+    task.wait(1.1)
+    Editable:Set(TitleId, OPENED_MARKER)
+
+    T:Eventually(function()
+        return FindLiveObject(BareId, TitleId, "FixtureOpenedControl")
+    end, 5, "the control arrived")
+
+    T:Eq(FindLiveObject(ShownId, TitleId, "FixtureOpenedLeak"), nil, "the object in a copy this player is not admitted to did not")
+    T:Eq(Scenes:Get("FixtureOpenedHidden"), nil, "nor the scene's name")
+
+    Editable:Set(TitleId, EDITABLE_MARKER)
 end)
 
 T:Test("watching copies hands back a disconnect", function()

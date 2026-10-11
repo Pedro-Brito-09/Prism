@@ -7101,11 +7101,16 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
     --
     -- A scene being loaded announces nothing here: its objects go out together
     -- through the chunked replay path instead of one packet each.
+    --
+    -- ReachOf rather than the type's Replicate, as every other packet about an
+    -- object: an object in an opened copy is for the admitted whatever its type
+    -- says. Reading Replicate here sent every object created in a private
+    -- opened copy, values and all, to every player in the server.
     if Announce then
         Audience.Fire(
             Network.ObjectAdded,
             Obj.Scene,
-            Ref.Replicate,
+            ReachOf(Obj),
             Obj.RuntimeId,
             Instance_.Id,
             Compressor:CompressObject(Obj),

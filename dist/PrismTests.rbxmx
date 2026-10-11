@@ -7105,11 +7105,16 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
     --
     -- A scene being loaded announces nothing here: its objects go out together
     -- through the chunked replay path instead of one packet each.
+    --
+    -- ReachOf rather than the type's Replicate, as every other packet about an
+    -- object: an object in an opened copy is for the admitted whatever its type
+    -- says. Reading Replicate here sent every object created in a private
+    -- opened copy, values and all, to every player in the server.
     if Announce then
         Audience.Fire(
             Network.ObjectAdded,
             Obj.Scene,
-            Ref.Replicate,
+            ReachOf(Obj),
             Obj.RuntimeId,
             Instance_.Id,
             Compressor:CompressObject(Obj),
@@ -19388,6 +19393,14 @@ AdmittedCopy:Create(PrivateId, {[TitleId] = "FixtureAdmitPrivate"})
 const OpenedScene = Scenes.new({Name = "FixtureOpened", Private = true, Admitted = {1}})
 OpenedScene:Open():Create(ShownId, {[TitleId] = "FixtureOpenedObject"})
 
+-- An opened copy the test player is never admitted to. Its object is created
+-- when the client writes the opened marker, after the player has joined: an
+-- object already there at join goes down the replay, which always checked, and
+-- it was a live create that used to reach every player in the server. A
+-- control object follows it into the default scene, so the client knows when
+-- the hidden one would have arrived.
+const OpenedHiddenCopy = Scenes.new({Name = "FixtureOpenedHidden", Private = true, Admitted = {1}}):Open()
+
 -- A property and a type the client watches go. Registered here so they reach
 -- the client with everything else, and unregistered when the client writes the
 -- unregister marker, by which point it has seen them arrive.
@@ -19419,6 +19432,12 @@ EditableFixture:OnChange(TitleId, function(Value)
     if Value == "UnregisterPulse" then
         Objects:Unregister(DoomedType)
         Properties:Unregister(DoomedProperty)
+        return
+    end
+
+    if Value == "OpenedPulse" then
+        OpenedHiddenCopy:Create(ShownId, {[TitleId] = "FixtureOpenedLeak"})
+        Objects.new(BareId, {[TitleId] = "FixtureOpenedControl"})
         return
     end
 
@@ -19815,6 +19834,7 @@ const EDITABLE_MARKER = "FixtureEditable"
 const DESTROY_MARKER = "FixtureDestroy"
 const EVICT_MARKER = "EvictPulse"
 const UNREGISTER_MARKER = "UnregisterPulse"
+const OPENED_MARKER = "OpenedPulse"
 const TIMEOUT = 15
 
 const Prism = require("./Prism")
@@ -20145,6 +20165,28 @@ T:Test("a loaded copy is the server's to draw", function()
 
     T:Eq(Scenes:GetFolder(Editable.InstanceId), nil, "so this client keeps no folder for it")
     T:Ok(not Editable.Drawn, "and drew nothing")
+end)
+
+T:Test("an object created in an opened copy reaches only the admitted", function()
+    if not Editable or not ShownId or not BareId or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    -- The server creates the hidden object and then the control when the
+    -- editable fixture carries the marker. Both go down the same remote, so by
+    -- the time the control is here the hidden one would have been too.
+    task.wait(1.1)
+    Editable:Set(TitleId, OPENED_MARKER)
+
+    T:Eventually(function()
+        return FindLiveObject(BareId, TitleId, "FixtureOpenedControl")
+    end, 5, "the control arrived")
+
+    T:Eq(FindLiveObject(ShownId, TitleId, "FixtureOpenedLeak"), nil, "the object in a copy this player is not admitted to did not")
+    T:Eq(Scenes:Get("FixtureOpenedHidden"), nil, "nor the scene's name")
+
+    Editable:Set(TitleId, EDITABLE_MARKER)
 end)
 
 T:Test("watching copies hands back a disconnect", function()
