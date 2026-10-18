@@ -100,6 +100,20 @@ rather than guessed.
 
 ## Done
 
+- [x] **The three left on purpose, fixed after all.** `Permissions:Can` on
+      the client says no to an edit or a destroy of an object someone else
+      holds, through a check Objects hands it, since greying tools out is
+      what it is for. Recording during a custom undo is off for the thread
+      running the action rather than for its player: a recorder runs on the
+      thread whose edit it records, and on the client, where a Notify starts
+      recorders on threads of their own, `Listeners.Origin` names the thread
+      that fired them. An edit the player makes while their action yields is
+      a step again, and a local transaction the action commits no longer is.
+      The client's own steps also leave the order while they apply, as the
+      server's do. A copy set aside in the middle of a read finishes the read
+      first, on both sides, so it comes back whole. Each has a test, and the
+      two server-side tests fail against the modules before them.
+
 - [x] **The loose ends the stress pass left.** Six, each on its own branch.
       CI pins its runner to `ubuntu-24.04`, which `ubuntu-latest` was about to
       leave, and moves `checkout` and `cache` to v7 and v6, off Node 20. The
@@ -118,11 +132,8 @@ rather than guessed.
       share: flooring made 0.5 read back a step short, and a channel past 1
       wrapped round in `writeu8`.
 
-      Left as they are, on purpose: `Permissions:Can` ignores holds, since it
-      answers for rights; a player's own edits during their custom undo
-      action are not recorded, which is what keeps a custom undo from
-      recording itself; and a copy set aside in the middle of being read
-      comes back holding what was read before.
+      Three things were first left as they were, and are fixed in the entry
+      above this one.
 
 - [x] **A large load no longer stops the server.** Found under load: reading
       a 5,000-object level held the server for 570 ms in one frame, every

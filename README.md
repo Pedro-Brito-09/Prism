@@ -1142,7 +1142,9 @@ A step is either yours or Prism's, never both — mixing them would mean decidin
 where your verb runs among entries it knows nothing about, and two pushes say it
 plainly. Pushing one forks the redo stack like any other new action. An `Undo`
 or `Redo` that throws leaves the step on the stack to be tried again, and
-nothing you do inside either one is recorded as a new action.
+nothing you do inside either one is recorded as a new action. That covers
+what runs on the action's own thread -- not threads it spawns -- and nothing
+else: an edit the player makes while an action yields is recorded as usual.
 
 On the server it takes the player — `History:Push(player, action)` — and costs
 one action of their budget to reverse, since nothing here can weigh what it
