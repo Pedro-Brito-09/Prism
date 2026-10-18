@@ -8,14 +8,16 @@ on:
 jobs:
   analyze:
     name: Type check
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to a new image on its own schedule, and the
+    # toolchain is a prebuilt luau-lsp binary that has only ever run on this one.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Keyed on the pinned version, so a bump refetches and everything else
       # reuses the download.
       - name: Cache toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .tooling
           key: tooling-luau-lsp-1.69.0-luau-0.738
