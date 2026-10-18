@@ -169,6 +169,16 @@ local function roundTrip(name: string, codec: any, value: any, eq: ((any, any) -
     ok(read == written, `{name}: Read consumed {read}, Write produced {written}`)
 end
 
+-- A colour channel becomes the nearest byte, clamped. Flooring made 0.5 come
+-- back a step short, and a channel past 1 wrapped round to a dark one.
+ok(Codecs.ColorByte(0.5) == 128, `0.5 -> {Codecs.ColorByte(0.5)}`)
+ok(Codecs.ColorByte(1) == 255 and Codecs.ColorByte(0) == 0, "the ends")
+ok(Codecs.ColorByte(1.5) == 255, `1.5 clamps, got {Codecs.ColorByte(1.5)}`)
+ok(Codecs.ColorByte(-0.2) == 0, `below zero clamps, got {Codecs.ColorByte(-0.2)}`)
+for Byte = 0, 255 do
+    ok(Codecs.ColorByte(Byte / 255) == Byte, `byte {Byte} survives`)
+end
+
 roundTrip("u8 min", Codecs.u8, 0); roundTrip("u8 max", Codecs.u8, 255)
 roundTrip("u16 max", Codecs.u16, 65535)
 roundTrip("u32 max", Codecs.u32, 4294967295)

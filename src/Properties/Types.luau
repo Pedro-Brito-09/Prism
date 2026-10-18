@@ -1,5 +1,6 @@
 const CustomEnum = require("../CustomEnum")
 const Handles = require("../Handles")
+const Codecs = require("../Codecs")
 
 export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum" | "Object"
 export type PropertyIdentifier = number
@@ -304,21 +305,21 @@ function Types:FixValue<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraint
     elseif Type == "Color" then
         local TypedValue = (Value :: any) :: Color3
         TypedValue = Color3.fromRGB(
-            Types:FixValue("Number", math.floor(TypedValue.R * 255), {
+            Types:FixValue("Number", Codecs.ColorByte(TypedValue.R), {
                 MinValue = Constraints.R and Constraints.R.MinValue and math.clamp(Constraints.R.MinValue, 0, 255) or 0,
                 MaxValue = Constraints.R and Constraints.R.MaxValue and math.clamp(Constraints.R.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.R then Constraints.R.AllowDecimals else true,
                 Precision = if Constraints.R then Constraints.R.Precision else nil,
             }),
 
-            Types:FixValue("Number", math.floor(TypedValue.G * 255), {
+            Types:FixValue("Number", Codecs.ColorByte(TypedValue.G), {
                 MinValue = Constraints.G and Constraints.G.MinValue and math.clamp(Constraints.G.MinValue, 0, 255) or 0,
                 MaxValue = Constraints.G and Constraints.G.MaxValue and math.clamp(Constraints.G.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.G then Constraints.G.AllowDecimals else true,
                 Precision = if Constraints.G then Constraints.G.Precision else nil,
             }),
             
-            Types:FixValue("Number", math.floor(TypedValue.B * 255), {
+            Types:FixValue("Number", Codecs.ColorByte(TypedValue.B), {
                 MinValue = Constraints.B and Constraints.B.MinValue and math.clamp(Constraints.B.MinValue, 0, 255) or 0,
                 MaxValue = Constraints.B and Constraints.B.MaxValue and math.clamp(Constraints.B.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.B then Constraints.B.AllowDecimals else true,

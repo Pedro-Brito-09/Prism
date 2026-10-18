@@ -176,10 +176,11 @@ local Health = Prism.Properties:Register({
 | `Object` | another object | `Types` (object type ids or names) |
 
 A `Color` is held and saved at 8 bits per channel, the 0–255 its constraints
-are written in: each channel is scaled to 0–255 and rounded down, so
-`Color3.new(0.5, 0, 0)` reads back with a red of 127/255, about 0.498. A color
-made with `Color3.fromRGB` comes back exactly, and so does any color that has
-been through a set once. Compare colors after a set, not the value passed in.
+are written in: each channel is scaled to 0–255, rounded to the nearest and
+clamped, so `Color3.new(0.5, 0, 0)` reads back with a red of 128/255, about
+0.502, and a channel past 1 is stored as 255. A color made with
+`Color3.fromRGB` comes back exactly, and so does any color that has been
+through a set once. Compare colors after a set, not the value passed in.
 
 A value that fails a rejecting constraint is refused — `Set` returns `false` —
 and one outside a clamping constraint is brought into range.

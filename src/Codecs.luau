@@ -176,15 +176,25 @@ Codecs.Vector = {
     end,
 } :: Codec<Vector3>
 
+-- One colour channel as the byte it is stored and sent as. To the nearest, not
+-- rounded down: flooring made 0.5 come back as 127/255, a step short, and gave
+-- a channel the full error of a byte rather than half of it. Clamped, because a
+-- Color3 holds channels past 1 and writeu8 wraps them -- 1.5 went out as 126.
+-- Every place a colour becomes bytes goes through this, so a colour clamped by
+-- its constraints is the one that is saved.
+function Codecs.ColorByte(Channel: number): number
+    return math.clamp(math.floor(Channel * 255 + 0.5), 0, 255)
+end
+
 Codecs.Color = {
     Measure = function(): number
         return 3
     end,
 
     Write = function(Buf: buffer, Offset: number, Value: Color3): number
-        buffer.writeu8(Buf, Offset, math.floor(Value.R * 255))
-        buffer.writeu8(Buf, Offset + 1, math.floor(Value.G * 255))
-        buffer.writeu8(Buf, Offset + 2, math.floor(Value.B * 255))
+        buffer.writeu8(Buf, Offset, Codecs.ColorByte(Value.R))
+        buffer.writeu8(Buf, Offset + 1, Codecs.ColorByte(Value.G))
+        buffer.writeu8(Buf, Offset + 2, Codecs.ColorByte(Value.B))
         return 3
     end,
 
