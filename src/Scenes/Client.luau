@@ -507,23 +507,27 @@ end
 --
 -- Yields, and can be refused: the server checks that it may create every object
 -- type in the pack before it takes any of it.
-const function __push(self: any, Name: string): (boolean, SceneIdentifier?)
+-- The third value says why a push was refused, so a game can tell its player:
+-- Budget, NoPushRight, TooLarge, TooManyObjects, BadName, NameTaken,
+-- UnknownType, Unreadable or Failed -- or Unreachable when the request never
+-- got an answer.
+const function __push(self: any, Name: string): (boolean, SceneIdentifier?, string?)
     const Data = __serialize(self)
 
-    const Ok, Accepted, Identifier = pcall(function()
+    const Ok, Accepted, Identifier, Reason = pcall(function()
         return Network.Commit:Invoke(Name, Data)
     end)
 
     if not Ok then
         Logger:Warn(`A local scene was not committed to the server: {Accepted}`)
-        return false, nil
+        return false, nil, "Unreachable"
     end
 
     if not Accepted then
-        return false, nil
+        return false, nil, Reason
     end
 
-    return true, Identifier
+    return true, Identifier, nil
 end
 
 const function __destroy(self: any)

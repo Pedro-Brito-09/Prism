@@ -870,8 +870,13 @@ has already happened from one that can still be refused.
 ```lua
 -- client
 preview:Commit()
-local ok, sceneId = Sandbox:Push("Room 4")
+local ok, sceneId, reason = Sandbox:Push("Room 4")
 ```
+
+A refused push says why in `reason`: `NoPushRight`, `TooLarge`, `TooManyObjects`,
+`BadName`, `NameTaken`, `UnknownType`, `Unreadable`, `Budget`, `Failed`, or
+`Unreachable` when the request never got an answer. It is `nil` when the push
+landed.
 
 The pack crosses in one packet. The server refuses it unless the player holds
 the global `CanPush` right and every object type in it is registered. It
@@ -1378,7 +1383,7 @@ The sections above explain each one.
 | | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:GetInstances(sceneId)`, `:GetInstanceScene(copyId)`, `:GetObjects(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
 | a scene | `:Load(parent?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
 | | `:Open()`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
-| | `:Push(name)` | C |
+| | `:Push(name)` → `ok, sceneId, reason` | C |
 | a copy | `:Create(type, values?)`, `:Place(pack)`, `:Find(localId)`, `:GetObjects()`, `:Serialize()`, `:Commit()`, `:Unload()`, `:Suspend()`, `:Revive()`, `:Dispose()` | S C |
 | `Transactions` | `.new()`, then `:Create`, `:Duplicate`, `:DuplicateGroup`, `:Place`, `:Set`, `:Destroy`, `:Lock`, `:Unlock`, `:Load`, `:Unload`, `:Commit()` | S C |
 | | `:OnCommitted(fn)` | C |

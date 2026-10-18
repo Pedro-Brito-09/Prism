@@ -210,9 +210,16 @@ const Channels: {Channel} = {
         -- refused. The scene is registered, never loaded: putting a room in the
         -- world is the server's call, and the client asked for a document to be
         -- stored rather than spawned.
+        --
+        -- A refusal says which rule it broke, so a game can tell its player
+        -- what to change. It is still not logged: a reason handed back to the
+        -- caller costs the server nothing, where a logged one is output a
+        -- client could spam.
         Name = "Scenes.Commit",
         Args = {Codecs.String, Codecs.Buffer}, -- Name, Compressor:CompressScene
-        Returns = {Codecs.Bool, Codecs.Varint}, -- accepted, SceneId
+        -- Cast: the default solver types a list by its first codec and refuses
+        -- the rest, the same noise Transactions.Apply carries in the baseline.
+        Returns = {Codecs.Bool, Codecs.Varint, Codecs.String} :: {Codecs.Codec<any>}, -- accepted, SceneId, reason ("" when accepted)
     },
 
     {

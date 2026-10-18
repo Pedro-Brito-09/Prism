@@ -892,16 +892,22 @@ function Scenes:SetPushRole(Role: string?)
     PushRole = Role
 end
 
--- A client handing over a scene it built locally. Refusals are silent and say
--- nothing but false, like every other client facing handler here: a refusal
--- that logs is a refusal a client can spam to fill the server's output.
-Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (boolean, SceneIdentifier)
+-- A client handing over a scene it built locally. Refusals are not logged,
+-- like every other client facing handler here: a refusal that logs is a
+-- refusal a client can spam to fill the server's output. They do say why to
+-- the client that asked, which costs nothing and is the one thing a game needs
+-- to tell its player.
+const function Refuse(Reason: string): (boolean, SceneIdentifier, string)
+    return false, 0, Reason
+end
+
+Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (boolean, SceneIdentifier, string)
     -- One action for the packet rather than one per object in it. A transaction
     -- charges per operation because every operation reaches into the world as
     -- it stands; this arrives whole, and what bounds it is its size, which is
     -- known before a byte of it is read.
     if not Permissions:Consume(Plr) then
-        return false, 0
+        return Refuse("Budget")
     end
 
     -- A global right rather than a check against the pack's types. The scene
@@ -909,22 +915,22 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
     -- registering a scene at all is exactly the kind of thing that is about the
     -- session rather than a document.
     if not Permissions:CanPush(Plr) then
-        return false, 0
+        return Refuse("NoPushRight")
     end
 
     if buffer.len(Data) > MAX_COMMIT_BYTES then
-        return false, 0
+        return Refuse("TooLarge")
     end
 
     if #Name == 0 or #Name > MAX_NAME_LENGTH then
-        return false, 0
+        return Refuse("BadName")
     end
 
     -- Names are how a scene is asked for, so the first one to take a name keeps
     -- it. Refused here as well as in Scenes.new so the pack is not decoded for
     -- a commit that cannot land anyway.
     if Registry.ByName[Name] then
-        return false, 0
+        return Refuse("NameTaken")
     end
 
     const Ok, _, Decompressed = pcall(function()
@@ -932,12 +938,12 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
     end)
 
     if not Ok or not Decompressed then
-        return false, 0
+        return Refuse("Unreadable")
     end
 
     const Packed = Decompressed :: {any}
     if #Packed > MAX_COMMIT_OBJECTS then
-        return false, 0
+        return Refuse("TooManyObjects")
     end
 
     -- Every object type in the pack has to be one the server knows, and the
@@ -948,7 +954,7 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
 
     for _, Object in Packed do
         if not Objects:GetRegistry(Object.Registry) then
-            return false, 0
+            return Refuse("UnknownType")
         end
 
         -- A client's pack keeps no bytes the server cannot read. A save of the
@@ -972,10 +978,10 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
         Rights = if PushRole then {[Plr.UserId] = PushRole} else nil,
     }, Compressor:CompressScene(Highest, Packed))
     if not Scene then
-        return false, 0
+        return Refuse("Failed")
     end
 
-    return true, Scene.Id
+    return true, Scene.Id, ""
 end
 
 -- The scene an object lands in when the caller names none, so Objects.new keeps

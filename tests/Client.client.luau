@@ -1296,8 +1296,9 @@ T:Test("a local scene is handed to the server as a pack", function()
 
     Window()
 
-    const Accepted, Identifier = Sandbox:Push("ClientPushedRoom")
+    const Accepted, Identifier, Reason = Sandbox:Push("ClientPushedRoom")
     T:Ok(Accepted, "the server took it")
+    T:Eq(Reason, nil, "with no reason to give")
     T:Ok(Identifier and Identifier > 0, "and answered with its id")
 
     -- It registers on the server admitting only its author, which is this
@@ -1314,6 +1315,32 @@ T:Test("a local scene is handed to the server as a pack", function()
 
     T:Ok(Scenes:GetLocal("ClientPush"), "and the local one is still local")
     T:Ok(Copy:Find(1), "still holding its own objects")
+
+    Sandbox:Destroy()
+end)
+
+T:Test("a refused push says why", function()
+    const Sandbox = Scenes.new({Name = "ClientPushRefused"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    Copy:Create(BareId, {[TitleId] = "Again"})
+    Copy:Commit()
+
+    -- The name the test above already took. It used to answer false and
+    -- nothing else, whatever the rule it broke.
+    Window()
+    const Taken, _, Why = Sandbox:Push("ClientPushedRoom")
+    T:Ok(not Taken, "refused")
+    T:Eq(Why, "NameTaken", "because the name is taken")
+
+    Window()
+    const Blank, _, Empty = Sandbox:Push("")
+    T:Ok(not Blank, "refused")
+    T:Eq(Empty, "BadName", "because a scene needs a name")
 
     Sandbox:Destroy()
 end)
