@@ -3265,6 +3265,18 @@ const Changed: {() -> ()} = {}
 -- itself as a create.
 local Applying = false
 
+-- The threads running a custom action, whose edits are the action's and not new
+-- ones. Applying covers Prism's own entries, which never yield; a custom action
+-- is the game's code and may, and a flag held across that yield also dropped
+-- every edit the player made meanwhile. Asked of the thread that made an edit,
+-- through Listeners.Origin for the recorders a Notify starts on threads of
+-- their own.
+const Custom: {[thread]: true} = {}
+
+const function Recording(): boolean
+    return not Applying and not Custom[Listeners.Origin()]
+end
+
 -- One undo or redo at a time: asking the server yields, and a second one
 -- started meanwhile would reverse a step the first has not finished with.
 local Busy = false
@@ -3318,6 +3330,14 @@ const function Clear(Step: Step)
     table.clear(Step.Entries)
 end
 
+-- Counted up when the redo half is dropped (a new action, here or on the
+-- server) or everything is (Clear), and for every step pushed. A step of this
+-- client's own is off the order while it is applied, since a custom action can
+-- yield, and these are how it learns afterwards where it can still go.
+local Forked = 0
+local Wiped = 0
+local Pushed = 0
+
 const function ClearTokens(Order: {Token})
     for _, Token in Order do
         if Token.Step then
@@ -3368,6 +3388,7 @@ const function Forget(RedoOnly: boolean)
 end
 
 const function Push(Step: Step)
+    Pushed += 1
     Step.Weight = Weigh(Step)
     table.insert(UndoOrder, {Step = Step})
 
@@ -3412,6 +3433,8 @@ const function Push(Step: Step)
     end
 
     ClearTokens(RedoOrder)
+
+    Forked += 1
     Listeners.Notify(Changed)
 end
 
@@ -3445,12 +3468,12 @@ const function Ordered(Entries: {Entry}, Forward: boolean): {Entry}
 end
 
 const function ApplyLocal(Step: Step, Forward: boolean): boolean
-    Applying = true
-
-    const Custom = Step.Custom
-    if Custom then
-        const Ok, Err = pcall(if Forward then Custom.Redo else Custom.Undo)
-        Applying = false
+    const Action = Step.Custom
+    if Action then
+        const Thread = coroutine.running()
+        Custom[Thread] = true
+        const Ok, Err = pcall(if Forward then Action.Redo else Action.Undo)
+        Custom[Thread] = nil
 
         if not Ok then
             -- Left where it was, like any other refusal, so it can be tried
@@ -3461,6 +3484,8 @@ const function ApplyLocal(Step: Step, Forward: boolean): boolean
 
         return true
     end
+
+    Applying = true
 
     for _, Entry in Ordered(Step.Entries, Forward) do
         const Copy = Entry.Copy
@@ -3503,15 +3528,42 @@ const function Move(From: {Token}, To: {Token}, Forward: boolean): boolean
 
     Busy = true
 
-    local Ok, Result
     if Token.Step then
-        Ok, Result = pcall(ApplyLocal, Token.Step, Forward)
-    else
-        const Channel = if Forward then Network.Redo else Network.Undo
-        Ok, Result = pcall(function()
-            return Channel:Invoke(Token.Server)
-        end)
+        -- Off the order while it runs, as on the server: a custom action can
+        -- yield, and a new action, a clear or a fork landing meanwhile used to
+        -- reach a step half applied -- or leave it to be put on a redo stack
+        -- that had been forked past it.
+        table.remove(From)
+        const PushedBefore, ForkedBefore, WipedBefore = Pushed, Forked, Wiped
+
+        const Ok, Result = pcall(ApplyLocal, Token.Step, Forward)
+        Busy = false
+        Applying = false
+
+        const Moved = Ok and Result == true
+        const Destination = if Moved then To else From
+        const Unreachable = Wiped ~= WipedBefore or (Destination == RedoOrder and Forked ~= ForkedBefore)
+
+        if Unreachable then
+            Clear(Token.Step)
+        elseif Moved then
+            Token.Step.Run = nil
+            table.insert(To, Token)
+        else
+            -- Refused, so back where it was: under whatever was recorded while
+            -- it was being tried.
+            const Since = if From == UndoOrder then Pushed - PushedBefore else 0
+            table.insert(From, math.max(1, #From - Since + 1), Token)
+        end
+
+        Listeners.Notify(Changed)
+        return Moved
     end
+
+    const Channel = if Forward then Network.Redo else Network.Undo
+    const Ok, Result = pcall(function()
+        return Channel:Invoke(Token.Server)
+    end)
 
     Busy = false
     Applying = false
@@ -3525,14 +3577,11 @@ const function Move(From: {Token}, To: {Token}, Forward: boolean): boolean
     end
 
     -- Not table.remove of the last: reconciling may have moved things while the
-    -- invoke above was in flight.
+    -- invoke above was in flight. A server step stays in the order while it is
+    -- asked about, because that picture is reconciled against it.
     const At = table.find(From, Token)
     if At then
         table.remove(From, At)
-    end
-
-    if Token.Step then
-        Token.Step.Run = nil
     end
 
     table.insert(To, Token)
@@ -3587,6 +3636,7 @@ end
 function History:Clear()
     ClearTokens(UndoOrder)
     ClearTokens(RedoOrder)
+    Wiped += 1
     Forget(false)
     Listeners.Notify(Changed)
 end
@@ -3668,6 +3718,7 @@ Network.Changed:Connect(function(Undo: {number}, Redo: {number})
     -- go of what they were holding.
     if Fresh then
         ClearTokens(RedoOrder)
+        Forked += 1
     end
 
     Listeners.Notify(Changed)
@@ -3693,8 +3744,10 @@ Transactions.OnApplied(function(Record): boolean
     Applying = false
 
     -- Nil when the apply came apart and was rolled back: nothing happened, so
-    -- there is nothing to take back.
-    if not Record then
+    -- there is nothing to take back. Committed by a custom action as part of
+    -- undoing, it is the action's: recording it put a step on top of the one
+    -- being undone.
+    if not Record or Custom[coroutine.running()] then
         return false
     end
 
@@ -3749,7 +3802,7 @@ Transactions.OnApplied(function(Record): boolean
 end)
 
 Objects:OnEdited(function(Obj, Property, Before, After)
-    if Applying or not Obj.Local then
+    if not Recording() or not Obj.Local then
         return
     end
 
@@ -3783,7 +3836,7 @@ end)
 -- revive either: that fires this like any other object appearing, and an undo
 -- recording its own reversal would never let the stack empty.
 Objects:OnAdded(function(Obj, Restored)
-    if Applying or Restored or not Obj.Local then
+    if not Recording() or Restored or not Obj.Local then
         return
     end
 
@@ -3794,7 +3847,7 @@ end)
 -- this side is holding it, so answering false here is what makes a destroy in a
 -- client owned scene final.
 Objects.OnRetired(function(Obj): boolean
-    if Applying or not Obj.Local then
+    if not Recording() or not Obj.Local then
         return false
     end
 
@@ -3993,12 +4046,15 @@ const Shelves: {[Player]: Shelf} = {}
 -- guard: they write to properties and objects directly and never reach a
 -- recorder.
 --
--- Per player, and only around a custom action. This was one flag for the whole
--- server, held for every step, and a step can yield -- bringing a copy back
--- announces its objects a chunk a frame. For as long as one player's undo of an
--- unload ran, nobody else's edits were recorded, and a destroy that landed in
--- that window was disposed on the spot rather than kept for its undo.
-const Applying: {[Player]: true} = {}
+-- By the thread running the action, and only around it. This was one flag for
+-- the whole server, held for every step, and a step can yield -- bringing a copy
+-- back announces its objects a chunk a frame -- so nobody else's edits were
+-- recorded while one player's undo ran. Then it was per player, which still
+-- dropped that player's own edits if the action yielded and they made one in
+-- the meantime. A recorder runs on the thread whose edit it records, so the
+-- action's own edits are on its thread and nobody else's are. What the action
+-- spawns runs on threads of its own and is recorded like anything else.
+const Applying: {[thread]: true} = {}
 
 const function ShelfFor(Plr: Player): Shelf
     local Shelf = Shelves[Plr]
@@ -4258,9 +4314,10 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
         -- free to move objects around through the ordinary API, and every one
         -- of those would otherwise be recorded as a fresh action on top of the
         -- step being reversed -- a stack that grows every time it is undone.
-        Applying[Plr] = true
+        const Thread = coroutine.running()
+        Applying[Thread] = true
         const Ok, Err = pcall(if Forward then Custom.Redo else Custom.Undo)
-        Applying[Plr] = nil
+        Applying[Thread] = nil
 
         if not Ok then
             -- Left where it was, like any other refusal, so the player can try
@@ -4381,7 +4438,7 @@ const function Move(Plr: Player, Shelf: Shelf, From: {Step}, To: {Step}, Forward
     Shelf.Busy = true
     const Ok, Result = pcall(Apply, Plr, Step, Forward)
     Shelf.Busy = false
-    Applying[Plr] = nil
+    Applying[coroutine.running()] = nil
 
     if not Ok then
         Logger:Warn(`A history step failed to apply and was left on the stack: {Result}`)
@@ -4414,7 +4471,9 @@ const function Move(Plr: Player, Shelf: Shelf, From: {Step}, To: {Step}, Forward
         Announce(Plr)
     end
 
-    return Moved and not Unreachable
+    -- Whether the step was applied, which is what the caller asked for, even
+    -- when what happened meanwhile left it nowhere to go afterwards.
+    return Moved
 end
 
 --=============================================================================
@@ -4526,7 +4585,7 @@ end
 -- packet, one permission pass, one thing to take back. Taking the record means
 -- taking the objects its destroys suspended, so this answers true.
 Transactions.OnApplied(function(Plr: Player, Record): boolean
-    if Applying[Plr] then
+    if Applying[coroutine.running()] then
         return false
     end
 
@@ -4585,7 +4644,7 @@ end)
 -- A single set, and a run of them to one property merged into one step, so a
 -- drag undoes as the drag it was rather than as a hundred frames.
 Objects.OnPlayerEdited(function(Plr, Obj, Property, Before, After)
-    if Applying[Plr] then
+    if Applying[coroutine.running()] then
         return
     end
 
@@ -4635,7 +4694,7 @@ Objects.OnRetired(function(Plr, Obj): boolean
     -- destroys something as part of undoing is destroying it for good, because
     -- the step it is part of is the thing that would have to bring it back and
     -- that step is already busy being that.
-    if not Plr or Applying[Plr] then
+    if not Plr or Applying[coroutine.running()] then
         return false
     end
 
@@ -4825,10 +4884,29 @@ end
 
 -- Cloned first, so a callback that disconnects itself or connects another does
 -- not change which ones this call reaches.
+--
+-- The firing thread is kept for the moment each callback starts, so a callback
+-- can ask who it is running on behalf of before it yields. A spawned callback
+-- is a thread of its own, and without this it could not tell an edit a custom
+-- undo made from one the player made at the same time.
+local Notifying: thread? = nil
+
 function Listeners.Notify(List: {any}, ...: any)
+    const Previous = Notifying
+    Notifying = coroutine.running()
+
     for _, Callback in table.clone(List) do
         task.spawn(Callback, ...)
     end
+
+    Notifying = Previous
+end
+
+-- The thread whose Notify started the callback now running, or the running
+-- thread when it was not started by one. Only good until the callback first
+-- yields.
+function Listeners.Origin(): thread
+    return Notifying or coroutine.running()
 end
 
 return Listeners
@@ -19440,6 +19518,50 @@ T:Test("a clear while an undo yields leaves nothing to redo", function()
     Scene:Destroy()
 end)
 
+T:Test("a custom undo's own edits go unrecorded, the player's meanwhile do not", function()
+    const Scene, Copy = Room("HistoryCustomOwn")
+    const A = Editor(-6305, Scene)
+    const Door = Copy:Create(DoorId, {[TitleId] = "Before"})
+
+    const function SetAs(Value: string)
+        return Transactions.Apply(A, {
+            {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = Value, Type = "Text"},
+        } :: any)
+    end
+
+    History:Push(A, {
+        Undo = function()
+            -- The action's own edit, through the ordinary API: part of undoing,
+            -- not something the player did.
+            SetAs("ByAction")
+            task.wait(0.3)
+        end,
+
+        Redo = function() end,
+    })
+
+    local Undone = nil
+    task.spawn(function()
+        Undone = History:Undo(A)
+    end)
+
+    -- The player's own edit while the action waits. It used to go unrecorded,
+    -- because recording was off for the player rather than for the action.
+    T:Ok(SetAs("ByPlayer"), "the player edited meanwhile")
+
+    T:Eventually(function()
+        return Undone ~= nil
+    end, 3, "the undo finished")
+
+    T:Ok(History:CanUndo(A), "the player's edit is a step")
+    T:Ok(History:Undo(A), "and undoes")
+    T:Eq(Door:Get(TitleId), "ByAction", "back to what the action left, not before it")
+    T:Ok(not History:CanUndo(A), "and the action's own edit was never a step")
+
+    History:Clear(A)
+    Scene:Destroy()
+end)
+
 T:Test("a fork while an undo yields leaves the undone step unreachable", function()
     const Scene = Room("HistoryYieldFork")
     const A = Editor(-6304, Scene)
@@ -22616,6 +22738,50 @@ T:Test("a custom action that throws stays on the stack", function()
     T:Ok(not History:Undo(), "refused")
     T:Ok(History:CanUndo(), "and left where it was")
 
+    History:Clear()
+end)
+
+T:Test("a custom undo's own edits go unrecorded, the player's meanwhile do not", function()
+    const Sandbox = Scenes.new({Name = "ClientCustomOwn"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId, {[TitleId] = "Before"})
+    History:Clear()
+
+    History:Push({
+        Undo = function()
+            Obj:Set(TitleId, "ByAction")
+            task.wait(0.3)
+        end,
+
+        Redo = function() end,
+    })
+
+    local Undone = nil
+    task.spawn(function()
+        Undone = History:Undo()
+    end)
+
+    -- One flag held across the action's wait used to drop this as well. Made
+    -- while the action is still waiting, and too late to merge into anything.
+    task.wait(0.05)
+    Obj:Set(TitleId, "ByPlayer")
+
+    T:Eventually(function()
+        return Undone ~= nil
+    end, 3, "the undo finished")
+
+    T:Ok(History:CanUndo(), "the player's edit is a step")
+    T:Ok(History:Undo(), "and undoes")
+    T:Eq(Obj:Get(TitleId), "ByAction", "back to what the action left")
+    T:Ok(not History:CanUndo(), "and the action's own edit was never a step")
+    T:Ok(not History:CanRedo(), "nor is the undone action redoable past the newer edit")
+
+    Sandbox:Destroy()
     History:Clear()
 end)
 

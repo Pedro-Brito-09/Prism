@@ -3344,6 +3344,50 @@ T:Test("a clear while an undo yields leaves nothing to redo", function()
     Scene:Destroy()
 end)
 
+T:Test("a custom undo's own edits go unrecorded, the player's meanwhile do not", function()
+    const Scene, Copy = Room("HistoryCustomOwn")
+    const A = Editor(-6305, Scene)
+    const Door = Copy:Create(DoorId, {[TitleId] = "Before"})
+
+    const function SetAs(Value: string)
+        return Transactions.Apply(A, {
+            {Kind = "Set", Target = Door.RuntimeId, Property = TitleId, Value = Value, Type = "Text"},
+        } :: any)
+    end
+
+    History:Push(A, {
+        Undo = function()
+            -- The action's own edit, through the ordinary API: part of undoing,
+            -- not something the player did.
+            SetAs("ByAction")
+            task.wait(0.3)
+        end,
+
+        Redo = function() end,
+    })
+
+    local Undone = nil
+    task.spawn(function()
+        Undone = History:Undo(A)
+    end)
+
+    -- The player's own edit while the action waits. It used to go unrecorded,
+    -- because recording was off for the player rather than for the action.
+    T:Ok(SetAs("ByPlayer"), "the player edited meanwhile")
+
+    T:Eventually(function()
+        return Undone ~= nil
+    end, 3, "the undo finished")
+
+    T:Ok(History:CanUndo(A), "the player's edit is a step")
+    T:Ok(History:Undo(A), "and undoes")
+    T:Eq(Door:Get(TitleId), "ByAction", "back to what the action left, not before it")
+    T:Ok(not History:CanUndo(A), "and the action's own edit was never a step")
+
+    History:Clear(A)
+    Scene:Destroy()
+end)
+
 T:Test("a fork while an undo yields leaves the undone step unreachable", function()
     const Scene = Room("HistoryYieldFork")
     const A = Editor(-6304, Scene)

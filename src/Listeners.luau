@@ -36,10 +36,29 @@ end
 
 -- Cloned first, so a callback that disconnects itself or connects another does
 -- not change which ones this call reaches.
+--
+-- The firing thread is kept for the moment each callback starts, so a callback
+-- can ask who it is running on behalf of before it yields. A spawned callback
+-- is a thread of its own, and without this it could not tell an edit a custom
+-- undo made from one the player made at the same time.
+local Notifying: thread? = nil
+
 function Listeners.Notify(List: {any}, ...: any)
+    const Previous = Notifying
+    Notifying = coroutine.running()
+
     for _, Callback in table.clone(List) do
         task.spawn(Callback, ...)
     end
+
+    Notifying = Previous
+end
+
+-- The thread whose Notify started the callback now running, or the running
+-- thread when it was not started by one. Only good until the callback first
+-- yields.
+function Listeners.Origin(): thread
+    return Notifying or coroutine.running()
 end
 
 return Listeners

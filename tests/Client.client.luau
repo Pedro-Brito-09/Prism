@@ -1934,6 +1934,50 @@ T:Test("a custom action that throws stays on the stack", function()
     History:Clear()
 end)
 
+T:Test("a custom undo's own edits go unrecorded, the player's meanwhile do not", function()
+    const Sandbox = Scenes.new({Name = "ClientCustomOwn"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    const Obj = Copy:Create(BareId, {[TitleId] = "Before"})
+    History:Clear()
+
+    History:Push({
+        Undo = function()
+            Obj:Set(TitleId, "ByAction")
+            task.wait(0.3)
+        end,
+
+        Redo = function() end,
+    })
+
+    local Undone = nil
+    task.spawn(function()
+        Undone = History:Undo()
+    end)
+
+    -- One flag held across the action's wait used to drop this as well. Made
+    -- while the action is still waiting, and too late to merge into anything.
+    task.wait(0.05)
+    Obj:Set(TitleId, "ByPlayer")
+
+    T:Eventually(function()
+        return Undone ~= nil
+    end, 3, "the undo finished")
+
+    T:Ok(History:CanUndo(), "the player's edit is a step")
+    T:Ok(History:Undo(), "and undoes")
+    T:Eq(Obj:Get(TitleId), "ByAction", "back to what the action left")
+    T:Ok(not History:CanUndo(), "and the action's own edit was never a step")
+    T:Ok(not History:CanRedo(), "nor is the undone action redoable past the newer edit")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
 T:Test("a custom action needs both verbs", function()
     History:Clear()
     T:Ok(not History:Push({Undo = function() end} :: any), "refused without a Redo")
