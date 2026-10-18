@@ -107,6 +107,18 @@ const Changed: {() -> ()} = {}
 -- itself as a create.
 local Applying = false
 
+-- The threads running a custom action, whose edits are the action's and not new
+-- ones. Applying covers Prism's own entries, which never yield; a custom action
+-- is the game's code and may, and a flag held across that yield also dropped
+-- every edit the player made meanwhile. Asked of the thread that made an edit,
+-- through Listeners.Origin for the recorders a Notify starts on threads of
+-- their own.
+const Custom: {[thread]: true} = {}
+
+const function Recording(): boolean
+    return not Applying and not Custom[Listeners.Origin()]
+end
+
 -- One undo or redo at a time: asking the server yields, and a second one
 -- started meanwhile would reverse a step the first has not finished with.
 local Busy = false
@@ -160,6 +172,14 @@ const function Clear(Step: Step)
     table.clear(Step.Entries)
 end
 
+-- Counted up when the redo half is dropped (a new action, here or on the
+-- server) or everything is (Clear), and for every step pushed. A step of this
+-- client's own is off the order while it is applied, since a custom action can
+-- yield, and these are how it learns afterwards where it can still go.
+local Forked = 0
+local Wiped = 0
+local Pushed = 0
+
 const function ClearTokens(Order: {Token})
     for _, Token in Order do
         if Token.Step then
@@ -210,6 +230,7 @@ const function Forget(RedoOnly: boolean)
 end
 
 const function Push(Step: Step)
+    Pushed += 1
     Step.Weight = Weigh(Step)
     table.insert(UndoOrder, {Step = Step})
 
@@ -254,6 +275,8 @@ const function Push(Step: Step)
     end
 
     ClearTokens(RedoOrder)
+
+    Forked += 1
     Listeners.Notify(Changed)
 end
 
@@ -287,12 +310,12 @@ const function Ordered(Entries: {Entry}, Forward: boolean): {Entry}
 end
 
 const function ApplyLocal(Step: Step, Forward: boolean): boolean
-    Applying = true
-
-    const Custom = Step.Custom
-    if Custom then
-        const Ok, Err = pcall(if Forward then Custom.Redo else Custom.Undo)
-        Applying = false
+    const Action = Step.Custom
+    if Action then
+        const Thread = coroutine.running()
+        Custom[Thread] = true
+        const Ok, Err = pcall(if Forward then Action.Redo else Action.Undo)
+        Custom[Thread] = nil
 
         if not Ok then
             -- Left where it was, like any other refusal, so it can be tried
@@ -303,6 +326,8 @@ const function ApplyLocal(Step: Step, Forward: boolean): boolean
 
         return true
     end
+
+    Applying = true
 
     for _, Entry in Ordered(Step.Entries, Forward) do
         const Copy = Entry.Copy
@@ -345,15 +370,42 @@ const function Move(From: {Token}, To: {Token}, Forward: boolean): boolean
 
     Busy = true
 
-    local Ok, Result
     if Token.Step then
-        Ok, Result = pcall(ApplyLocal, Token.Step, Forward)
-    else
-        const Channel = if Forward then Network.Redo else Network.Undo
-        Ok, Result = pcall(function()
-            return Channel:Invoke(Token.Server)
-        end)
+        -- Off the order while it runs, as on the server: a custom action can
+        -- yield, and a new action, a clear or a fork landing meanwhile used to
+        -- reach a step half applied -- or leave it to be put on a redo stack
+        -- that had been forked past it.
+        table.remove(From)
+        const PushedBefore, ForkedBefore, WipedBefore = Pushed, Forked, Wiped
+
+        const Ok, Result = pcall(ApplyLocal, Token.Step, Forward)
+        Busy = false
+        Applying = false
+
+        const Moved = Ok and Result == true
+        const Destination = if Moved then To else From
+        const Unreachable = Wiped ~= WipedBefore or (Destination == RedoOrder and Forked ~= ForkedBefore)
+
+        if Unreachable then
+            Clear(Token.Step)
+        elseif Moved then
+            Token.Step.Run = nil
+            table.insert(To, Token)
+        else
+            -- Refused, so back where it was: under whatever was recorded while
+            -- it was being tried.
+            const Since = if From == UndoOrder then Pushed - PushedBefore else 0
+            table.insert(From, math.max(1, #From - Since + 1), Token)
+        end
+
+        Listeners.Notify(Changed)
+        return Moved
     end
+
+    const Channel = if Forward then Network.Redo else Network.Undo
+    const Ok, Result = pcall(function()
+        return Channel:Invoke(Token.Server)
+    end)
 
     Busy = false
     Applying = false
@@ -367,14 +419,11 @@ const function Move(From: {Token}, To: {Token}, Forward: boolean): boolean
     end
 
     -- Not table.remove of the last: reconciling may have moved things while the
-    -- invoke above was in flight.
+    -- invoke above was in flight. A server step stays in the order while it is
+    -- asked about, because that picture is reconciled against it.
     const At = table.find(From, Token)
     if At then
         table.remove(From, At)
-    end
-
-    if Token.Step then
-        Token.Step.Run = nil
     end
 
     table.insert(To, Token)
@@ -429,6 +478,7 @@ end
 function History:Clear()
     ClearTokens(UndoOrder)
     ClearTokens(RedoOrder)
+    Wiped += 1
     Forget(false)
     Listeners.Notify(Changed)
 end
@@ -510,6 +560,7 @@ Network.Changed:Connect(function(Undo: {number}, Redo: {number})
     -- go of what they were holding.
     if Fresh then
         ClearTokens(RedoOrder)
+        Forked += 1
     end
 
     Listeners.Notify(Changed)
@@ -535,8 +586,10 @@ Transactions.OnApplied(function(Record): boolean
     Applying = false
 
     -- Nil when the apply came apart and was rolled back: nothing happened, so
-    -- there is nothing to take back.
-    if not Record then
+    -- there is nothing to take back. Committed by a custom action as part of
+    -- undoing, it is the action's: recording it put a step on top of the one
+    -- being undone.
+    if not Record or Custom[coroutine.running()] then
         return false
     end
 
@@ -591,7 +644,7 @@ Transactions.OnApplied(function(Record): boolean
 end)
 
 Objects:OnEdited(function(Obj, Property, Before, After)
-    if Applying or not Obj.Local then
+    if not Recording() or not Obj.Local then
         return
     end
 
@@ -625,7 +678,7 @@ end)
 -- revive either: that fires this like any other object appearing, and an undo
 -- recording its own reversal would never let the stack empty.
 Objects:OnAdded(function(Obj, Restored)
-    if Applying or Restored or not Obj.Local then
+    if not Recording() or Restored or not Obj.Local then
         return
     end
 
@@ -636,7 +689,7 @@ end)
 -- this side is holding it, so answering false here is what makes a destroy in a
 -- client owned scene final.
 Objects.OnRetired(function(Obj): boolean
-    if Applying or not Obj.Local then
+    if not Recording() or not Obj.Local then
         return false
     end
 

@@ -167,12 +167,15 @@ const Shelves: {[Player]: Shelf} = {}
 -- guard: they write to properties and objects directly and never reach a
 -- recorder.
 --
--- Per player, and only around a custom action. This was one flag for the whole
--- server, held for every step, and a step can yield -- bringing a copy back
--- announces its objects a chunk a frame. For as long as one player's undo of an
--- unload ran, nobody else's edits were recorded, and a destroy that landed in
--- that window was disposed on the spot rather than kept for its undo.
-const Applying: {[Player]: true} = {}
+-- By the thread running the action, and only around it. This was one flag for
+-- the whole server, held for every step, and a step can yield -- bringing a copy
+-- back announces its objects a chunk a frame -- so nobody else's edits were
+-- recorded while one player's undo ran. Then it was per player, which still
+-- dropped that player's own edits if the action yielded and they made one in
+-- the meantime. A recorder runs on the thread whose edit it records, so the
+-- action's own edits are on its thread and nobody else's are. What the action
+-- spawns runs on threads of its own and is recorded like anything else.
+const Applying: {[thread]: true} = {}
 
 const function ShelfFor(Plr: Player): Shelf
     local Shelf = Shelves[Plr]
@@ -432,9 +435,10 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
         -- free to move objects around through the ordinary API, and every one
         -- of those would otherwise be recorded as a fresh action on top of the
         -- step being reversed -- a stack that grows every time it is undone.
-        Applying[Plr] = true
+        const Thread = coroutine.running()
+        Applying[Thread] = true
         const Ok, Err = pcall(if Forward then Custom.Redo else Custom.Undo)
-        Applying[Plr] = nil
+        Applying[Thread] = nil
 
         if not Ok then
             -- Left where it was, like any other refusal, so the player can try
@@ -555,7 +559,7 @@ const function Move(Plr: Player, Shelf: Shelf, From: {Step}, To: {Step}, Forward
     Shelf.Busy = true
     const Ok, Result = pcall(Apply, Plr, Step, Forward)
     Shelf.Busy = false
-    Applying[Plr] = nil
+    Applying[coroutine.running()] = nil
 
     if not Ok then
         Logger:Warn(`A history step failed to apply and was left on the stack: {Result}`)
@@ -588,7 +592,9 @@ const function Move(Plr: Player, Shelf: Shelf, From: {Step}, To: {Step}, Forward
         Announce(Plr)
     end
 
-    return Moved and not Unreachable
+    -- Whether the step was applied, which is what the caller asked for, even
+    -- when what happened meanwhile left it nowhere to go afterwards.
+    return Moved
 end
 
 --=============================================================================
@@ -700,7 +706,7 @@ end
 -- packet, one permission pass, one thing to take back. Taking the record means
 -- taking the objects its destroys suspended, so this answers true.
 Transactions.OnApplied(function(Plr: Player, Record): boolean
-    if Applying[Plr] then
+    if Applying[coroutine.running()] then
         return false
     end
 
@@ -759,7 +765,7 @@ end)
 -- A single set, and a run of them to one property merged into one step, so a
 -- drag undoes as the drag it was rather than as a hundred frames.
 Objects.OnPlayerEdited(function(Plr, Obj, Property, Before, After)
-    if Applying[Plr] then
+    if Applying[coroutine.running()] then
         return
     end
 
@@ -809,7 +815,7 @@ Objects.OnRetired(function(Plr, Obj): boolean
     -- destroys something as part of undoing is destroying it for good, because
     -- the step it is part of is the thing that would have to bring it back and
     -- that step is already busy being that.
-    if not Plr or Applying[Plr] then
+    if not Plr or Applying[coroutine.running()] then
         return false
     end
 
