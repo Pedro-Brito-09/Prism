@@ -8,7 +8,8 @@
 
     The Database section is on: it writes to real DataStore and MemoryStore keys
     and needs Studio API access enabled. Set RUN_DATABASE to false to skip it.
-    Its cleanup step is commented out, so the PrismSelfTest key survives a run.
+    It wipes its two keys, PrismSelfTest and PrismSelfTestBurst, before it starts
+    and after it finishes, so they never hold more than one run's records.
 ]]
 
 const Players = game:GetService("Players")
@@ -4282,6 +4283,29 @@ end)
 --=============================================================================
 
 if RUN_DATABASE then
+    -- Removes everything a run of these tests leaves under one key: the
+    -- manifest and every shard it counts. Run before the section as well as
+    -- after it, so a run that stopped partway does not leave the next one
+    -- walking its shards. The records used to pile up across runs instead,
+    -- and the paging test slowed with every run until it took half a minute.
+    const function Wipe(Key: string): boolean
+        const Store = game:GetService("DataStoreService"):GetDataStore(Key)
+        const Read, Manifest = Try(5, Store.GetAsync, Store, "Manifest")
+        if not Read then
+            return false
+        end
+
+        const Count = if type(Manifest) == "table" then (Manifest.Count or 1) else 1
+        local Clean = true
+        for Index = 1, Count do
+            if not Try(5, Store.RemoveAsync, Store, `{Key}:{Index}`) then
+                Clean = false
+            end
+        end
+
+        return Try(5, Store.RemoveAsync, Store, "Manifest") and Clean
+    end
+
     T:Describe("Database")
 
     const Title = Properties.new(TitleId)
@@ -4289,6 +4313,11 @@ if RUN_DATABASE then
 
     const Plays = Properties.new(PlaysId)
     Plays:Set(0)
+
+    T:Test("starts from empty stores", function()
+        T:Ok(Wipe(DATABASE_KEY), "the main key")
+        T:Ok(Wipe(`{DATABASE_KEY}Burst`), "and the burst key")
+    end)
 
     -- ShardLimit is deliberately tiny so the seal path runs after a handful of
     -- records instead of needing three megabytes of them.
@@ -4412,10 +4441,9 @@ if RUN_DATABASE then
         T:Ok(Newest.HasMore, "more pages exist")
         T:Eq(Newest.Records[1].Id, Created[8], "newest first")
 
-        -- Records from earlier runs stay in the store (the cleanup below is off),
-        -- so the oldest is only known to be no newer than this run's first.
+        -- The store was wiped first, so this run's first record is the oldest.
         const Oldest = db:Get("Oldest", 1)
-        T:Ok(Oldest.Records[1].Id <= Created[1], "oldest first")
+        T:Eq(Oldest.Records[1].Id, Created[1], "oldest first")
         T:Ok(Oldest.Records[1].Id < Oldest.Records[2].Id, "ascending")
     end)
 
@@ -4531,24 +4559,10 @@ if RUN_DATABASE then
 
     T:Describe("Database cleanup")
 
-    --T:Test("removes its test keys", function()
-    --    for _, Id in Created do
-    --        db:Delete(Id)
-    --    end
-
-    --    const Store = db.DataStore
-    --    for Index = 1, 10 do
-    --        pcall(function()
-    --            Store:RemoveAsync(`{DATABASE_KEY}:{Index}`)
-    --        end)
-    --    end
-
-    --    pcall(function()
-    --        Store:RemoveAsync("Manifest")
-    --    end)
-
-    --    T:Ok(true, "cleanup ran")
-    --end)
+    T:Test("removes its test keys", function()
+        T:Ok(Wipe(DATABASE_KEY), "the main key")
+        T:Ok(Wipe(`{DATABASE_KEY}Burst`), "and the burst key")
+    end)
 end
 
 --=============================================================================
