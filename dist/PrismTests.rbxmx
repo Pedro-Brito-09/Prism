@@ -310,9 +310,16 @@ const Channels: {Channel} = {
         -- refused. The scene is registered, never loaded: putting a room in the
         -- world is the server's call, and the client asked for a document to be
         -- stored rather than spawned.
+        --
+        -- A refusal says which rule it broke, so a game can tell its player
+        -- what to change. It is still not logged: a reason handed back to the
+        -- caller costs the server nothing, where a logged one is output a
+        -- client could spam.
         Name = "Scenes.Commit",
         Args = {Codecs.String, Codecs.Buffer}, -- Name, Compressor:CompressScene
-        Returns = {Codecs.Bool, Codecs.Varint}, -- accepted, SceneId
+        -- Cast: the default solver types a list by its first codec and refuses
+        -- the rest, the same noise Transactions.Apply carries in the baseline.
+        Returns = {Codecs.Bool, Codecs.Varint, Codecs.String} :: {Codecs.Codec<any>}, -- accepted, SceneId, reason ("" when accepted)
     },
 
     {
@@ -11808,23 +11815,27 @@ end
 --
 -- Yields, and can be refused: the server checks that it may create every object
 -- type in the pack before it takes any of it.
-const function __push(self: any, Name: string): (boolean, SceneIdentifier?)
+-- The third value says why a push was refused, so a game can tell its player:
+-- Budget, NoPushRight, TooLarge, TooManyObjects, BadName, NameTaken,
+-- UnknownType, Unreadable or Failed -- or Unreachable when the request never
+-- got an answer.
+const function __push(self: any, Name: string): (boolean, SceneIdentifier?, string?)
     const Data = __serialize(self)
 
-    const Ok, Accepted, Identifier = pcall(function()
+    const Ok, Accepted, Identifier, Reason = pcall(function()
         return Network.Commit:Invoke(Name, Data)
     end)
 
     if not Ok then
         Logger:Warn(`A local scene was not committed to the server: {Accepted}`)
-        return false, nil
+        return false, nil, "Unreachable"
     end
 
     if not Accepted then
-        return false, nil
+        return false, nil, Reason
     end
 
-    return true, Identifier
+    return true, Identifier, nil
 end
 
 const function __destroy(self: any)
@@ -12868,16 +12879,22 @@ function Scenes:SetPushRole(Role: string?)
     PushRole = Role
 end
 
--- A client handing over a scene it built locally. Refusals are silent and say
--- nothing but false, like every other client facing handler here: a refusal
--- that logs is a refusal a client can spam to fill the server's output.
-Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (boolean, SceneIdentifier)
+-- A client handing over a scene it built locally. Refusals are not logged,
+-- like every other client facing handler here: a refusal that logs is a
+-- refusal a client can spam to fill the server's output. They do say why to
+-- the client that asked, which costs nothing and is the one thing a game needs
+-- to tell its player.
+const function Refuse(Reason: string): (boolean, SceneIdentifier, string)
+    return false, 0, Reason
+end
+
+Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (boolean, SceneIdentifier, string)
     -- One action for the packet rather than one per object in it. A transaction
     -- charges per operation because every operation reaches into the world as
     -- it stands; this arrives whole, and what bounds it is its size, which is
     -- known before a byte of it is read.
     if not Permissions:Consume(Plr) then
-        return false, 0
+        return Refuse("Budget")
     end
 
     -- A global right rather than a check against the pack's types. The scene
@@ -12885,22 +12902,22 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
     -- registering a scene at all is exactly the kind of thing that is about the
     -- session rather than a document.
     if not Permissions:CanPush(Plr) then
-        return false, 0
+        return Refuse("NoPushRight")
     end
 
     if buffer.len(Data) > MAX_COMMIT_BYTES then
-        return false, 0
+        return Refuse("TooLarge")
     end
 
     if #Name == 0 or #Name > MAX_NAME_LENGTH then
-        return false, 0
+        return Refuse("BadName")
     end
 
     -- Names are how a scene is asked for, so the first one to take a name keeps
     -- it. Refused here as well as in Scenes.new so the pack is not decoded for
     -- a commit that cannot land anyway.
     if Registry.ByName[Name] then
-        return false, 0
+        return Refuse("NameTaken")
     end
 
     const Ok, _, Decompressed = pcall(function()
@@ -12908,12 +12925,12 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
     end)
 
     if not Ok or not Decompressed then
-        return false, 0
+        return Refuse("Unreadable")
     end
 
     const Packed = Decompressed :: {any}
     if #Packed > MAX_COMMIT_OBJECTS then
-        return false, 0
+        return Refuse("TooManyObjects")
     end
 
     -- Every object type in the pack has to be one the server knows, and the
@@ -12924,7 +12941,7 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
 
     for _, Object in Packed do
         if not Objects:GetRegistry(Object.Registry) then
-            return false, 0
+            return Refuse("UnknownType")
         end
 
         -- A client's pack keeps no bytes the server cannot read. A save of the
@@ -12948,10 +12965,10 @@ Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (bo
         Rights = if PushRole then {[Plr.UserId] = PushRole} else nil,
     }, Compressor:CompressScene(Highest, Packed))
     if not Scene then
-        return false, 0
+        return Refuse("Failed")
     end
 
-    return true, Scene.Id
+    return true, Scene.Id, ""
 end
 
 -- The scene an object lands in when the caller names none, so Objects.new keeps
@@ -21887,8 +21904,9 @@ T:Test("a local scene is handed to the server as a pack", function()
 
     Window()
 
-    const Accepted, Identifier = Sandbox:Push("ClientPushedRoom")
+    const Accepted, Identifier, Reason = Sandbox:Push("ClientPushedRoom")
     T:Ok(Accepted, "the server took it")
+    T:Eq(Reason, nil, "with no reason to give")
     T:Ok(Identifier and Identifier > 0, "and answered with its id")
 
     -- It registers on the server admitting only its author, which is this
@@ -21905,6 +21923,32 @@ T:Test("a local scene is handed to the server as a pack", function()
 
     T:Ok(Scenes:GetLocal("ClientPush"), "and the local one is still local")
     T:Ok(Copy:Find(1), "still holding its own objects")
+
+    Sandbox:Destroy()
+end)
+
+T:Test("a refused push says why", function()
+    const Sandbox = Scenes.new({Name = "ClientPushRefused"})
+    if not Sandbox then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Copy = Sandbox:Load()
+    Copy:Create(BareId, {[TitleId] = "Again"})
+    Copy:Commit()
+
+    -- The name the test above already took. It used to answer false and
+    -- nothing else, whatever the rule it broke.
+    Window()
+    const Taken, _, Why = Sandbox:Push("ClientPushedRoom")
+    T:Ok(not Taken, "refused")
+    T:Eq(Why, "NameTaken", "because the name is taken")
+
+    Window()
+    const Blank, _, Empty = Sandbox:Push("")
+    T:Ok(not Blank, "refused")
+    T:Eq(Empty, "BadName", "because a scene needs a name")
 
     Sandbox:Destroy()
 end)
