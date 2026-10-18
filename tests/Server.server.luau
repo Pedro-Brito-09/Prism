@@ -3001,6 +3001,32 @@ T:Test("a large load does not hold the server for its whole length", function()
     Scene:Destroy()
 end)
 
+T:Test("a copy set aside while it is read comes back whole", function()
+    const Scene = CratePack("LargeLoadAside", 3000)
+
+    local Loaded: any = nil
+    task.spawn(function()
+        Loaded = Scene:Load()
+    end)
+
+    -- The read has yielded by now, partway through. Setting the copy aside
+    -- used to stop it there, and bringing the copy back brought back only
+    -- what had been read.
+    const Copy = Scene:GetInstances()[1] :: any
+    T:Ok(Copy and Copy:Suspend(), "set aside mid-read")
+
+    T:Eventually(function()
+        return Loaded ~= nil
+    end, 10, "the load returned")
+
+    if Copy then
+        T:Ok(Copy:Revive(), "brought back")
+        T:Eq(#Copy:GetObjects(), 3000, "with every object in it")
+    end
+
+    Scene:Destroy()
+end)
+
 T:Test("a copy taken away while it is read gets nothing more", function()
     const Scene = CratePack("LargeLoadAbandoned", 3000)
 

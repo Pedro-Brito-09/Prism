@@ -11639,6 +11639,8 @@ end
 -- server's twin; see Scenes/Server for why a player asking for a copy to go
 -- gets this rather than the real thing. Nothing is announced, because nothing
 -- in a scene this client owns ever is.
+local FinishReading: (Instance_: any) -> ()
+
 const function __instance_suspend(self: any): boolean
     if self.Suspended then
         return false
@@ -11648,6 +11650,10 @@ const function __instance_suspend(self: any): boolean
     if not Owner or Owner.Instances[self.Id] ~= self then
         return false
     end
+
+    -- Still being read: the rest is read now, as on the server, so what comes
+    -- back is the whole copy.
+    FinishReading(self)
 
     self.Suspended = Objects.SuspendInstance(self.Id)
     Owner.Instances[self.Id] = nil
@@ -11771,6 +11777,31 @@ const READ_BUDGET = 1 / 120
 -- commit applies on the spot and never yields, so a load inside one cannot
 -- either. Anything else reads in frames, and stops if the copy is taken away
 -- while it waits.
+const function ReadOne(Scene: any, Instance_: any, Object: any)
+    -- Kept rather than dropped, exactly as on the server; see its ReadOne.
+    if not Objects:GetRegistry(Object.Registry) then
+        Logger:Warn(`Local scene {Scene.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
+        table.insert(Instance_.Unknown, Object)
+        return
+    end
+
+    Objects.restore(Instance_, Object)
+end
+
+FinishReading = function(Instance_: any)
+    const Reading = Instance_.Reading
+    if not Reading then
+        return
+    end
+
+    Instance_.Reading = nil
+    while Reading.Next <= #Reading.Objects do
+        const Object = Reading.Objects[Reading.Next]
+        Reading.Next += 1
+        ReadOne(Reading.Scene, Instance_, Object)
+    end
+end
+
 const function Read(self: any, Parent: Instance?, InFrames: boolean): any
     const Instance_ = NewInstance(self, Parent)
 
@@ -11795,25 +11826,34 @@ const function Read(self: any, Parent: Instance?, InFrames: boolean): any
     -- handed an id one of the restored ones already answers to.
     self.LastId = math.max(self.LastId, LastId :: number)
 
+    const Reading = {Scene = self, Objects = Decompressed :: {any}, Next = 1}
+    ;(Instance_ :: any).Reading = Reading
     local Since = os.clock()
-    for _, Object in Decompressed :: {any} do
+
+    while Reading.Next <= #Reading.Objects do
         if InFrames and os.clock() - Since > READ_BUDGET then
             task.wait()
             Since = os.clock()
 
+            -- Set aside meanwhile, and the rest was read as it went; unloaded,
+            -- and nothing more goes into it.
+            if (Instance_ :: any).Reading ~= Reading then
+                break
+            end
+
             if self.Instances[Instance_.Id] ~= Instance_ then
+                (Instance_ :: any).Reading = nil
                 break
             end
         end
 
-        -- Kept rather than dropped, exactly as on the server; see its Read.
-        if not Objects:GetRegistry(Object.Registry) then
-            Logger:Warn(`Local scene {self.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
-            table.insert(Instance_.Unknown, Object)
-            continue
-        end
+        const Object = Reading.Objects[Reading.Next]
+        Reading.Next += 1
+        ReadOne(self, Instance_, Object)
+    end
 
-        Objects.restore(Instance_, Object)
+    if (Instance_ :: any).Reading == Reading then
+        (Instance_ :: any).Reading = nil
     end
 
     return Instance_
@@ -12382,6 +12422,8 @@ end
 --
 -- What it costs while it is away is what the objects cost, which is what they
 -- cost anyway: they are the same tables, out of sight.
+local FinishReading: (Instance_: any) -> ()
+
 const function __instance_suspend(self: SceneInstance): boolean
     if self.Suspended then
         return false
@@ -12391,6 +12433,10 @@ const function __instance_suspend(self: SceneInstance): boolean
     if not Owner or Owner.Instances[self.Id] ~= self then
         return false
     end
+
+    -- Still being read: the rest is read now, so what is set aside -- and what
+    -- comes back -- is the whole copy rather than however much had been read.
+    FinishReading(self)
 
     -- The objects first, while the copy is still filed: each unfiles itself
     -- from the tables below on the way out.
@@ -12539,8 +12585,44 @@ const READ_BUDGET = 1 / 120
 
 -- Load and Open are one reading of the pack, and differ only in whether the
 -- server builds the parts.
+-- One object of a pack into a copy. A type this build does not have is kept as
+-- the bytes it was read from and written back where it was by the next commit;
+-- restoring used to warn and leave it out, and committing the copy afterwards
+-- then wrote it out of the pack for good.
+const function ReadOne(Scene: Scene, Instance_: any, Object: any, Restored: {any})
+    if not Objects:GetRegistry(Object.Registry) then
+        Logger:Warn(`Scene {Scene.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
+        table.insert(Instance_.Unknown, Object)
+        return
+    end
+
+    const Obj = Objects.restore(Instance_, Object, false)
+    if Obj then
+        table.insert(Restored, Obj)
+    end
+end
+
+-- The rest of a read still in progress, read now and without a break. What
+-- sets a copy aside calls this first; the read itself sees it has been
+-- finished for it and stops.
+FinishReading = function(Instance_: any)
+    const Reading = Instance_.Reading
+    if not Reading then
+        return
+    end
+
+    Instance_.Reading = nil
+    while Reading.Next <= #Reading.Objects do
+        const Object = Reading.Objects[Reading.Next]
+        Reading.Next += 1
+        ReadOne(Reading.Scene, Instance_, Object, Reading.Restored)
+    end
+end
+
+-- Load and Open are one reading of the pack, and differ only in whether the
+-- server builds the parts.
 const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
-    const Instance_ = NewInstance(self, Parent, Opened)
+    const Instance_ = NewInstance(self, Parent, Opened) :: any
 
     const Data = self.Data
     if not Data then
@@ -12564,37 +12646,37 @@ const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
     self.LastId = math.max(self.LastId, LastId :: number)
 
     const Restored = {}
+    const Reading = {Scene = self, Objects = Decompressed :: {any}, Next = 1, Restored = Restored}
+    Instance_.Reading = Reading
     local Since = os.clock()
 
-    for _, Object in Decompressed :: {any} do
+    while Reading.Next <= #Reading.Objects do
         -- A frame's worth at a time. Load already yields while it announces
         -- what it read, so a caller sees nothing new, only a server that keeps
-        -- running. Taken away while it was being read -- unloaded, or set aside
-        -- -- and nothing more goes into it; what was read is announced below
-        -- only if it is still there, which it is not.
+        -- running. Set aside meanwhile, the rest was read as it went; unloaded,
+        -- nothing more goes into it. Either way what was read is announced below
+        -- only if it is still there.
         if os.clock() - Since > READ_BUDGET then
             task.wait()
             Since = os.clock()
 
+            if Instance_.Reading ~= Reading then
+                break
+            end
+
             if Registry.Instances[Instance_.Id] ~= Instance_ then
+                Instance_.Reading = nil
                 break
             end
         end
 
-        -- A type this build does not have: kept as the bytes it was read from,
-        -- and written back where it was by the next commit. Restoring used to
-        -- warn and leave it out, and committing the copy afterwards then wrote
-        -- it out of the pack for good.
-        if not Objects:GetRegistry(Object.Registry) then
-            Logger:Warn(`Scene {self.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
-            table.insert(Instance_.Unknown, Object)
-            continue
-        end
+        const Object = Reading.Objects[Reading.Next]
+        Reading.Next += 1
+        ReadOne(self, Instance_, Object, Restored)
+    end
 
-        const Obj = Objects.restore(Instance_, Object, false)
-        if Obj then
-            table.insert(Restored, Obj)
-        end
+    if Instance_.Reading == Reading then
+        Instance_.Reading = nil
     end
 
     Objects.AnnounceAll(Restored)
