@@ -1844,6 +1844,43 @@ T:Test("a large local scene loads in frames, and whole inside a transaction", fu
     History:Clear()
 end)
 
+T:Test("a local copy set aside while it is read comes back whole", function()
+    const Sandbox = Scenes.new({Name = "ClientAsideLoad"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Source = Sandbox:Load()
+    for Index = 1, 3000 do
+        Source:Create(BareId, {[TitleId] = `Aside{Index}`})
+    end
+
+    Source:Commit()
+    Source:Unload()
+    History:Clear()
+
+    local Loaded: any = nil
+    task.spawn(function()
+        Loaded = Sandbox:Load()
+    end)
+
+    const Copy = Sandbox:GetInstances()[1]
+    T:Ok(Copy and Copy:Suspend(), "set aside mid-read")
+
+    T:Eventually(function()
+        return Loaded ~= nil
+    end, 10, "the load returned")
+
+    if Copy then
+        T:Ok(Copy:Revive(), "brought back")
+        T:Eq(#Copy:GetObjects(), 3000, "with every object in it")
+    end
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
 T:Test("a local scene loading its own pack is not a step", function()
     const Sandbox = Scenes.new({Name = "ClientHistoryLoad"})
     if not Sandbox or not BareId or not TitleId then

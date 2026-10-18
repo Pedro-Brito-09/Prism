@@ -314,6 +314,8 @@ end
 -- server's twin; see Scenes/Server for why a player asking for a copy to go
 -- gets this rather than the real thing. Nothing is announced, because nothing
 -- in a scene this client owns ever is.
+local FinishReading: (Instance_: any) -> ()
+
 const function __instance_suspend(self: any): boolean
     if self.Suspended then
         return false
@@ -323,6 +325,10 @@ const function __instance_suspend(self: any): boolean
     if not Owner or Owner.Instances[self.Id] ~= self then
         return false
     end
+
+    -- Still being read: the rest is read now, as on the server, so what comes
+    -- back is the whole copy.
+    FinishReading(self)
 
     self.Suspended = Objects.SuspendInstance(self.Id)
     Owner.Instances[self.Id] = nil
@@ -446,6 +452,31 @@ const READ_BUDGET = 1 / 120
 -- commit applies on the spot and never yields, so a load inside one cannot
 -- either. Anything else reads in frames, and stops if the copy is taken away
 -- while it waits.
+const function ReadOne(Scene: any, Instance_: any, Object: any)
+    -- Kept rather than dropped, exactly as on the server; see its ReadOne.
+    if not Objects:GetRegistry(Object.Registry) then
+        Logger:Warn(`Local scene {Scene.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
+        table.insert(Instance_.Unknown, Object)
+        return
+    end
+
+    Objects.restore(Instance_, Object)
+end
+
+FinishReading = function(Instance_: any)
+    const Reading = Instance_.Reading
+    if not Reading then
+        return
+    end
+
+    Instance_.Reading = nil
+    while Reading.Next <= #Reading.Objects do
+        const Object = Reading.Objects[Reading.Next]
+        Reading.Next += 1
+        ReadOne(Reading.Scene, Instance_, Object)
+    end
+end
+
 const function Read(self: any, Parent: Instance?, InFrames: boolean): any
     const Instance_ = NewInstance(self, Parent)
 
@@ -470,25 +501,34 @@ const function Read(self: any, Parent: Instance?, InFrames: boolean): any
     -- handed an id one of the restored ones already answers to.
     self.LastId = math.max(self.LastId, LastId :: number)
 
+    const Reading = {Scene = self, Objects = Decompressed :: {any}, Next = 1}
+    ;(Instance_ :: any).Reading = Reading
     local Since = os.clock()
-    for _, Object in Decompressed :: {any} do
+
+    while Reading.Next <= #Reading.Objects do
         if InFrames and os.clock() - Since > READ_BUDGET then
             task.wait()
             Since = os.clock()
 
+            -- Set aside meanwhile, and the rest was read as it went; unloaded,
+            -- and nothing more goes into it.
+            if (Instance_ :: any).Reading ~= Reading then
+                break
+            end
+
             if self.Instances[Instance_.Id] ~= Instance_ then
+                (Instance_ :: any).Reading = nil
                 break
             end
         end
 
-        -- Kept rather than dropped, exactly as on the server; see its Read.
-        if not Objects:GetRegistry(Object.Registry) then
-            Logger:Warn(`Local scene {self.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
-            table.insert(Instance_.Unknown, Object)
-            continue
-        end
+        const Object = Reading.Objects[Reading.Next]
+        Reading.Next += 1
+        ReadOne(self, Instance_, Object)
+    end
 
-        Objects.restore(Instance_, Object)
+    if (Instance_ :: any).Reading == Reading then
+        (Instance_ :: any).Reading = nil
     end
 
     return Instance_
