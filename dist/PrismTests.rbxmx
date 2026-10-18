@@ -5194,6 +5194,7 @@ const Shared = require("./Shared")
 const Handles = require("../Handles")
 const Logger = require("../Logger")
 const Listeners = require("../Listeners")
+const Permissions = require("../Permissions/Client")
 const Types = require("./Types")
 
 export type ObjectIdentifier = Types.ObjectIdentifier
@@ -5316,6 +5317,8 @@ end
 const function HeldByOther(RuntimeId: RuntimeId): boolean
     return Locks[RuntimeId] == true and Holders[RuntimeId] ~= Players.LocalPlayer.UserId
 end
+
+Permissions.WatchHolds(HeldByOther)
 
 const function Named(Refs: Object | {Object}): {Object}
     return if (Refs :: any).RuntimeId ~= nil then {Refs :: Object} else Refs :: {Object}
@@ -9126,13 +9129,38 @@ end
 
 -- Mirrors the server: Target is the object, or for a create a table naming the
 -- scene and the type; Property is the one being written.
+-- Whether someone other than this player holds an object, as Objects knows it.
+-- Handed in by Objects rather than required, which would make each module
+-- require the other.
+local HeldByOther: (RuntimeId: number) -> boolean = function()
+    return false
+end
+
+function Permissions.WatchHolds(Check: (RuntimeId: number) -> boolean)
+    HeldByOther = Check
+end
+
+-- What a tool should allow. Rights first, and then, for an edit or a destroy of
+-- a live object, whether somebody else holds it: the server refuses both while
+-- they do, and this is what an editor greys its tools out by. It answered for
+-- rights alone, so a tool stayed lit on an object nobody could touch. A create
+-- names no object, so no hold applies to it.
 function Permissions:Can(Action: Action, Target: Target, Property: number?): boolean
     const Rights = ByScene[Target.Scene]
     if not Rights then
         return false
     end
 
-    return Shared.Allows(Rights, Action, Target.Registry, Property)
+    if not Shared.Allows(Rights, Action, Target.Registry, Property) then
+        return false
+    end
+
+    const RuntimeId = (Target :: any).RuntimeId
+    if Action ~= "Create" and type(RuntimeId) == "number" and HeldByOther(RuntimeId) then
+        return false
+    end
+
+    return true
 end
 
 function Permissions:Has(Capability: string, Scene: number?): boolean
@@ -21192,6 +21220,14 @@ T:Test("an object someone else holds refuses an edit on the spot", function()
     end
 
     T:Eq(Objects:GetLock(Held), nil, "by something that is not a person")
+
+    -- What a tool greys itself out by. It answered for rights alone, which this
+    -- client has here, and stayed lit on an object nobody could touch.
+    T:Ok(not Permissions:Can("Edit", Held, TitleId), "Can says no to an edit")
+    T:Ok(not Permissions:Can("Destroy", Held), "and to a destroy")
+    if Editable then
+        T:Ok(Permissions:Can("Edit", Editable, TitleId), "while an object nobody holds is still editable")
+    end
 
     T:Ok(not Held:Set(TitleId, "Grabbed"), "a set is refused")
     T:Eq(Held:Get(TitleId), "FixtureHeld", "and never shown")

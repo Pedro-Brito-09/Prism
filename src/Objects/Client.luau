@@ -11,6 +11,7 @@ const Shared = require("./Shared")
 const Handles = require("../Handles")
 const Logger = require("../Logger")
 const Listeners = require("../Listeners")
+const Permissions = require("../Permissions/Client")
 const Types = require("./Types")
 
 export type ObjectIdentifier = Types.ObjectIdentifier
@@ -133,6 +134,8 @@ end
 const function HeldByOther(RuntimeId: RuntimeId): boolean
     return Locks[RuntimeId] == true and Holders[RuntimeId] ~= Players.LocalPlayer.UserId
 end
+
+Permissions.WatchHolds(HeldByOther)
 
 const function Named(Refs: Object | {Object}): {Object}
     return if (Refs :: any).RuntimeId ~= nil then {Refs :: Object} else Refs :: {Object}
