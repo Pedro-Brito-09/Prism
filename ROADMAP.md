@@ -100,6 +100,30 @@ rather than guessed.
 
 ## Done
 
+- [x] **The loose ends the stress pass left.** Six, each on its own branch.
+      CI pins its runner to `ubuntu-24.04`, which `ubuntu-latest` was about to
+      leave, and moves `checkout` and `cache` to v7 and v6, off Node 20. The
+      database tests wipe `PrismSelfTest` and `PrismSelfTestBurst` before and
+      after they run; records had piled up across runs until one paging test
+      took half a minute. A client's own scene loads a frame's worth at a time
+      as the server's does, except inside a local transaction, which reads
+      whole through `LoadWhole` because a local commit must not yield. A
+      refused `Push` says why, as a third value -- the commit channel returns
+      a reason, still unlogged on the server. Requiring Prism outside a
+      running game -- a plugin, the command bar -- creates and waits for no
+      remotes and warns once per channel sent on, where it used to stall ten
+      seconds and error, or build remotes into the place being edited. Colour
+      channels round to the nearest byte and clamp, through one
+      `Codecs.ColorByte` the network, the save format and the constraint check
+      share: flooring made 0.5 read back a step short, and a channel past 1
+      wrapped round in `writeu8`.
+
+      Left as they are, on purpose: `Permissions:Can` ignores holds, since it
+      answers for rights; a player's own edits during their custom undo
+      action are not recorded, which is what keeps a custom undo from
+      recording itself; and a copy set aside in the middle of being read
+      comes back holding what was read before.
+
 - [x] **A large load no longer stops the server.** Found under load: reading
       a 5,000-object level held the server for 570 ms in one frame, every
       player's frame with it. The announcement after it was already chunked;
