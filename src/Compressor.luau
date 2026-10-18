@@ -36,6 +36,7 @@ const ObjectTypes = require("./Objects/Types")
 const TransactionTypes = require("./Transactions/Types")
 const CustomEnum = require("./CustomEnum")
 const Varint = require("./Varint")
+const Codecs = require("./Codecs")
 const Logger = require("./Logger")
 
 export type DecompressedObject = {
@@ -216,9 +217,9 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?)
     elseif Type == "Color" then
         Wire = WIRE_FIXED3
         Payload = buffer.create(3)
-        buffer.writeu8(Payload, 0, math.floor(Value.R * 255))
-        buffer.writeu8(Payload, 1, math.floor(Value.G * 255))
-        buffer.writeu8(Payload, 2, math.floor(Value.B * 255))
+        buffer.writeu8(Payload, 0, Codecs.ColorByte(Value.R))
+        buffer.writeu8(Payload, 1, Codecs.ColorByte(Value.G))
+        buffer.writeu8(Payload, 2, Codecs.ColorByte(Value.B))
     elseif Type == "Vector" then
         Wire = WIRE_FIXED12
         Payload = buffer.create(12)

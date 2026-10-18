@@ -613,15 +613,25 @@ Codecs.Vector = {
     end,
 } :: Codec<Vector3>
 
+-- One colour channel as the byte it is stored and sent as. To the nearest, not
+-- rounded down: flooring made 0.5 come back as 127/255, a step short, and gave
+-- a channel the full error of a byte rather than half of it. Clamped, because a
+-- Color3 holds channels past 1 and writeu8 wraps them -- 1.5 went out as 126.
+-- Every place a colour becomes bytes goes through this, so a colour clamped by
+-- its constraints is the one that is saved.
+function Codecs.ColorByte(Channel: number): number
+    return math.clamp(math.floor(Channel * 255 + 0.5), 0, 255)
+end
+
 Codecs.Color = {
     Measure = function(): number
         return 3
     end,
 
     Write = function(Buf: buffer, Offset: number, Value: Color3): number
-        buffer.writeu8(Buf, Offset, math.floor(Value.R * 255))
-        buffer.writeu8(Buf, Offset + 1, math.floor(Value.G * 255))
-        buffer.writeu8(Buf, Offset + 2, math.floor(Value.B * 255))
+        buffer.writeu8(Buf, Offset, Codecs.ColorByte(Value.R))
+        buffer.writeu8(Buf, Offset + 1, Codecs.ColorByte(Value.G))
+        buffer.writeu8(Buf, Offset + 2, Codecs.ColorByte(Value.B))
         return 3
     end,
 
@@ -805,6 +815,7 @@ const ObjectTypes = require("./Objects/Types")
 const TransactionTypes = require("./Transactions/Types")
 const CustomEnum = require("./CustomEnum")
 const Varint = require("./Varint")
+const Codecs = require("./Codecs")
 const Logger = require("./Logger")
 
 export type DecompressedObject = {
@@ -985,9 +996,9 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?)
     elseif Type == "Color" then
         Wire = WIRE_FIXED3
         Payload = buffer.create(3)
-        buffer.writeu8(Payload, 0, math.floor(Value.R * 255))
-        buffer.writeu8(Payload, 1, math.floor(Value.G * 255))
-        buffer.writeu8(Payload, 2, math.floor(Value.B * 255))
+        buffer.writeu8(Payload, 0, Codecs.ColorByte(Value.R))
+        buffer.writeu8(Payload, 1, Codecs.ColorByte(Value.G))
+        buffer.writeu8(Payload, 2, Codecs.ColorByte(Value.B))
     elseif Type == "Vector" then
         Wire = WIRE_FIXED12
         Payload = buffer.create(12)
@@ -10522,6 +10533,7 @@ return Shared
 					<string name="Name">Types</string>
 					<ProtectedString name="Source"><![CDATA[const CustomEnum = require("../CustomEnum")
 const Handles = require("../Handles")
+const Codecs = require("../Codecs")
 
 export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum" | "Object"
 export type PropertyIdentifier = number
@@ -10826,21 +10838,21 @@ function Types:FixValue<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraint
     elseif Type == "Color" then
         local TypedValue = (Value :: any) :: Color3
         TypedValue = Color3.fromRGB(
-            Types:FixValue("Number", math.floor(TypedValue.R * 255), {
+            Types:FixValue("Number", Codecs.ColorByte(TypedValue.R), {
                 MinValue = Constraints.R and Constraints.R.MinValue and math.clamp(Constraints.R.MinValue, 0, 255) or 0,
                 MaxValue = Constraints.R and Constraints.R.MaxValue and math.clamp(Constraints.R.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.R then Constraints.R.AllowDecimals else true,
                 Precision = if Constraints.R then Constraints.R.Precision else nil,
             }),
 
-            Types:FixValue("Number", math.floor(TypedValue.G * 255), {
+            Types:FixValue("Number", Codecs.ColorByte(TypedValue.G), {
                 MinValue = Constraints.G and Constraints.G.MinValue and math.clamp(Constraints.G.MinValue, 0, 255) or 0,
                 MaxValue = Constraints.G and Constraints.G.MaxValue and math.clamp(Constraints.G.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.G then Constraints.G.AllowDecimals else true,
                 Precision = if Constraints.G then Constraints.G.Precision else nil,
             }),
             
-            Types:FixValue("Number", math.floor(TypedValue.B * 255), {
+            Types:FixValue("Number", Codecs.ColorByte(TypedValue.B), {
                 MinValue = Constraints.B and Constraints.B.MinValue and math.clamp(Constraints.B.MinValue, 0, 255) or 0,
                 MaxValue = Constraints.B and Constraints.B.MaxValue and math.clamp(Constraints.B.MaxValue, 0, 255) or 255,
                 AllowDecimals = if Constraints.B then Constraints.B.AllowDecimals else true,
