@@ -70,7 +70,8 @@ Prism.Try = require("@self/Try")
 -- otherwise leave the client with an empty registry for the whole session.
 --
 -- Retried on a separate thread so requiring Prism never blocks on it.
-if not IS_SERVER then
+-- Not outside a running game, where there is no server to answer.
+if not IS_SERVER and RunService:IsRunning() then
     const Ready = Prism.Networking:Get("Prism.Ready")
 
     task.spawn(function()
