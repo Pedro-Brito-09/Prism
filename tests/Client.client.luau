@@ -2005,11 +2005,12 @@ T:Test("a custom undo's own edits go unrecorded, the player's meanwhile do not",
         return Undone ~= nil
     end, 3, "the undo finished")
 
+    -- Before undoing the edit, which puts the edit itself on the redo stack.
+    T:Ok(not History:CanRedo(), "the undone action is not redoable past the newer edit")
     T:Ok(History:CanUndo(), "the player's edit is a step")
     T:Ok(History:Undo(), "and undoes")
     T:Eq(Obj:Get(TitleId), "ByAction", "back to what the action left")
     T:Ok(not History:CanUndo(), "and the action's own edit was never a step")
-    T:Ok(not History:CanRedo(), "nor is the undone action redoable past the newer edit")
 
     Sandbox:Destroy()
     History:Clear()
