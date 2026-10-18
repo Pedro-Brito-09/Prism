@@ -437,7 +437,16 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     return Instance_ :: any
 end
 
-const function __load(self: any, Parent: Instance?): any
+-- How long reading a local pack may run in one frame, as on the server. A
+-- client that loaded a five thousand object sandbox in one go froze for half a
+-- second.
+const READ_BUDGET = 1 / 120
+
+-- Whole, or a frame's worth at a time. A transaction reads whole: a local
+-- commit applies on the spot and never yields, so a load inside one cannot
+-- either. Anything else reads in frames, and stops if the copy is taken away
+-- while it waits.
+const function Read(self: any, Parent: Instance?, InFrames: boolean): any
     const Instance_ = NewInstance(self, Parent)
 
     const Data = self.Data
@@ -461,7 +470,17 @@ const function __load(self: any, Parent: Instance?): any
     -- handed an id one of the restored ones already answers to.
     self.LastId = math.max(self.LastId, LastId :: number)
 
+    local Since = os.clock()
     for _, Object in Decompressed :: {any} do
+        if InFrames and os.clock() - Since > READ_BUDGET then
+            task.wait()
+            Since = os.clock()
+
+            if self.Instances[Instance_.Id] ~= Instance_ then
+                break
+            end
+        end
+
         -- Kept rather than dropped, exactly as on the server; see its Read.
         if not Objects:GetRegistry(Object.Registry) then
             Logger:Warn(`Local scene {self.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
@@ -473,6 +492,15 @@ const function __load(self: any, Parent: Instance?): any
     end
 
     return Instance_
+end
+
+const function __load(self: any, Parent: Instance?): any
+    return Read(self, Parent, true)
+end
+
+-- For a local transaction, which must not yield.
+const function __load_whole(self: any, Parent: Instance?): any
+    return Read(self, Parent, false)
 end
 
 const function __unload(self: any)
@@ -560,6 +588,7 @@ function Scenes.new(Config: SceneConfig): LocalScene?
     Scene.Instances = {}
 
     Scene.Load = __load
+    Scene.LoadWhole = __load_whole
     Scene.Unload = __unload
     Scene.Serialize = __serialize
     Scene.GetInstances = __get_instances

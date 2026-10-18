@@ -1760,6 +1760,55 @@ T:Test("a pack places into a copy this client owns", function()
     History:Clear()
 end)
 
+T:Test("a large local scene loads in frames, and whole inside a transaction", function()
+    const Sandbox = Scenes.new({Name = "ClientLargeLoad"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Source = Sandbox:Load()
+    for Index = 1, 3000 do
+        Source:Create(BareId, {[TitleId] = `Filler{Index}`})
+    end
+
+    Source:Commit()
+    Source:Unload()
+    History:Clear()
+    task.wait(0.2)
+
+    -- Read directly, it hands control back at its first yield: timing the
+    -- spawn times the longest stretch it holds this client without a break.
+    -- It used to build all three thousand at once.
+    local Copy: any = nil
+    const Started = os.clock()
+    task.spawn(function()
+        Copy = Sandbox:Load()
+    end)
+
+    const FirstStretch = os.clock() - Started
+    T:Ok(FirstStretch < 0.05, `the first stretch was short, {math.floor(FirstStretch * 1000)} ms`)
+    T:Eq(Copy, nil, "and the load was still going after it")
+
+    T:Eventually(function()
+        return Copy ~= nil
+    end, 10, "the load finished")
+
+    if Copy then
+        T:Eq(#Copy:GetObjects(), 3000, "every object was read")
+        Copy:Unload()
+    end
+
+    -- A local transaction applies on the spot and does not yield, so a load
+    -- inside one is whole by the time Commit returns.
+    T:Ok(Transactions.new():Load(Sandbox.Id):Commit(), "loaded through a transaction")
+    const Whole = Sandbox:GetInstances()[1]
+    T:Ok(Whole and #Whole:GetObjects() == 3000, "and whole when Commit returned")
+
+    Sandbox:Destroy()
+    History:Clear()
+end)
+
 T:Test("a local scene loading its own pack is not a step", function()
     const Sandbox = Scenes.new({Name = "ClientHistoryLoad"})
     if not Sandbox or not BareId or not TitleId then

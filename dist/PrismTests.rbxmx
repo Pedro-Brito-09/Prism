@@ -11710,7 +11710,16 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     return Instance_ :: any
 end
 
-const function __load(self: any, Parent: Instance?): any
+-- How long reading a local pack may run in one frame, as on the server. A
+-- client that loaded a five thousand object sandbox in one go froze for half a
+-- second.
+const READ_BUDGET = 1 / 120
+
+-- Whole, or a frame's worth at a time. A transaction reads whole: a local
+-- commit applies on the spot and never yields, so a load inside one cannot
+-- either. Anything else reads in frames, and stops if the copy is taken away
+-- while it waits.
+const function Read(self: any, Parent: Instance?, InFrames: boolean): any
     const Instance_ = NewInstance(self, Parent)
 
     const Data = self.Data
@@ -11734,7 +11743,17 @@ const function __load(self: any, Parent: Instance?): any
     -- handed an id one of the restored ones already answers to.
     self.LastId = math.max(self.LastId, LastId :: number)
 
+    local Since = os.clock()
     for _, Object in Decompressed :: {any} do
+        if InFrames and os.clock() - Since > READ_BUDGET then
+            task.wait()
+            Since = os.clock()
+
+            if self.Instances[Instance_.Id] ~= Instance_ then
+                break
+            end
+        end
+
         -- Kept rather than dropped, exactly as on the server; see its Read.
         if not Objects:GetRegistry(Object.Registry) then
             Logger:Warn(`Local scene {self.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)
@@ -11746,6 +11765,15 @@ const function __load(self: any, Parent: Instance?): any
     end
 
     return Instance_
+end
+
+const function __load(self: any, Parent: Instance?): any
+    return Read(self, Parent, true)
+end
+
+-- For a local transaction, which must not yield.
+const function __load_whole(self: any, Parent: Instance?): any
+    return Read(self, Parent, false)
 end
 
 const function __unload(self: any)
@@ -11833,6 +11861,7 @@ function Scenes.new(Config: SceneConfig): LocalScene?
     Scene.Instances = {}
 
     Scene.Load = __load
+    Scene.LoadWhole = __load_whole
     Scene.Unload = __unload
     Scene.Serialize = __serialize
     Scene.GetInstances = __get_instances
@@ -13652,7 +13681,7 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
         -- Copies first, before anything that might name one: a create can land
         -- in a copy this same transaction loaded.
         for _, Scene in Planned.Loads do
-            const Live = Scene:Load()
+            const Live = Scene:LoadWhole()
             if not Live then
                 error(`could not load {Scene.Name}`)
             end
@@ -22319,6 +22348,55 @@ T:Test("a pack places into a copy this client owns", function()
     T:Eq(#Copy:GetObjects(), 2, "one object at a time")
 
     Target:Destroy()
+    History:Clear()
+end)
+
+T:Test("a large local scene loads in frames, and whole inside a transaction", function()
+    const Sandbox = Scenes.new({Name = "ClientLargeLoad"})
+    if not Sandbox or not BareId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Source = Sandbox:Load()
+    for Index = 1, 3000 do
+        Source:Create(BareId, {[TitleId] = `Filler{Index}`})
+    end
+
+    Source:Commit()
+    Source:Unload()
+    History:Clear()
+    task.wait(0.2)
+
+    -- Read directly, it hands control back at its first yield: timing the
+    -- spawn times the longest stretch it holds this client without a break.
+    -- It used to build all three thousand at once.
+    local Copy: any = nil
+    const Started = os.clock()
+    task.spawn(function()
+        Copy = Sandbox:Load()
+    end)
+
+    const FirstStretch = os.clock() - Started
+    T:Ok(FirstStretch < 0.05, `the first stretch was short, {math.floor(FirstStretch * 1000)} ms`)
+    T:Eq(Copy, nil, "and the load was still going after it")
+
+    T:Eventually(function()
+        return Copy ~= nil
+    end, 10, "the load finished")
+
+    if Copy then
+        T:Eq(#Copy:GetObjects(), 3000, "every object was read")
+        Copy:Unload()
+    end
+
+    -- A local transaction applies on the spot and does not yield, so a load
+    -- inside one is whole by the time Commit returns.
+    T:Ok(Transactions.new():Load(Sandbox.Id):Commit(), "loaded through a transaction")
+    const Whole = Sandbox:GetInstances()[1]
+    T:Ok(Whole and #Whole:GetObjects() == 3000, "and whole when Commit returned")
+
+    Sandbox:Destroy()
     History:Clear()
 end)
 
