@@ -267,7 +267,7 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
         -- Copies first, before anything that might name one: a create can land
         -- in a copy this same transaction loaded.
         for _, Scene in Planned.Loads do
-            const Live = Scene:Load()
+            const Live = Scene:LoadWhole()
             if not Live then
                 error(`could not load {Scene.Name}`)
             end
