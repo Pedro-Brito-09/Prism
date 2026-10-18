@@ -33,13 +33,38 @@ end
 
 -- Mirrors the server: Target is the object, or for a create a table naming the
 -- scene and the type; Property is the one being written.
+-- Whether someone other than this player holds an object, as Objects knows it.
+-- Handed in by Objects rather than required, which would make each module
+-- require the other.
+local HeldByOther: (RuntimeId: number) -> boolean = function()
+    return false
+end
+
+function Permissions.WatchHolds(Check: (RuntimeId: number) -> boolean)
+    HeldByOther = Check
+end
+
+-- What a tool should allow. Rights first, and then, for an edit or a destroy of
+-- a live object, whether somebody else holds it: the server refuses both while
+-- they do, and this is what an editor greys its tools out by. It answered for
+-- rights alone, so a tool stayed lit on an object nobody could touch. A create
+-- names no object, so no hold applies to it.
 function Permissions:Can(Action: Action, Target: Target, Property: number?): boolean
     const Rights = ByScene[Target.Scene]
     if not Rights then
         return false
     end
 
-    return Shared.Allows(Rights, Action, Target.Registry, Property)
+    if not Shared.Allows(Rights, Action, Target.Registry, Property) then
+        return false
+    end
+
+    const RuntimeId = (Target :: any).RuntimeId
+    if Action ~= "Create" and type(RuntimeId) == "number" and HeldByOther(RuntimeId) then
+        return false
+    end
+
+    return true
 end
 
 function Permissions:Has(Capability: string, Scene: number?): boolean

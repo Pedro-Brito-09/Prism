@@ -396,8 +396,10 @@ or a transaction holding them returns.
 
 On a client, `Set` and `Destroy` on an object someone else holds are refused on
 the spot — `false`, and nothing shown — rather than applied and taken back when
-the server says no. `Permissions:Can` answers for rights alone, so a tool greyed
-out for an object nobody may edit should ask `IsLocked` as well.
+the server says no. On the client `Permissions:Can` says no to
+an edit or a destroy of an object someone else holds, so a tool greyed out by
+it is greyed out for held objects too. Listen to `Objects:OnLockChanged` to
+refresh it when a hold comes or goes.
 A transaction can take and release them too, in the same list as the edit they
 are for — see Transactions.
 

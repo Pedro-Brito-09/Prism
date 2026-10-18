@@ -536,6 +536,14 @@ T:Test("an object someone else holds refuses an edit on the spot", function()
 
     T:Eq(Objects:GetLock(Held), nil, "by something that is not a person")
 
+    -- What a tool greys itself out by. It answered for rights alone, which this
+    -- client has here, and stayed lit on an object nobody could touch.
+    T:Ok(not Permissions:Can("Edit", Held, TitleId), "Can says no to an edit")
+    T:Ok(not Permissions:Can("Destroy", Held), "and to a destroy")
+    if Editable then
+        T:Ok(Permissions:Can("Edit", Editable, TitleId), "while an object nobody holds is still editable")
+    end
+
     T:Ok(not Held:Set(TitleId, "Grabbed"), "a set is refused")
     T:Eq(Held:Get(TitleId), "FixtureHeld", "and never shown")
 
