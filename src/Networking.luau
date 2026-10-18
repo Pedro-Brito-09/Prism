@@ -18,6 +18,16 @@ const Codecs = require("./Codecs")
 const Logger = require("./Logger")
 
 const IS_SERVER = RunService:IsServer()
+
+-- Whether a game is running at all. Required from a plugin or the command bar
+-- there is no server to talk to and no client to tell, and Studio's edit mode
+-- answers true to IsServer and IsClient alike: this used to wait ten seconds for
+-- remotes that never come and then error, or would have built them into the
+-- place being edited. Outside a running game nothing is created or waited for,
+-- and a send goes nowhere with one warning per channel. Everything that needs
+-- no network -- the compressor, a scene read into a plugin's own world --
+-- works as it does anywhere else.
+const RUNNING = RunService:IsRunning()
 const WAIT_TIMEOUT = 10
 
 export type Codec<T> = Codecs.Codec<T>
@@ -105,7 +115,21 @@ const function Decode(Buf: any, Extras: any): (Entry?, {any}?)
     return Entry, Args :: {any}
 end
 
+const Idled: {[number]: true} = {}
+
+const function Idle(self: Entry)
+    if not Idled[self.Id] then
+        Idled[self.Id] = true
+        Logger:Warn(`{self.Name} went nowhere: no game is running, so there is nobody to send it to.`)
+    end
+end
+
 const function __fire(self: Entry, ...)
+    if not RUNNING then
+        Idle(self)
+        return
+    end
+
     if not IS_SERVER then
         const Buf, Extras = Pack(self.Id, self.Args, table.pack(...), select("#", ...))
         Event:FireServer(Buf, Extras)
@@ -135,6 +159,11 @@ const function __fire(self: Entry, ...)
 end
 
 const function __fire_all(self: Entry, ...)
+    if not RUNNING then
+        Idle(self)
+        return
+    end
+
     const Buf, Extras = Pack(self.Id, self.Args, table.pack(...), select("#", ...))
     if IS_SERVER then
         Event:FireAllClients(Buf, Extras)
@@ -144,6 +173,11 @@ const function __fire_all(self: Entry, ...)
 end
 
 const function __invoke(self: Entry, ...): ...any
+    if not RUNNING then
+        Idle(self)
+        return
+    end
+
     if IS_SERVER then
         Logger:Error(`Invoke on {self.Name} is client to server only.`)
     end
@@ -192,7 +226,9 @@ for Id, Channel in Channels.List do
     } :: Entry
 end
 
-if IS_SERVER then
+if not RUNNING then
+    -- Nothing to set up; see RUNNING.
+elseif IS_SERVER then
     Event = Instance.new("RemoteEvent")
     Event.Name = "__prism_event"
     Event.Parent = ReplicatedStorage
