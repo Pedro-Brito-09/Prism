@@ -738,6 +738,11 @@ couldn't be read or doesn't hold a pack.
 `buffer.tostring` of it: a DataStore only takes strings that are valid UTF-8,
 and a pack's bytes are not, so that write fails.
 
+A DataStore counts a buffer at its base64 size, so one key holds a pack of
+about **3 MiB**, not 4 MB: measured, 3,145,312 bytes stored and anything a few
+hundred bytes past that was refused. A real 35,000 object level packs to
+about 130 KB.
+
 Committing is always explicit. Unloading never writes back on its own — with
 more than one copy live it would have to pick one, and it cannot.
 
@@ -1319,7 +1324,9 @@ The limit (`ShardLimit`, 1 MB by default) is measured **before** compression,
 because it is a CPU budget rather than a storage one: every create decodes and
 re-encodes the whole tail shard inside an `UpdateAsync` transform, which cannot
 yield. 1 MB is about 30,000 records and about a second per create. What a shard
-actually stores is a quarter to a third of that.
+actually stores is a quarter to a third of that. Keep `ShardLimit` under 3 MB:
+a DataStore counts a stored buffer at its base64 size, so no key holds much more
+than 3 MiB of one.
 
 ```lua
 -- server
