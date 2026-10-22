@@ -24,6 +24,7 @@
 -- any integer past 16,777,216 -- user ids and unix timestamps included.
 
 const RunService = game:GetService("RunService")
+const EncodingService = game:GetService("EncodingService")
 
 const Properties = if RunService:IsClient()
     then require("./Properties/Client")
@@ -57,14 +58,25 @@ export type DecompressedObject = {
     -- keep the rest; dropping the record anyway at the next save undid that.
     Unknown: {[PropertyTypes.PropertyIdentifier]: buffer}?,
 
-    -- The bytes this record was read from, whole. A scene keeps them for an
-    -- object whose type is not registered, and writes them back untouched.
-    Source: buffer?,
+    -- The tagged values this object was read from a pack as, whole. A scene
+    -- keeps them for an object whose type is not registered, and writes them
+    -- back untouched.
+    Source: RawObject?,
+}
+
+-- An object as its tagged values and nothing decoded: each property's tag and
+-- payload exactly as a record holds them, by property id. Every object a pack
+-- is written from becomes one of these first, which is what lets one pack hold
+-- live objects, objects read from a pack, and objects kept whole because their
+-- type is not registered, and write all three the same way.
+export type RawObject = {
+    __type: "RawObject",
+    LocalId: Handles.LocalId,
+    Registry: ObjectTypes.ObjectIdentifier,
+    Fields: {[PropertyTypes.PropertyIdentifier]: buffer},
 }
 
 const OBJECT_HEADER = "/oh"
-const METADATA_HEADER = "/mh"
-const PACK_HEADER = "/ph"
 
 -- A packet rather than a record, and the only header here that never reaches
 -- storage. See the Transactions section.
@@ -177,7 +189,10 @@ end
 -- Returns a self contained buffer: tag byte followed by the encoded value. The
 -- receiver needs nothing else to read it back, which is why network payloads can
 -- use this directly.
-function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?): buffer?
+--
+-- Constraints matter to one type only: a Table is written item by item as its
+-- item type, and Of is where that type is named. Every other type ignores them.
+function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?, Constraints: any?): buffer?
     if Value == nil then
         return nil
     end
@@ -250,6 +265,38 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?)
         const Size = Varint.Measure(Target)
         Payload = buffer.create(Size)
         Varint.Write(Payload, 0, Target)
+    elseif Type == "Table" then
+        -- [varint count][tagged item]... inside one length prefix. Each item
+        -- carries its own tag, exactly as a property of its type would be
+        -- written, so the list reads back with no registry -- and a Number
+        -- written as a varint and one written as a float sit in the same list.
+        const Of = Constraints and Constraints.Of
+        if not PropertyTypes.IsItemType(Of) then
+            Logger:Error("Tried compressing a Table without the item type its constraints name in Of.")
+        end
+
+        const List = Value :: {any}
+        const Items: {buffer} = table.create(#List)
+        local Size = Varint.Measure(#List)
+
+        for Index, Item in List do
+            const Tagged = Compressor:CompressValue(Of, Item, Constraints.Item)
+            if not Tagged then
+                Logger:Error(`Tried compressing a Table whose item {Index} cannot be written as a {Of}.`)
+            end
+
+            Items[Index] = Tagged :: buffer
+            Size += buffer.len(Tagged :: buffer)
+        end
+
+        const Inner = buffer.create(Size)
+        local At = Varint.Write(Inner, 0, #List)
+        for _, Tagged in Items do
+            buffer.copy(Inner, At, Tagged, 0)
+            At += buffer.len(Tagged)
+        end
+
+        Wire, Payload = WIRE_BYTES, BytesBuffer(Inner)
     else
         Logger:Error(`Tried compressing unsupported value type: {Type}`)
     end
@@ -264,7 +311,11 @@ end
 -- Reads the tag itself, so the caller does not have to know what it is reading.
 -- Returns the value, how many bytes it consumed, and the semantic type the
 -- writer recorded, which the caller can compare against what it expected.
-function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number, PropertyTypes.PropertyType?)
+--
+-- A Table also returns the type its items were written as, nil for an empty
+-- list, because a list of Numbers and a list of Object references are the same
+-- Luau values and only the tags tell them apart.
+function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number, PropertyTypes.PropertyType?, PropertyTypes.PropertyType?)
     const At = Offset or 0
     const Wire, TypeId = SplitTag(buffer.readu8(Buf, At))
     const Type = PropertyTypes:GetTypeFromId(TypeId)
@@ -356,6 +407,63 @@ function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number
     elseif Type == "Object" then
         const Value, Read = Varint.Read(Buf, Body)
         return Value, 1 + Read, Type
+    elseif Type == "Table" then
+        const Length, Read = Varint.Read(Buf, Body)
+        const Consumed = 1 + Read + Length
+        const End = Body + Read + Length
+
+        const Count, CountRead = Varint.Read(Buf, Body + Read)
+        local Cursor = Body + Read + CountRead
+
+        const List = {}
+        local ItemType: PropertyTypes.PropertyType? = nil
+        local Malformed = false
+
+        for _ = 1, Count do
+            -- Never past the length prefix: a count that claims more items
+            -- than the bytes hold is malformed, and reading on would take the
+            -- next record's bytes for items.
+            if Cursor >= End then
+                Malformed = true
+                break
+            end
+
+            -- A nested Table is refused rather than followed. None can be
+            -- written, and following one is recursion a peer gets to choose
+            -- the depth of.
+            const _, ItemTypeId = SplitTag(buffer.readu8(Buf, Cursor))
+            if PropertyTypes:GetTypeFromId(ItemTypeId) == "Table" then
+                Malformed = true
+                break
+            end
+
+            const Item, ItemRead, Written = Compressor:DecompressValue(Buf, Cursor)
+            Cursor += ItemRead
+
+            -- One list, one item type.
+            if Written and ItemType and Written ~= ItemType then
+                Malformed = true
+                break
+            end
+
+            if not ItemType then
+                ItemType = Written :: PropertyTypes.PropertyType?
+            end
+
+            -- An item that cannot be read back -- an enum gone since the save,
+            -- a type this build has never heard of -- is left out, and the
+            -- rest of the list kept.
+            if Item ~= nil then
+                table.insert(List, Item)
+            end
+        end
+
+        if Malformed or Cursor > End then
+            Logger:Warn("A Table was saved with items it cannot hold. Value dropped.")
+            return nil, Consumed, Type
+        end
+
+        return table.freeze(List), Consumed, Type, ItemType
     end
 
     return nil, 1 + SkipValue(Buf, Body, Wire), Type
@@ -370,9 +478,10 @@ const function WriteProperty(
     Buffers: {buffer},
     Id: PropertyTypes.PropertyIdentifier,
     Type: PropertyTypes.PropertyType,
-    Value: any?
+    Value: any?,
+    Constraints: any?
 ): number
-    const Tagged = Compressor:CompressValue(Type, Value)
+    const Tagged = Compressor:CompressValue(Type, Value, Constraints)
     if not Tagged then
         return 0
     end
@@ -399,20 +508,24 @@ end
 -- A registered property whose type changed since the save is still dropped --
 -- that is the registry deliberately saying something new about the property,
 -- and the object carries the property under its new type either way.
-const function ReadProperty(Buf: buffer, Offset: number): (PropertyTypes.PropertyIdentifier?, any?, number, buffer?)
-    const PropertyId, IdRead = Varint.Read(Buf, Offset)
-    const Value, ValueRead, Type = Compressor:DecompressValue(Buf, Offset + IdRead)
-    const Consumed = IdRead + ValueRead
+-- The tagged value at Offset, read for the property it was saved under. Split
+-- from ReadProperty because a pack does not write the id beside each value.
+const function ReadTagged(
+    PropertyId: PropertyTypes.PropertyIdentifier,
+    Buf: buffer,
+    Offset: number
+): (PropertyTypes.PropertyIdentifier?, any?, number, buffer?)
+    const Value, Consumed, Type, ItemType = Compressor:DecompressValue(Buf, Offset)
 
     const Registry = Properties:GetRegistry(PropertyId)
     if not Registry then
         Logger:Warn(`Property id {PropertyId} is not registered. Kept as saved, and written back unchanged.`)
-        return PropertyId, nil, Consumed, Slice(Buf, Offset + IdRead, ValueRead)
+        return PropertyId, nil, Consumed, Slice(Buf, Offset, Consumed)
     end
 
     if not Type then
         Logger:Warn(`Property {PropertyId} was saved with a type this build does not know. Kept as saved, and written back unchanged.`)
-        return PropertyId, nil, Consumed, Slice(Buf, Offset + IdRead, ValueRead)
+        return PropertyId, nil, Consumed, Slice(Buf, Offset, Consumed)
     end
 
     -- The registry changed type since the save. The bytes were still read
@@ -422,7 +535,31 @@ const function ReadProperty(Buf: buffer, Offset: number): (PropertyTypes.Propert
         return nil, nil, Consumed
     end
 
+    -- The same, one level down: a Table whose items were written as a type
+    -- other than the one it holds now. An empty list has no item type and
+    -- fits any.
+    if Type == "Table" and ItemType then
+        const Of = (Registry :: any).Constraints and (Registry :: any).Constraints.Of
+        if ItemType ~= Of then
+            Logger:Warn(`Property {PropertyId} was saved as a Table of {ItemType} but holds {tostring(Of)} now. Skipping.`)
+            return nil, nil, Consumed
+        end
+    end
+
     return PropertyId, Value, Consumed
+end
+
+const function ReadProperty(Buf: buffer, Offset: number): (PropertyTypes.PropertyIdentifier?, any?, number, buffer?)
+    const PropertyId, IdRead = Varint.Read(Buf, Offset)
+    const Id, Value, ValueRead, Raw = ReadTagged(PropertyId, Buf, Offset + IdRead)
+    return Id, Value, IdRead + ValueRead, Raw
+end
+
+-- How many bytes the tagged value at Offset takes, tag included, read from its
+-- wire shape alone.
+const function TaggedLength(Buf: buffer, Offset: number): number
+    const Wire = SplitTag(buffer.readu8(Buf, Offset))
+    return 1 + SkipValue(Buf, Offset + 1, Wire)
 end
 
 const function Concat(Header: string, Prefix: buffer, Buffers: {buffer}, Size: number): buffer
@@ -460,50 +597,34 @@ end
 -- WithUnknown writes the records the object is keeping without understanding
 -- them (see DecompressedObject.Unknown). A save wants them; replication does
 -- not -- a client has no more use for them than the server did.
-function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject, WithUnknown: boolean?): buffer
-    local Size = 0
-    local Count = 0
-    const Buffers = {}
-    const IsDecompressed = (Obj :: any).__type == "DecompressedObject"
-    const Unknown: {[number]: buffer}? = if WithUnknown then (Obj :: any).Unknown else nil
-
-    -- Walked in id order rather than hash order, so the same object always
-    -- produces the same bytes. Hash order meant two identical objects serialized
-    -- differently, which rules out hashing, diffing or deduplicating saves.
+const function SortedKeys(Map: {[number]: any}): {number}
     const Keys = {}
-    for Key in (Obj :: any).Properties do
+    for Key in Map do
         table.insert(Keys, Key)
     end
+
+    table.sort(Keys)
+    return Keys
+end
+
+-- An object's values as tagged bytes, by property id.
+const function ToRaw(Obj: ObjectTypes.Object | DecompressedObject, WithUnknown: boolean?): RawObject
+    const Fields = {}
+    const IsDecompressed = (Obj :: any).__type == "DecompressedObject"
+    const Unknown: {[number]: buffer}? = if WithUnknown then (Obj :: any).Unknown else nil
 
     -- A value the object carries wins over one it is keeping for the same id:
     -- the property has come back since, and what it holds now is the answer.
     if Unknown then
-        for Key in Unknown do
+        for Key, Raw in Unknown do
             if (Obj :: any).Properties[Key] == nil then
-                table.insert(Keys, Key)
+                Fields[Key] = Raw
             end
         end
     end
 
-    table.sort(Keys)
-
-    for _, Key in Keys do
-        const Entry = (Obj :: any).Properties[Key]
-
-        if Entry == nil and Unknown then
-            const Raw = Unknown[Key]
-            const IdSize = Varint.Measure(Key)
-            const Header = buffer.create(IdSize)
-            Varint.Write(Header, 0, Key)
-
-            table.insert(Buffers, Header)
-            table.insert(Buffers, Raw)
-            Size += IdSize + buffer.len(Raw)
-            Count += 1
-            continue
-        end
-
-        local Id, Type, Value
+    for Key, Entry in (Obj :: any).Properties do
+        local Id, Type, Value, Constraints
 
         if IsDecompressed then
             const Registry = Properties:GetRegistry(Key)
@@ -512,35 +633,64 @@ function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject,
                 continue
             end
 
-            Id, Type, Value = Key, Registry.Type, Entry
+            Id, Type, Value, Constraints = Key, Registry.Type, Entry, Registry.Constraints
         else
-            Id, Type, Value = Entry.Parent, Entry.Type, Entry.Value
+            Id, Type, Value, Constraints = Entry.Parent, Entry.Type, Entry.Value, Entry.Constraints
         end
 
-        const Written = WriteProperty(Buffers, Id, Type, Value)
-        if Written > 0 then
-            Size += Written
-            Count += 1
+        const Tagged = Compressor:CompressValue(Type, Value, Constraints)
+        if Tagged then
+            Fields[Id] = Tagged
         end
     end
 
-    const LocalId = if IsDecompressed
-        then (Obj :: DecompressedObject).LocalId
-        else (Obj :: ObjectTypes.Object).LocalId
+    return {
+        __type = "RawObject",
+        LocalId = if IsDecompressed
+            then (Obj :: DecompressedObject).LocalId
+            else (Obj :: ObjectTypes.Object).LocalId,
+        Registry = Obj.Registry,
+        Fields = Fields,
+    }
+end
+
+const function WriteRecord(Raw: RawObject): buffer
+    local Size = 0
+    local Count = 0
+    const Buffers = {}
+
+    -- Walked in id order rather than hash order, so the same object always
+    -- produces the same bytes. Hash order meant two identical objects serialized
+    -- differently, which rules out hashing, diffing or deduplicating saves.
+    for _, Key in SortedKeys(Raw.Fields) do
+        const Tagged = Raw.Fields[Key]
+        const IdSize = Varint.Measure(Key)
+        const Header = buffer.create(IdSize)
+        Varint.Write(Header, 0, Key)
+
+        table.insert(Buffers, Header)
+        table.insert(Buffers, Tagged)
+        Size += IdSize + buffer.len(Tagged)
+        Count += 1
+    end
 
     const PrefixSize = Varint.Measure(FORMAT_VERSION)
-        + Varint.Measure(Obj.Registry)
-        + Varint.Measure(LocalId)
+        + Varint.Measure(Raw.Registry)
+        + Varint.Measure(Raw.LocalId)
         + Varint.Measure(Count)
 
     const Prefix = buffer.create(PrefixSize)
 
     local At = Varint.Write(Prefix, 0, FORMAT_VERSION)
-    At += Varint.Write(Prefix, At, Obj.Registry)
-    At += Varint.Write(Prefix, At, LocalId)
+    At += Varint.Write(Prefix, At, Raw.Registry)
+    At += Varint.Write(Prefix, At, Raw.LocalId)
     Varint.Write(Prefix, At, Count)
 
     return Concat(OBJECT_HEADER, Prefix, Buffers, Size)
+end
+
+function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject, WithUnknown: boolean?): buffer
+    return WriteRecord(ToRaw(Obj, WithUnknown))
 end
 
 function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
@@ -568,7 +718,6 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
         LocalId = LocalId,
         Registry = TypeId,
         Properties = {},
-        Source = CompressedObj,
     }
 
     for _ = 1, Count do
@@ -592,206 +741,929 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
 end
 
 --=============================================================================
--- Metadata
+-- Packs
 --=============================================================================
 
--- [/mh][varint id][varint saved][varint published][varint count][properties...]
--- The format version lives on the containing pack rather than on every record.
-function Compressor:CompressMetadata(Metadata: DatabaseTypes.Metadata): buffer
+-- [varint version][varint flags][varint last id][body]
+--
+-- Both packs that are stored -- a scene's objects and a database shard's
+-- records -- are written as this. LastId is what stops a scene reopening a
+-- local id after the object holding it is gone, and a database reusing a
+-- record id: without it, unload and load would restart the counter and the
+-- second object ever created would answer to the name the first one was saved
+-- under.
+--
+-- Written as one record per row -- every value beside its property id, and
+-- every value a row held, defaults included, since a property starts out
+-- holding its default -- a level of 20,000 blocks came to 4.5MB, past what one
+-- DataStore key holds. A pack writes the same values and drops the repetition:
+--
+--   body     [varint group count][group...]
+--   group    [varint key][varint column count][column...]
+--            [varint row count][u8 partial]
+--            [varint id step...]                       one per row
+--            [present bitmap...]                       one per column, if partial
+--            [written bitmap...]                       one per column
+--            [values...]                               column by column
+--   column   [varint id][u8 encoding][tagged default][encoding's own]
+--
+-- Rows are grouped -- objects by type, records by the properties they carry --
+-- and a group's properties are written once as columns rather than once per
+-- row. A column says, one bit a row, which rows hold something other than the
+-- column's default, and writes only those. A partial group has rows missing
+-- some of its columns -- an object read from a save made before a property was
+-- added -- and says, one bit a row, which rows have each column.
+--
+-- Everything is column by column, the bitmaps and the values alike, rather than
+-- row by row. The bytes a pack is made of then come in long runs of the same
+-- kind -- every position, then every material -- which is what zstd finds
+-- repetition in.
+--
+-- The default is the pack's own, not the registry's: whatever value the column
+-- holds most often in this pack, written into the pack. A developer changing a
+-- property's default afterwards changes nothing about what is already saved,
+-- because nothing about the pack ever pointed at the registry. Every row reads
+-- back holding exactly the values it was written with.
+--
+-- A column writes its values in whichever of these is smallest for it:
+--
+--   raw      each value tagged, exactly as a record would hold it. What every
+--            column can fall back to, and what keeps a pack readable with no
+--            registry: a column of a type this build has never heard of is
+--            still a list of tagged values it can step over.
+--   bool     nothing: the written bit is the value. Only for a column holding
+--            Bools and nothing else.
+--   palette  [varint count][tagged value...] after the default, then one
+--            varint index per value. Materials, enums, mesh ids, colours: the
+--            columns a level repeats a handful of values across.
+--   grid     [varint scale] after the default, then each Vector as three signed
+--            varints of its components times the scale. Building games snap to
+--            a grid, so a position or a size is usually a few small integers
+--            rather than twelve bytes of float. A Vector off the grid escapes to
+--            its twelve bytes, so the column never refuses a value.
+--
+-- Whole, the body is then compressed with zstd when that comes out smaller,
+-- which flag 1 records. Most of what is left is a level repeating itself in
+-- ways no column can see, and zstd does see them.
+
+const PACK_COMPRESSED = 1
+const PACK_FLAGS = PACK_COMPRESSED
+
+-- How far a pack may unpack. A client can push a pack, and a few bytes of zstd
+-- can claim a gigabyte.
+const MAX_UNPACKED_SIZE = 64 * 1024 * 1024
+
+-- A scene is written when somebody saves, and its body is small by the time
+-- zstd sees it: 19 took 70ms over 11ms for 9 on a 35,000 object level, and came
+-- out 8% smaller. A shard is rewritten whole on every record created in it,
+-- inside an UpdateAsync transform, where 19 cost 680ms a write.
+const SCENE_COMPRESSION_LEVEL = 19
+const METADATA_COMPRESSION_LEVEL = 9
+
+const COLUMN_RAW = 0
+const COLUMN_BOOL = 1
+const COLUMN_PALETTE = 2
+const COLUMN_GRID = 3
+
+-- Steps a grid column may snap to, smallest first so that a tie goes to the
+-- smaller integers.
+const GRID_SCALES = {1, 2, 4, 5, 8, 10, 16, 20, 100, 1000}
+
+-- Past this a component is not a grid position in any sense that matters, and
+-- times a scale it would leave the varint's range.
+const GRID_LIMIT = 2 ^ 40
+
+const BOOL_FALSE = Compressor:CompressValue("Bool", false) :: buffer
+const BOOL_TRUE = Compressor:CompressValue("Bool", true) :: buffer
+const BOOL_FALSE_KEY = buffer.tostring(BOOL_FALSE)
+const BOOL_TRUE_KEY = buffer.tostring(BOOL_TRUE)
+const VECTOR_TAG = MakeTag(WIRE_FIXED12, PropertyTypes:GetTypeId("Vector") :: number)
+
+-- A buffer that grows as it is written, so a pack is built in one place rather
+-- than as thousands of pieces glued together at the end.
+type Writer = {Buf: buffer, At: number}
+
+const function NewWriter(): Writer
+    return {Buf = buffer.create(256), At = 0}
+end
+
+const function Reserve(W: Writer, Size: number)
+    const Need = W.At + Size
+    const Length = buffer.len(W.Buf)
+    if Need <= Length then
+        return
+    end
+
+    const Grown = buffer.create(math.max(Length * 2, Need))
+    buffer.copy(Grown, 0, W.Buf, 0, W.At)
+    W.Buf = Grown
+end
+
+const function PutU8(W: Writer, Value: number)
+    Reserve(W, 1)
+    buffer.writeu8(W.Buf, W.At, Value)
+    W.At += 1
+end
+
+const function PutVarint(W: Writer, Value: number)
+    Reserve(W, Varint.Measure(Value))
+    W.At += Varint.Write(W.Buf, W.At, Value)
+end
+
+const function PutSigned(W: Writer, Value: number)
+    Reserve(W, Varint.MeasureSigned(Value))
+    W.At += Varint.WriteSigned(W.Buf, W.At, Value)
+end
+
+const function PutBuffer(W: Writer, Part: buffer, Offset: number?, Length: number?)
+    const From = Offset or 0
+    const Size = Length or (buffer.len(Part) - From)
+    Reserve(W, Size)
+    buffer.copy(W.Buf, W.At, Part, From, Size)
+    W.At += Size
+end
+
+const function Finish(W: Writer): buffer
+    const Out = buffer.create(W.At)
+    buffer.copy(Out, 0, W.Buf, 0, W.At)
+    return Out
+end
+
+-- Whether a Vector's components all land on the grid. Exact or nothing, to the
+-- bit: a component read back from the grid has to be the same float the record
+-- held, or a save would move things by a rounding error every time. A -0 is
+-- off the grid for that reason, since the integer it scales to has no sign.
+const function FitsGrid(Tagged: buffer, Scale: number): boolean
+    for Index = 0, 2 do
+        const Component = buffer.readf32(Tagged, 1 + Index * 4)
+        const Scaled = math.round(Component * Scale)
+        if math.abs(Scaled) > GRID_LIMIT then
+            return false
+        end
+
+        buffer.writef32(Probe, 0, Scaled / Scale)
+        if buffer.readu32(Probe, 0) ~= buffer.readu32(Tagged, 1 + Index * 4) then
+            return false
+        end
+    end
+
+    return true
+end
+
+const function GridSize(Tagged: buffer, Scale: number): number
+    if not FitsGrid(Tagged, Scale) then
+        return 1 + 12
+    end
+
     local Size = 0
-    local Count = 0
-    const Buffers = {}
-
-    for Index, Prop in Metadata do
-        if type(Index) ~= "number" then
-            continue
-        end
-
-        const Written = WriteProperty(Buffers, Prop.Parent, Prop.Type, Prop.Value)
-        if Written > 0 then
-            Size += Written
-            Count += 1
-        end
+    for Index = 0, 2 do
+        const Scaled = math.round(buffer.readf32(Tagged, 1 + Index * 4) * Scale)
+        Size += if Index == 0
+            then Varint.Measure(Varint.Zigzag(Scaled) * 2)
+            else Varint.MeasureSigned(Scaled)
     end
 
-    const PrefixSize = Varint.Measure(Metadata.Id)
-        + Varint.Measure(Metadata.SavedVersion)
-        + Varint.Measure(Metadata.PublishedVersion)
-        + Varint.Measure(Count)
-
-    const Prefix = buffer.create(PrefixSize)
-    local At = Varint.Write(Prefix, 0, Metadata.Id)
-    At += Varint.Write(Prefix, At, Metadata.SavedVersion)
-    At += Varint.Write(Prefix, At, Metadata.PublishedVersion)
-    Varint.Write(Prefix, At, Count)
-
-    return Concat(METADATA_HEADER, Prefix, Buffers, Size)
+    return Size
 end
 
-function Compressor:DecompressMetadata(CompressedMetadata: buffer): DatabaseTypes.Metadata
-    if buffer.readstring(CompressedMetadata, 0, #METADATA_HEADER) ~= METADATA_HEADER then
-        Logger:Error("Tried to decompress invalid metadata buffer.")
+-- The first component carries the escape: an even varint is the component
+-- zigzagged and doubled, and a 1 means the twelve raw bytes follow instead.
+const function PutGrid(W: Writer, Tagged: buffer, Scale: number)
+    if not FitsGrid(Tagged, Scale) then
+        PutVarint(W, 1)
+        PutBuffer(W, Tagged, 1, 12)
+        return
     end
 
-    local Offset = #METADATA_HEADER
+    for Index = 0, 2 do
+        const Scaled = math.round(buffer.readf32(Tagged, 1 + Index * 4) * Scale)
+        if Index == 0 then
+            PutVarint(W, Varint.Zigzag(Scaled) * 2)
+        else
+            PutSigned(W, Scaled)
+        end
+    end
+end
 
-    const Id, IdRead = Varint.Read(CompressedMetadata, Offset)
-    Offset += IdRead
+type Column = {
+    Id: number,
+    Encoding: number,
+    Default: string,
+    Palette: {[string]: number}?,
+    Scale: number?,
+}
 
-    const Saved, SavedRead = Varint.Read(CompressedMetadata, Offset)
-    Offset += SavedRead
-
-    const Published, PublishedRead = Varint.Read(CompressedMetadata, Offset)
-    Offset += PublishedRead
-
-    const Count, CountRead = Varint.Read(CompressedMetadata, Offset)
-    Offset += CountRead
-
-    const Metadata = {
-        Id = Id,
-        SavedVersion = Saved,
-        PublishedVersion = Published,
-    }
-
-    for _ = 1, Count do
-        const PropertyId, Value, Consumed, Raw = ReadProperty(CompressedMetadata, Offset)
-        Offset += Consumed
-
-        -- Metadata does not keep what it cannot place. It is a database's own
-        -- bookkeeping rather than anybody's level, and has nowhere to hold it.
-        if PropertyId and not Raw then
-            const Prop = Properties.new(PropertyId)
-            Prop:Set(Value)
-            table.insert(Metadata, Prop)
+-- Decides how one column is written, from every value it holds in this pack.
+-- Values is by row, nil where a row does not carry the column.
+const function PlanColumn(Id: number, Values: {[number]: string}, Rows: number): Column
+    const Counts: {[string]: number} = {}
+    for Row = 1, Rows do
+        const Key = Values[Row]
+        if Key then
+            Counts[Key] = (Counts[Key] or 0) + 1
         end
     end
 
-    return Metadata :: any
+    -- Most common first, then by the bytes themselves, so the same column
+    -- always plans the same way and the same rows write the same pack.
+    const Distinct = {}
+    for Key in Counts do
+        table.insert(Distinct, Key)
+    end
+
+    table.sort(Distinct, function(A, B)
+        if Counts[A] ~= Counts[B] then
+            return Counts[A] > Counts[B]
+        end
+
+        return A < B
+    end)
+
+    const Default = Distinct[1]
+
+    local IsBool = true
+    for _, Key in Distinct do
+        if Key ~= BOOL_FALSE_KEY and Key ~= BOOL_TRUE_KEY then
+            IsBool = false
+            break
+        end
+    end
+
+    if IsBool then
+        return {Id = Id, Encoding = COLUMN_BOOL, Default = Default}
+    end
+
+    -- What each encoding would cost for the values that are not the default.
+    local Raw = 0
+    local Palette = Varint.Measure(#Distinct - 1)
+    const Index: {[string]: number} = {}
+
+    for Position = 2, #Distinct do
+        const Key = Distinct[Position]
+        Index[Key] = Position - 1
+        Palette += #Key
+        Raw += #Key * Counts[Key]
+        Palette += Varint.Measure(Position - 1) * Counts[Key]
+    end
+
+    local Grid = math.huge
+    local Scale = nil
+
+    local IsVector = true
+    for Position = 2, #Distinct do
+        if string.byte(Distinct[Position], 1) ~= VECTOR_TAG or #Distinct[Position] ~= 13 then
+            IsVector = false
+            break
+        end
+    end
+
+    if IsVector and #Distinct > 1 then
+        for _, Candidate in GRID_SCALES do
+            local Size = Varint.Measure(Candidate)
+            for Position = 2, #Distinct do
+                const Key = Distinct[Position]
+                Size += GridSize(buffer.fromstring(Key), Candidate) * Counts[Key]
+            end
+
+            if Size < Grid then
+                Grid, Scale = Size, Candidate
+            end
+        end
+    end
+
+    if Grid < Raw and Grid <= Palette then
+        return {Id = Id, Encoding = COLUMN_GRID, Default = Default, Scale = Scale}
+    elseif Palette < Raw then
+        return {Id = Id, Encoding = COLUMN_PALETTE, Default = Default, Palette = Index}
+    end
+
+    return {Id = Id, Encoding = COLUMN_RAW, Default = Default}
 end
 
---=============================================================================
--- Packing
---=============================================================================
+const function WriteColumn(W: Writer, Plan: Column)
+    PutVarint(W, Plan.Id)
+    PutU8(W, Plan.Encoding)
+    PutBuffer(W, buffer.fromstring(Plan.Default))
 
--- [/ph][varint count][[varint length][bytes]...]
-function Compressor:PackBuffers(Buffers: {buffer}): buffer
-    local Size = 0
-    for _, Part in Buffers do
-        const Length = buffer.len(Part)
-        Size += Varint.Measure(Length) + Length
+    if Plan.Encoding == COLUMN_PALETTE then
+        const Palette = Plan.Palette :: {[string]: number}
+        const Ordered = {}
+        for Key, Position in Palette do
+            Ordered[Position] = Key
+        end
+
+        PutVarint(W, #Ordered)
+        for _, Key in Ordered do
+            PutBuffer(W, buffer.fromstring(Key))
+        end
+    elseif Plan.Encoding == COLUMN_GRID then
+        PutVarint(W, Plan.Scale :: number)
     end
-
-    const CountSize = Varint.Measure(#Buffers)
-    const Pack = buffer.create(#PACK_HEADER + CountSize + Size)
-    buffer.writestring(Pack, 0, PACK_HEADER)
-    Varint.Write(Pack, #PACK_HEADER, #Buffers)
-
-    local Offset = #PACK_HEADER + CountSize
-    for _, Part in Buffers do
-        const Length = buffer.len(Part)
-        Offset += Varint.Write(Pack, Offset, Length)
-        buffer.copy(Pack, Offset, Part, 0)
-        Offset += Length
-    end
-
-    return Pack
 end
 
-function Compressor:UnpackBuffers(PackedBuffers: buffer, Offset: number?): {buffer}
-    local At = Offset or 0
-    if buffer.readstring(PackedBuffers, At, #PACK_HEADER) ~= PACK_HEADER then
-        Logger:Error("Tried to unpack invalid buffer pack.")
+const function WriteValue(W: Writer, Plan: Column, Key: string)
+    if Plan.Encoding == COLUMN_RAW then
+        PutBuffer(W, buffer.fromstring(Key))
+    elseif Plan.Encoding == COLUMN_PALETTE then
+        PutVarint(W, (Plan.Palette :: {[string]: number})[Key])
+    elseif Plan.Encoding == COLUMN_GRID then
+        PutGrid(W, buffer.fromstring(Key), Plan.Scale :: number)
     end
 
-    At += #PACK_HEADER
+    -- A bool column writes nothing: the written bit already said it.
+end
 
-    const Count, CountRead = Varint.Read(PackedBuffers, At)
-    At += CountRead
+const function PutBitmap(W: Writer, Bits: {boolean}, Count: number)
+    for Start = 1, Count, 8 do
+        local Byte = 0
+        for Bit = 0, math.min(7, Count - Start) do
+            if Bits[Start + Bit] then
+                Byte = bit32.bor(Byte, bit32.lshift(1, Bit))
+            end
+        end
 
-    const Unpacked = table.create(Count)
+        PutU8(W, Byte)
+    end
+end
+
+-- One group: its rows, and the column ids to write them under in that order.
+type Group = {Key: number, Rows: {RawObject}, Order: {number}}
+
+const function WriteGroup(W: Writer, Group: Group)
+    const Rows = Group.Rows
+    const Order = Group.Order
+
+    table.sort(Rows, function(A, B)
+        return A.LocalId < B.LocalId
+    end)
+
+    const Plans: {Column} = table.create(#Order)
+    const Keys: {{[number]: string}} = table.create(#Order)
+    local Partial = false
+
+    for Index, Id in Order do
+        const Values = {}
+        for Row, Raw in Rows do
+            const Tagged = Raw.Fields[Id]
+            if Tagged then
+                Values[Row] = buffer.tostring(Tagged)
+            else
+                Partial = true
+            end
+        end
+
+        Keys[Index] = Values
+        Plans[Index] = PlanColumn(Id, Values, #Rows)
+    end
+
+    PutVarint(W, Group.Key)
+    PutVarint(W, #Order)
+    for _, Plan in Plans do
+        WriteColumn(W, Plan)
+    end
+
+    PutVarint(W, #Rows)
+    PutU8(W, if Partial then 1 else 0)
+
+    local Previous = 0
+    for _, Raw in Rows do
+        PutVarint(W, Raw.LocalId - Previous)
+        Previous = Raw.LocalId
+    end
+
+    const Bits = table.create(#Rows)
+
+    if Partial then
+        for Index in Order do
+            for Row = 1, #Rows do
+                Bits[Row] = Keys[Index][Row] ~= nil
+            end
+
+            PutBitmap(W, Bits, #Rows)
+        end
+    end
+
+    for Index, Plan in Plans do
+        for Row = 1, #Rows do
+            const Key = Keys[Index][Row]
+            Bits[Row] = Key ~= nil and Key ~= Plan.Default
+        end
+
+        PutBitmap(W, Bits, #Rows)
+    end
+
+    for Index, Plan in Plans do
+        for Row = 1, #Rows do
+            const Key = Keys[Index][Row]
+            if Key ~= nil and Key ~= Plan.Default then
+                WriteValue(W, Plan, Key)
+            end
+        end
+    end
+end
+
+-- The header, then the body -- compressed when that makes it smaller. Kept only
+-- when it is: a pack of a few rows comes out larger under zstd than without
+-- it, and a build that cannot compress at all still writes a pack every build
+-- can read.
+const function WritePack(LastId: number, Groups: {Group}, Level: number): (buffer, number)
+    const Body = NewWriter()
+    PutVarint(Body, #Groups)
+    for _, Group in Groups do
+        WriteGroup(Body, Group)
+    end
+
+    local Payload = Finish(Body)
+    const Size = buffer.len(Payload)
+    local Flags = 0
+
+    const Ok, Compressed = pcall(function()
+        return EncodingService:CompressBuffer(Payload, Enum.CompressionAlgorithm.Zstd, Level)
+    end)
+
+    if Ok and buffer.len(Compressed) < Size then
+        Payload = Compressed
+        Flags += PACK_COMPRESSED
+    end
+
+    const Out = NewWriter()
+    PutVarint(Out, FORMAT_VERSION)
+    PutVarint(Out, Flags)
+    PutVarint(Out, LastId)
+    PutBuffer(Out, Payload)
+    return Finish(Out), Size
+end
+
+const function ReadBitmap(Buf: buffer, Offset: number, Count: number, Into: {boolean}): number
     for Index = 1, Count do
-        const Length, LengthRead = Varint.Read(PackedBuffers, At)
-        At += LengthRead
-
-        const Slice = buffer.create(Length)
-        buffer.copy(Slice, 0, PackedBuffers, At, Length)
-        Unpacked[Index] = Slice
-        At += Length
+        const Byte = buffer.readu8(Buf, Offset + (Index - 1) // 8)
+        Into[Index] = bit32.extract(Byte, (Index - 1) % 8) == 1
     end
 
-    return Unpacked
+    return (Count + 7) // 8
 end
 
--- [varint version][varint last id][pack of metadata buffers]
-function Compressor:CompressMetadatas(LastId: number, Metadatas: {DatabaseTypes.Metadata}): buffer
-    const Compressed = table.create(#Metadatas)
-    for Index, Metadata in Metadatas do
-        Compressed[Index] = Compressor:CompressMetadata(Metadata)
+-- A count read from the pack, refused when it claims more entries than there
+-- are bytes left for. Every entry takes at least one, and a count past that is
+-- a lie a table would otherwise be allocated for.
+const function ReadCount(Buf: buffer, Offset: number): (number, number)
+    const Count, Read = Varint.Read(Buf, Offset)
+    if Count > buffer.len(Buf) - Offset - Read then
+        Logger:Error(`A pack claims {Count} entries at offset {Offset} with fewer bytes left.`)
     end
 
-    const Packed = Compressor:PackBuffers(Compressed)
-    const PrefixSize = Varint.Measure(FORMAT_VERSION) + Varint.Measure(LastId)
+    return Count, Read
+end
 
-    const Result = buffer.create(PrefixSize + buffer.len(Packed))
-    const At = Varint.Write(Result, 0, FORMAT_VERSION)
-    Varint.Write(Result, At, LastId)
-    buffer.copy(Result, PrefixSize, Packed, 0)
-    return Result
+type ReadColumn = {
+    Id: number,
+    Encoding: number,
+    Default: buffer,
+    Other: buffer?,
+    Palette: {buffer}?,
+    Scale: number?,
+}
+
+-- Shared is every buffer the column hands to more than one row -- its default,
+-- its palette -- which the caller decodes once rather than once per row.
+const function ReadColumnHeader(Buf: buffer, Offset: number, Shared: {[buffer]: true}): (ReadColumn, number)
+    local At = Offset
+
+    const Id, IdRead = Varint.Read(Buf, At)
+    At += IdRead
+
+    const Encoding = buffer.readu8(Buf, At)
+    At += 1
+
+    const DefaultLength = TaggedLength(Buf, At)
+    const Default = Slice(Buf, At, DefaultLength)
+    At += DefaultLength
+
+    const Column: ReadColumn = {Id = Id, Encoding = Encoding, Default = Default}
+    Shared[Default] = true
+
+    if Encoding == COLUMN_BOOL then
+        const Key = buffer.tostring(Default)
+        if Key ~= BOOL_FALSE_KEY and Key ~= BOOL_TRUE_KEY then
+            Logger:Error(`Bool column {Id} has a default that is not a Bool.`)
+        end
+
+        const Other = buffer.fromstring(if Key == BOOL_FALSE_KEY then BOOL_TRUE_KEY else BOOL_FALSE_KEY)
+        Column.Other = Other
+        Shared[Other] = true
+    elseif Encoding == COLUMN_PALETTE then
+        const Count, CountRead = ReadCount(Buf, At)
+        At += CountRead
+
+        const Palette = table.create(Count)
+        for Index = 1, Count do
+            const Length = TaggedLength(Buf, At)
+            Palette[Index] = Slice(Buf, At, Length)
+            Shared[Palette[Index]] = true
+            At += Length
+        end
+
+        Column.Palette = Palette
+    elseif Encoding == COLUMN_GRID then
+        const Scale, ScaleRead = Varint.Read(Buf, At)
+        At += ScaleRead
+
+        if Scale == 0 then
+            Logger:Error(`Grid column {Id} has a scale of 0.`)
+        end
+
+        Column.Scale = Scale
+    elseif Encoding ~= COLUMN_RAW then
+        Logger:Error(`Column {Id} is written in encoding {Encoding}, which this build does not know.`)
+    end
+
+    return Column, At - Offset
+end
+
+const function ReadGrid(Buf: buffer, Offset: number, Scale: number): (buffer, number)
+    const Tagged = buffer.create(13)
+    buffer.writeu8(Tagged, 0, VECTOR_TAG)
+
+    const First, FirstRead = Varint.Read(Buf, Offset)
+    if First == 1 then
+        buffer.copy(Tagged, 1, Buf, Offset + FirstRead, 12)
+        return Tagged, FirstRead + 12
+    end
+
+    if First % 2 == 1 then
+        Logger:Error(`Malformed grid value at offset {Offset}.`)
+    end
+
+    local At = Offset + FirstRead
+    buffer.writef32(Tagged, 1, Varint.Unzigzag(First // 2) / Scale)
+
+    for Index = 1, 2 do
+        const Scaled, Read = Varint.ReadSigned(Buf, At)
+        At += Read
+        buffer.writef32(Tagged, 1 + Index * 4, Scaled / Scale)
+    end
+
+    return Tagged, At - Offset
+end
+
+-- A row as the pack holds it: the group's key, its id, its tagged values by
+-- column id, and the column ids in the order the group wrote them.
+type OnRow = (Key: number, LocalId: number, Fields: {[number]: buffer}, Order: {number}, Shared: {[buffer]: true}) -> ()
+
+-- Reads a pack's header and body, handing each row to OnRow. Returns
+-- the pack's LastId.
+const function ReadPack(Pack: buffer, Offset: number, Each: OnRow): number
+    local At = Offset
+
+    const Flags, FlagsRead = Varint.Read(Pack, At)
+    At += FlagsRead
+
+    if Flags ~= bit32.band(Flags, PACK_FLAGS) then
+        Logger:Error(`Pack carries flags {Flags}, some of which this build does not know.`)
+    end
+
+    const LastId, LastIdRead = Varint.Read(Pack, At)
+    At += LastIdRead
+
+    local Buf = Slice(Pack, At, buffer.len(Pack) - At)
+    if bit32.band(Flags, PACK_COMPRESSED) ~= 0 then
+        -- Asked before unpacking rather than after. The size is in the zstd
+        -- frame, and unpacking refuses a frame that does not have one.
+        const Size = EncodingService:GetDecompressedBufferSize(Buf, Enum.CompressionAlgorithm.Zstd)
+        if not Size or Size > MAX_UNPACKED_SIZE then
+            Logger:Error(`Pack unpacks to {tostring(Size)} bytes; at most {MAX_UNPACKED_SIZE} are read.`)
+        end
+
+        Buf = EncodingService:DecompressBuffer(Buf, Enum.CompressionAlgorithm.Zstd)
+    end
+
+    At = 0
+    const Shared: {[buffer]: true} = {}
+
+    const GroupCount, GroupCountRead = ReadCount(Buf, At)
+    At += GroupCountRead
+
+    for _ = 1, GroupCount do
+        const Key, KeyRead = Varint.Read(Buf, At)
+        At += KeyRead
+
+        const ColumnCount, ColumnCountRead = ReadCount(Buf, At)
+        At += ColumnCountRead
+
+        const Columns: {ReadColumn} = table.create(ColumnCount)
+        const Order: {number} = table.create(ColumnCount)
+        for Index = 1, ColumnCount do
+            const Column, Read = ReadColumnHeader(Buf, At, Shared)
+            Columns[Index] = Column
+            Order[Index] = Column.Id
+            At += Read
+        end
+
+        const RowCount, RowCountRead = ReadCount(Buf, At)
+        At += RowCountRead
+
+        const Partial = buffer.readu8(Buf, At) == 1
+        At += 1
+
+        const Ids: {number} = table.create(RowCount)
+        const Rows: {{[number]: buffer}} = table.create(RowCount)
+        local Previous = 0
+        for Row = 1, RowCount do
+            const Step, StepRead = Varint.Read(Buf, At)
+            At += StepRead
+
+            Previous += Step
+            Ids[Row] = Previous
+            Rows[Row] = {}
+        end
+
+        -- Left empty when no row is missing a column, which is nearly always.
+        const Present: {{boolean}} = {}
+        if Partial then
+            for Index = 1, ColumnCount do
+                const Bits = table.create(RowCount)
+                At += ReadBitmap(Buf, At, RowCount, Bits)
+                Present[Index] = Bits
+            end
+        end
+
+        const Written: {{boolean}} = table.create(ColumnCount)
+        for Index = 1, ColumnCount do
+            const Bits = table.create(RowCount)
+            At += ReadBitmap(Buf, At, RowCount, Bits)
+            Written[Index] = Bits
+        end
+
+        for Index, Column in Columns do
+            const Has, Wrote = Present[Index], Written[Index]
+
+            for Row = 1, RowCount do
+                if Has and not Has[Row] then
+                    continue
+                end
+
+                local Tagged: buffer
+
+                if not Wrote[Row] then
+                    Tagged = Column.Default
+                elseif Column.Encoding == COLUMN_BOOL then
+                    Tagged = Column.Other :: buffer
+                elseif Column.Encoding == COLUMN_PALETTE then
+                    const Position, Read = Varint.Read(Buf, At)
+                    At += Read
+
+                    const Entry = (Column.Palette :: {buffer})[Position]
+                    if not Entry then
+                        Logger:Error(`Column {Column.Id} names palette entry {Position}, which it does not have.`)
+                    end
+
+                    Tagged = Entry :: buffer
+                elseif Column.Encoding == COLUMN_GRID then
+                    const Value, Read = ReadGrid(Buf, At, Column.Scale :: number)
+                    At += Read
+                    Tagged = Value
+                else
+                    const Length = TaggedLength(Buf, At)
+                    Tagged = Slice(Buf, At, Length)
+                    At += Length
+                end
+
+                Rows[Row][Column.Id] = Tagged
+            end
+        end
+
+        for Row = 1, RowCount do
+            Each(Key, Ids[Row], Rows[Row], Order, Shared)
+        end
+    end
+
+    return LastId
+end
+
+-- A value read for the property it belongs to, decoded once when many rows
+-- share the same buffer.
+type Placed = {any}
+
+const function Decoder(): (PropertyTypes.PropertyIdentifier, buffer, {[buffer]: true}) -> (PropertyTypes.PropertyIdentifier?, any?, buffer?)
+    const Decoded: {[buffer]: Placed} = {}
+
+    return function(Id: PropertyTypes.PropertyIdentifier, Tagged: buffer, Shared: {[buffer]: true})
+        local Result = if Shared[Tagged] then Decoded[Tagged] else nil
+        if not Result then
+            const PropertyId, Value, _, Raw = ReadTagged(Id, Tagged, 0)
+            Result = {PropertyId, Value, Raw}
+            if Shared[Tagged] then
+                Decoded[Tagged] = Result
+            end
+        end
+
+        const Read = Result :: Placed
+        return Read[1], Read[2], Read[3]
+    end
+end
+
+--=============================================================================
+-- Metadata packs
+--=============================================================================
+
+-- A record's two version numbers ride as columns 0 and 1, and its properties as
+-- columns from 2 on, so a version can never be taken for a property. A group is
+-- every record carrying the same properties in the same order: a record's
+-- properties are read back by position as well as by id, and the order is the
+-- one a record was built in.
+const METADATA_SAVED = 0
+const METADATA_PUBLISHED = 1
+const METADATA_FIRST_PROPERTY = 2
+
+-- Returns the pack and the size of its body before compression, which is what a
+-- caller measures a shard by: rewriting it decodes and encodes all of that.
+function Compressor:CompressMetadatas(LastId: number, Metadatas: {DatabaseTypes.Metadata}): (buffer, number)
+    const Groups: {Group} = {}
+    const ByLayout: {[string]: Group} = {}
+
+    for _, Metadata in Metadatas do
+        const Fields = {
+            [METADATA_SAVED] = Compressor:CompressValue("Number", Metadata.SavedVersion) :: buffer,
+            [METADATA_PUBLISHED] = Compressor:CompressValue("Number", Metadata.PublishedVersion) :: buffer,
+        }
+
+        const Order = {METADATA_SAVED, METADATA_PUBLISHED}
+        for Index, Prop in Metadata do
+            if type(Index) ~= "number" then
+                continue
+            end
+
+            const Column = Prop.Parent + METADATA_FIRST_PROPERTY
+            if Fields[Column] then
+                Logger:Warn(`Record {Metadata.Id} carries property {Prop.Parent} twice. The second is not saved.`)
+                continue
+            end
+
+            const Tagged = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
+            if Tagged then
+                Fields[Column] = Tagged
+                table.insert(Order, Column)
+            end
+        end
+
+        const Layout = table.concat(Order, ",")
+        local Group = ByLayout[Layout]
+        if not Group then
+            const Made: Group = {Key = #Groups + 1, Rows = {}, Order = Order}
+            ByLayout[Layout] = Made
+            table.insert(Groups, Made)
+            Group = Made
+        end
+
+        table.insert(Group.Rows, {
+            __type = "RawObject",
+            LocalId = Metadata.Id,
+            Registry = 0,
+            Fields = Fields,
+        })
+    end
+
+    return WritePack(LastId, Groups, METADATA_COMPRESSION_LEVEL)
 end
 
 function Compressor:DecompressMetadatas(CompressedMetadatas: buffer): (number, {DatabaseTypes.Metadata})
     const Version, VersionRead = Varint.Read(CompressedMetadatas, 0)
     CheckVersion(Version, "Metadata pack")
 
-    const LastId, LastIdRead = Varint.Read(CompressedMetadatas, VersionRead)
-    const Metadatas = {}
+    const Metadatas: {DatabaseTypes.Metadata} = {}
+    const Decode = Decoder()
 
-    for _, Compressed in Compressor:UnpackBuffers(CompressedMetadatas, VersionRead + LastIdRead) do
-        table.insert(Metadatas, Compressor:DecompressMetadata(Compressed))
-    end
+    const LastId = ReadPack(CompressedMetadatas, VersionRead, function(_, Id, Fields, Order, Shared)
+        const Saved = Fields[METADATA_SAVED]
+        const Published = Fields[METADATA_PUBLISHED]
+
+        const Metadata: any = {
+            Id = Id,
+            SavedVersion = if Saved then Compressor:DecompressValue(Saved, 0) else 0,
+            PublishedVersion = if Published then Compressor:DecompressValue(Published, 0) else 0,
+        }
+
+        -- Metadata does not keep what it cannot place. It is a database's own
+        -- bookkeeping rather than anybody's level, and has nowhere to hold it.
+        for _, Column in Order do
+            const Tagged = Fields[Column]
+            if Column < METADATA_FIRST_PROPERTY or not Tagged then
+                continue
+            end
+
+            const PropertyId, Value, Raw = Decode(Column - METADATA_FIRST_PROPERTY, Tagged, Shared)
+            if PropertyId and not Raw then
+                -- Through any: Properties is the client's or the server's, and
+                -- the analyser will not call a union of the two.
+                const Prop = (Properties :: any).new(PropertyId)
+                Prop:Set(Value)
+                table.insert(Metadata, Prop)
+            end
+        end
+
+        table.insert(Metadatas, Metadata)
+    end)
+
+    -- In id order across groups: the order records were created in, which is
+    -- the order paging a shard relies on.
+    table.sort(Metadatas, function(A, B)
+        return A.Id < B.Id
+    end)
 
     return LastId, Metadatas
 end
 
 --=============================================================================
--- Scenes
+-- Scene packs
 --=============================================================================
 
--- [varint version][varint last id][pack of object buffers]
+-- Objects are grouped by type, the type's id the group's key, its columns in
+-- property id order.
 --
--- The same shape as a metadata pack, and for the same reason: LastId is what
--- stops a scene reopening a local id after the object holding it is gone.
--- Without it, unload and load would restart the counter and the second object
--- ever created would answer to the name the first one was saved under.
---
--- An entry that is already a buffer is an object record kept whole -- one whose
--- type this build does not have -- and goes back in exactly as it was read.
-function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object | DecompressedObject | buffer}): buffer
-    const Compressed = table.create(#Objects)
-    for Index, Obj in Objects do
-        Compressed[Index] = if type(Obj) == "buffer" then Obj else Compressor:CompressObject(Obj, true)
+-- A RawObject is an object kept whole -- one whose type this build does not
+-- have -- and goes back in exactly as it was read.
+function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object | DecompressedObject | RawObject}): buffer
+    const ByType: {[number]: {RawObject}} = {}
+    for _, Obj in Objects do
+        const Raw = if (Obj :: any).__type == "RawObject"
+            then Obj :: RawObject
+            else ToRaw(Obj :: any, true)
+
+        local Rows = ByType[Raw.Registry]
+        if not Rows then
+            Rows = {}
+            ByType[Raw.Registry] = Rows
+        end
+
+        table.insert(Rows :: {RawObject}, Raw)
     end
 
-    const Packed = Compressor:PackBuffers(Compressed)
-    const PrefixSize = Varint.Measure(FORMAT_VERSION) + Varint.Measure(LastId)
+    const Groups: {Group} = {}
+    for _, Registry in SortedKeys(ByType) do
+        const Rows = ByType[Registry]
+        const Ids: {[number]: true} = {}
+        for _, Raw in Rows do
+            for Id in Raw.Fields do
+                Ids[Id] = true
+            end
+        end
 
-    const Result = buffer.create(PrefixSize + buffer.len(Packed))
-    const At = Varint.Write(Result, 0, FORMAT_VERSION)
-    Varint.Write(Result, At, LastId)
-    buffer.copy(Result, PrefixSize, Packed, 0)
-    return Result
+        table.insert(Groups, {Key = Registry, Rows = Rows, Order = SortedKeys(Ids)})
+    end
+
+    const Pack = WritePack(LastId, Groups, SCENE_COMPRESSION_LEVEL)
+    return Pack
 end
 
 function Compressor:DecompressScene(CompressedScene: buffer): (number, {DecompressedObject})
     const Version, VersionRead = Varint.Read(CompressedScene, 0)
     CheckVersion(Version, "Scene pack")
 
-    const LastId, LastIdRead = Varint.Read(CompressedScene, VersionRead)
-    const Objects = {}
+    const Objects: {DecompressedObject} = {}
+    const Decode = Decoder()
 
-    for _, Compressed in Compressor:UnpackBuffers(CompressedScene, VersionRead + LastIdRead) do
-        table.insert(Objects, Compressor:DecompressObject(Compressed))
-    end
+    const LastId = ReadPack(CompressedScene, VersionRead, function(Registry, LocalId, Fields, Order, Shared)
+        const Obj: DecompressedObject = {
+            __type = "DecompressedObject",
+            LocalId = LocalId,
+            Registry = Registry,
+            Properties = {},
+            Source = {
+                __type = "RawObject",
+                LocalId = LocalId,
+                Registry = Registry,
+                Fields = Fields,
+            },
+        }
+
+        for _, Id in Order do
+            const Tagged = Fields[Id]
+            if not Tagged then
+                continue
+            end
+
+            const PropertyId, Value, Raw = Decode(Id, Tagged, Shared)
+            if Raw and PropertyId then
+                local Unknown = Obj.Unknown
+                if not Unknown then
+                    Unknown = {}
+                    Obj.Unknown = Unknown
+                end
+
+                (Unknown :: {[number]: buffer})[PropertyId] = Raw
+            elseif PropertyId then
+                Obj.Properties[PropertyId] = Value
+            end
+        end
+
+        table.insert(Objects, Obj)
+    end)
+
+    -- In local id order across types, which is the order a copy serializes
+    -- them in and the order a load builds them in.
+    table.sort(Objects, function(A, B)
+        return A.LocalId < B.LocalId
+    end)
 
     return LastId, Objects
 end
@@ -850,7 +1722,7 @@ const function WriteValues(Buffers: {buffer}, Values: {[PropertyTypes.PropertyId
             Logger:Error(`Cannot write an operation carrying unregistered property id {Key}.`)
         end
 
-        const Written = WriteProperty(Buffers, Key, Registry.Type, Values[Key])
+        const Written = WriteProperty(Buffers, Key, Registry.Type, Values[Key], Registry.Constraints)
         if Written == 0 then
             Logger:Error(`Cannot write {Registry.Name} as a {Registry.Type}: the value it was given cannot be encoded.`)
         end
@@ -882,10 +1754,23 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
             table.sort(Referenced)
         end
 
+        -- One operation index for an Object property. A Table of them writes a
+        -- zero first, which no operation index can be, then one entry per item:
+        -- the operation making that item's target, or zero for an item the
+        -- value already holds.
         local ReferenceSize = Varint.Measure(#Referenced)
         for _, PropertyId in Referenced do
+            const Names = (Operation.References :: any)[PropertyId]
             ReferenceSize += Varint.Measure(PropertyId)
-                + Varint.Measure((Operation.References :: any)[PropertyId])
+
+            if type(Names) == "table" then
+                ReferenceSize += 1 + Varint.Measure(#Names)
+                for _, Entry in Names do
+                    ReferenceSize += Varint.Measure(Entry)
+                end
+            else
+                ReferenceSize += Varint.Measure(Names)
+            end
         end
 
         const PrefixSize = 1
@@ -906,8 +1791,18 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         const Tail = buffer.create(ReferenceSize)
         local Cursor = Varint.Write(Tail, 0, #Referenced)
         for _, PropertyId in Referenced do
+            const Names = (Operation.References :: any)[PropertyId]
             Cursor += Varint.Write(Tail, Cursor, PropertyId)
-            Cursor += Varint.Write(Tail, Cursor, (Operation.References :: any)[PropertyId])
+
+            if type(Names) == "table" then
+                Cursor += Varint.Write(Tail, Cursor, 0)
+                Cursor += Varint.Write(Tail, Cursor, #Names)
+                for _, Entry in Names do
+                    Cursor += Varint.Write(Tail, Cursor, Entry)
+                end
+            else
+                Cursor += Varint.Write(Tail, Cursor, Names)
+            end
         end
 
         table.insert(Buffers, Tail)
@@ -919,7 +1814,7 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         end
 
         const Buffers = {}
-        const Size = WriteProperty(Buffers, Operation.Property, Registry.Type, Operation.Value)
+        const Size = WriteProperty(Buffers, Operation.Property, Registry.Type, Operation.Value, Registry.Constraints)
         if Size == 0 then
             Logger:Error(`Cannot write a set of {Registry.Name}: the value it was given cannot be encoded.`)
         end
@@ -1030,13 +1925,34 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
             const Referenced, ReferencedRead = Varint.Read(CompressedTransaction, Offset)
             Offset += ReferencedRead
 
-            local References: {[PropertyTypes.PropertyIdentifier]: number}? = nil
+            local References: {[PropertyTypes.PropertyIdentifier]: number | {number}}? = nil
             for _ = 1, Referenced do
                 const PropertyId, PropertyRead = Varint.Read(CompressedTransaction, Offset)
                 Offset += PropertyRead
 
-                const Operation, OperationRead = Varint.Read(CompressedTransaction, Offset)
+                local Operation: number | {number}, OperationRead = Varint.Read(CompressedTransaction, Offset)
                 Offset += OperationRead
+
+                -- A Table of references. Every entry takes at least a byte, so
+                -- a length past the bytes left is a lie, refused before a
+                -- list that long is allocated for it.
+                if Operation == 0 then
+                    const Length, LengthRead = Varint.Read(CompressedTransaction, Offset)
+                    Offset += LengthRead
+
+                    if Length > buffer.len(CompressedTransaction) - Offset then
+                        Logger:Error("A list of references claims more entries than the packet holds.")
+                    end
+
+                    const Entries = table.create(Length)
+                    for Index = 1, Length do
+                        const Entry, EntryRead = Varint.Read(CompressedTransaction, Offset)
+                        Offset += EntryRead
+                        Entries[Index] = Entry
+                    end
+
+                    Operation = Entries
+                end
 
                 -- Kept whatever the property turns out to be. Unlike a value,
                 -- which can be dropped and leave a readable record behind, a
@@ -1069,7 +1985,7 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
             -- receiver has to be told about: it decides whether the type the
             -- author wrote matches the property being set, and refuses the whole
             -- transaction when it does not.
-            const Value, ValueRead, Type = Compressor:DecompressValue(CompressedTransaction, Offset)
+            const Value, ValueRead, Type, ItemType = Compressor:DecompressValue(CompressedTransaction, Offset)
             Offset += ValueRead
 
             table.insert(Operations, {
@@ -1078,6 +1994,7 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
                 Property = Property,
                 Value = Value,
                 Type = Type,
+                ItemType = ItemType,
             })
         elseif Kind == TransactionTypes.Kinds.Destroy then
             const Target, TargetRead = Varint.Read(CompressedTransaction, Offset)

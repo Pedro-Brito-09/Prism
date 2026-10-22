@@ -373,6 +373,33 @@ const function TemplateOf(Registry: ObjectRegistry): Instance?
     return nil
 end
 
+-- A value holding pending options with every one whose enum is registered now
+-- swapped for the real option: the option itself, or a fresh list for a Table
+-- of them. Nil when there is nothing to swap.
+const function SettleValue(Prop: PropertyTypes.Property<any>, Value: any): any?
+    if Prop.Type == "CustomEnum" then
+        return CustomEnum.Settle(Value)
+    end
+
+    if Prop.Type ~= "Table" or not Prop.Constraints or Prop.Constraints.Of ~= "CustomEnum" or type(Value) ~= "table" then
+        return nil
+    end
+
+    local List: {any}? = nil
+    for Index, Item in Value do
+        const Settled = CustomEnum.Settle(Item)
+        if Settled then
+            if not List then
+                List = table.clone(Value)
+            end
+
+            (List :: {any})[Index] = Settled
+        end
+    end
+
+    return if List then table.freeze(List) else nil
+end
+
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -383,19 +410,17 @@ const function __getter(self: Object, Reference: Types.PropertyReference): any?
 
     -- A pending option whose enum has been registered since, on an object the
     -- sweep below did not reach because it was set aside at the time.
-    if Prop.Type == "CustomEnum" then
-        const Settled = CustomEnum.Settle(Value)
-        if Settled then
-            return Settled
-        end
+    const Settled = SettleValue(Prop, Value)
+    if Settled then
+        return Settled
     end
 
     -- The live object rather than the id it is stored as, exactly as on the
     -- server. Nil while the target has not replicated here yet, which is the
     -- same nil a destroyed target reads as: the id is kept either way, so the
     -- link comes back the moment the object does.
-    if Prop.Type == "Object" then
-        return Shared.ResolveReference(self.InstanceId, Value, Find)
+    if PropertyTypes.HoldsReferences(Prop) then
+        return Shared.ResolveValue(self.InstanceId, Prop, Value, Find)
     end
 
     return Value
@@ -462,7 +487,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     -- from what the server holds, not from the last frame: a drag let go where
     -- it started is a cancel, and costs nothing.
     if Held then
-        if Prop.Value == Confirmed[Prop] then
+        if PropertyTypes:Equals(Prop.Type, Prop.Value, Confirmed[Prop]) then
             return true
         end
     elseif not Changed then
@@ -474,7 +499,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     -- do: the property no longer holds what the edit set.
     Listeners.Notify(Edited, self, Prop.Parent, Before, Prop.Value)
 
-    const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
+    const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
     if not Compressed then
         return false
     end
@@ -649,7 +674,7 @@ const function __local_setter(self: Object, Reference: Types.PropertyReference, 
 
     -- Against where the preview started rather than the last frame, for the
     -- same reason as the replicated setter: let go where it began is no edit.
-    if Accepted and Prop.Value ~= Before then
+    if Accepted and not PropertyTypes:Equals(Prop.Type, Prop.Value, Before) then
         Listeners.Notify(Edited, self, Prop.Parent, Before, Prop.Value)
     end
 
@@ -816,7 +841,7 @@ const function Construct(
             -- Against the copy the object is going into, as on the server: a
             -- reference is read against a copy, and the object carrying it does
             -- not exist yet.
-            if Prop.Type == "Object" then
+            if PropertyTypes.HoldsReferences(Prop) then
                 const Target, Why = Shared.Reference(Live.Id, Prop, Value, Find)
                 if Target == nil then
                     Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
@@ -927,19 +952,21 @@ function Objects:DuplicateGroup(List: {Object}): {Object}
         const Source = Sources[Index]
 
         for PropertyId, Prop in New.Properties do
-            if Prop.Type ~= "Object" then
+            if not PropertyTypes.HoldsReferences(Prop) then
                 continue
             end
 
             const Was = Source.Properties[PropertyId]
-            const Pointed = if Was then Shared.ResolveReference(Source.InstanceId, Was.Value, Find) else nil
-            if not Pointed then
-                continue
-            end
+            const Remapped = if Was
+                then Shared.Remap(Prop, Was.Value, function(Item: number): number?
+                    const Pointed = Shared.ResolveReference(Source.InstanceId, Item, Find)
+                    const Instead = if Pointed then Counterpart[Pointed] else nil
+                    return if Instead then Instead.LocalId else Item
+                end)
+                else nil
 
-            const Instead = Counterpart[Pointed]
-            if Instead then
-                Prop:Set(Instead.LocalId)
+            if Remapped ~= nil then
+                Prop:Set(Remapped)
             end
         end
     end
@@ -1403,12 +1430,8 @@ Network.ObjectAdded:Connect(AddObject)
 CustomEnum:OnRegistered(function()
     for _, Obj in Workspace do
         for _, Prop in Obj.Properties do
-            if Prop.Type ~= "CustomEnum" then
-                continue
-            end
-
             const Was = Prop.Value
-            const Settled = CustomEnum.Settle(Was)
+            const Settled = SettleValue(Prop, Was)
             if not Settled then
                 continue
             end

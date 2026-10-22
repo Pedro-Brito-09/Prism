@@ -815,6 +815,7 @@ return Codecs
 -- any integer past 16,777,216 -- user ids and unix timestamps included.
 
 const RunService = game:GetService("RunService")
+const EncodingService = game:GetService("EncodingService")
 
 const Properties = if RunService:IsClient()
     then require("./Properties/Client")
@@ -848,14 +849,25 @@ export type DecompressedObject = {
     -- keep the rest; dropping the record anyway at the next save undid that.
     Unknown: {[PropertyTypes.PropertyIdentifier]: buffer}?,
 
-    -- The bytes this record was read from, whole. A scene keeps them for an
-    -- object whose type is not registered, and writes them back untouched.
-    Source: buffer?,
+    -- The tagged values this object was read from a pack as, whole. A scene
+    -- keeps them for an object whose type is not registered, and writes them
+    -- back untouched.
+    Source: RawObject?,
+}
+
+-- An object as its tagged values and nothing decoded: each property's tag and
+-- payload exactly as a record holds them, by property id. Every object a pack
+-- is written from becomes one of these first, which is what lets one pack hold
+-- live objects, objects read from a pack, and objects kept whole because their
+-- type is not registered, and write all three the same way.
+export type RawObject = {
+    __type: "RawObject",
+    LocalId: Handles.LocalId,
+    Registry: ObjectTypes.ObjectIdentifier,
+    Fields: {[PropertyTypes.PropertyIdentifier]: buffer},
 }
 
 const OBJECT_HEADER = "/oh"
-const METADATA_HEADER = "/mh"
-const PACK_HEADER = "/ph"
 
 -- A packet rather than a record, and the only header here that never reaches
 -- storage. See the Transactions section.
@@ -968,7 +980,10 @@ end
 -- Returns a self contained buffer: tag byte followed by the encoded value. The
 -- receiver needs nothing else to read it back, which is why network payloads can
 -- use this directly.
-function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?): buffer?
+--
+-- Constraints matter to one type only: a Table is written item by item as its
+-- item type, and Of is where that type is named. Every other type ignores them.
+function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?, Constraints: any?): buffer?
     if Value == nil then
         return nil
     end
@@ -1041,6 +1056,38 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?)
         const Size = Varint.Measure(Target)
         Payload = buffer.create(Size)
         Varint.Write(Payload, 0, Target)
+    elseif Type == "Table" then
+        -- [varint count][tagged item]... inside one length prefix. Each item
+        -- carries its own tag, exactly as a property of its type would be
+        -- written, so the list reads back with no registry -- and a Number
+        -- written as a varint and one written as a float sit in the same list.
+        const Of = Constraints and Constraints.Of
+        if not PropertyTypes.IsItemType(Of) then
+            Logger:Error("Tried compressing a Table without the item type its constraints name in Of.")
+        end
+
+        const List = Value :: {any}
+        const Items: {buffer} = table.create(#List)
+        local Size = Varint.Measure(#List)
+
+        for Index, Item in List do
+            const Tagged = Compressor:CompressValue(Of, Item, Constraints.Item)
+            if not Tagged then
+                Logger:Error(`Tried compressing a Table whose item {Index} cannot be written as a {Of}.`)
+            end
+
+            Items[Index] = Tagged :: buffer
+            Size += buffer.len(Tagged :: buffer)
+        end
+
+        const Inner = buffer.create(Size)
+        local At = Varint.Write(Inner, 0, #List)
+        for _, Tagged in Items do
+            buffer.copy(Inner, At, Tagged, 0)
+            At += buffer.len(Tagged)
+        end
+
+        Wire, Payload = WIRE_BYTES, BytesBuffer(Inner)
     else
         Logger:Error(`Tried compressing unsupported value type: {Type}`)
     end
@@ -1055,7 +1102,11 @@ end
 -- Reads the tag itself, so the caller does not have to know what it is reading.
 -- Returns the value, how many bytes it consumed, and the semantic type the
 -- writer recorded, which the caller can compare against what it expected.
-function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number, PropertyTypes.PropertyType?)
+--
+-- A Table also returns the type its items were written as, nil for an empty
+-- list, because a list of Numbers and a list of Object references are the same
+-- Luau values and only the tags tell them apart.
+function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number, PropertyTypes.PropertyType?, PropertyTypes.PropertyType?)
     const At = Offset or 0
     const Wire, TypeId = SplitTag(buffer.readu8(Buf, At))
     const Type = PropertyTypes:GetTypeFromId(TypeId)
@@ -1147,6 +1198,63 @@ function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number
     elseif Type == "Object" then
         const Value, Read = Varint.Read(Buf, Body)
         return Value, 1 + Read, Type
+    elseif Type == "Table" then
+        const Length, Read = Varint.Read(Buf, Body)
+        const Consumed = 1 + Read + Length
+        const End = Body + Read + Length
+
+        const Count, CountRead = Varint.Read(Buf, Body + Read)
+        local Cursor = Body + Read + CountRead
+
+        const List = {}
+        local ItemType: PropertyTypes.PropertyType? = nil
+        local Malformed = false
+
+        for _ = 1, Count do
+            -- Never past the length prefix: a count that claims more items
+            -- than the bytes hold is malformed, and reading on would take the
+            -- next record's bytes for items.
+            if Cursor >= End then
+                Malformed = true
+                break
+            end
+
+            -- A nested Table is refused rather than followed. None can be
+            -- written, and following one is recursion a peer gets to choose
+            -- the depth of.
+            const _, ItemTypeId = SplitTag(buffer.readu8(Buf, Cursor))
+            if PropertyTypes:GetTypeFromId(ItemTypeId) == "Table" then
+                Malformed = true
+                break
+            end
+
+            const Item, ItemRead, Written = Compressor:DecompressValue(Buf, Cursor)
+            Cursor += ItemRead
+
+            -- One list, one item type.
+            if Written and ItemType and Written ~= ItemType then
+                Malformed = true
+                break
+            end
+
+            if not ItemType then
+                ItemType = Written :: PropertyTypes.PropertyType?
+            end
+
+            -- An item that cannot be read back -- an enum gone since the save,
+            -- a type this build has never heard of -- is left out, and the
+            -- rest of the list kept.
+            if Item ~= nil then
+                table.insert(List, Item)
+            end
+        end
+
+        if Malformed or Cursor > End then
+            Logger:Warn("A Table was saved with items it cannot hold. Value dropped.")
+            return nil, Consumed, Type
+        end
+
+        return table.freeze(List), Consumed, Type, ItemType
     end
 
     return nil, 1 + SkipValue(Buf, Body, Wire), Type
@@ -1161,9 +1269,10 @@ const function WriteProperty(
     Buffers: {buffer},
     Id: PropertyTypes.PropertyIdentifier,
     Type: PropertyTypes.PropertyType,
-    Value: any?
+    Value: any?,
+    Constraints: any?
 ): number
-    const Tagged = Compressor:CompressValue(Type, Value)
+    const Tagged = Compressor:CompressValue(Type, Value, Constraints)
     if not Tagged then
         return 0
     end
@@ -1190,20 +1299,24 @@ end
 -- A registered property whose type changed since the save is still dropped --
 -- that is the registry deliberately saying something new about the property,
 -- and the object carries the property under its new type either way.
-const function ReadProperty(Buf: buffer, Offset: number): (PropertyTypes.PropertyIdentifier?, any?, number, buffer?)
-    const PropertyId, IdRead = Varint.Read(Buf, Offset)
-    const Value, ValueRead, Type = Compressor:DecompressValue(Buf, Offset + IdRead)
-    const Consumed = IdRead + ValueRead
+-- The tagged value at Offset, read for the property it was saved under. Split
+-- from ReadProperty because a pack does not write the id beside each value.
+const function ReadTagged(
+    PropertyId: PropertyTypes.PropertyIdentifier,
+    Buf: buffer,
+    Offset: number
+): (PropertyTypes.PropertyIdentifier?, any?, number, buffer?)
+    const Value, Consumed, Type, ItemType = Compressor:DecompressValue(Buf, Offset)
 
     const Registry = Properties:GetRegistry(PropertyId)
     if not Registry then
         Logger:Warn(`Property id {PropertyId} is not registered. Kept as saved, and written back unchanged.`)
-        return PropertyId, nil, Consumed, Slice(Buf, Offset + IdRead, ValueRead)
+        return PropertyId, nil, Consumed, Slice(Buf, Offset, Consumed)
     end
 
     if not Type then
         Logger:Warn(`Property {PropertyId} was saved with a type this build does not know. Kept as saved, and written back unchanged.`)
-        return PropertyId, nil, Consumed, Slice(Buf, Offset + IdRead, ValueRead)
+        return PropertyId, nil, Consumed, Slice(Buf, Offset, Consumed)
     end
 
     -- The registry changed type since the save. The bytes were still read
@@ -1213,7 +1326,31 @@ const function ReadProperty(Buf: buffer, Offset: number): (PropertyTypes.Propert
         return nil, nil, Consumed
     end
 
+    -- The same, one level down: a Table whose items were written as a type
+    -- other than the one it holds now. An empty list has no item type and
+    -- fits any.
+    if Type == "Table" and ItemType then
+        const Of = (Registry :: any).Constraints and (Registry :: any).Constraints.Of
+        if ItemType ~= Of then
+            Logger:Warn(`Property {PropertyId} was saved as a Table of {ItemType} but holds {tostring(Of)} now. Skipping.`)
+            return nil, nil, Consumed
+        end
+    end
+
     return PropertyId, Value, Consumed
+end
+
+const function ReadProperty(Buf: buffer, Offset: number): (PropertyTypes.PropertyIdentifier?, any?, number, buffer?)
+    const PropertyId, IdRead = Varint.Read(Buf, Offset)
+    const Id, Value, ValueRead, Raw = ReadTagged(PropertyId, Buf, Offset + IdRead)
+    return Id, Value, IdRead + ValueRead, Raw
+end
+
+-- How many bytes the tagged value at Offset takes, tag included, read from its
+-- wire shape alone.
+const function TaggedLength(Buf: buffer, Offset: number): number
+    const Wire = SplitTag(buffer.readu8(Buf, Offset))
+    return 1 + SkipValue(Buf, Offset + 1, Wire)
 end
 
 const function Concat(Header: string, Prefix: buffer, Buffers: {buffer}, Size: number): buffer
@@ -1251,50 +1388,34 @@ end
 -- WithUnknown writes the records the object is keeping without understanding
 -- them (see DecompressedObject.Unknown). A save wants them; replication does
 -- not -- a client has no more use for them than the server did.
-function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject, WithUnknown: boolean?): buffer
-    local Size = 0
-    local Count = 0
-    const Buffers = {}
-    const IsDecompressed = (Obj :: any).__type == "DecompressedObject"
-    const Unknown: {[number]: buffer}? = if WithUnknown then (Obj :: any).Unknown else nil
-
-    -- Walked in id order rather than hash order, so the same object always
-    -- produces the same bytes. Hash order meant two identical objects serialized
-    -- differently, which rules out hashing, diffing or deduplicating saves.
+const function SortedKeys(Map: {[number]: any}): {number}
     const Keys = {}
-    for Key in (Obj :: any).Properties do
+    for Key in Map do
         table.insert(Keys, Key)
     end
+
+    table.sort(Keys)
+    return Keys
+end
+
+-- An object's values as tagged bytes, by property id.
+const function ToRaw(Obj: ObjectTypes.Object | DecompressedObject, WithUnknown: boolean?): RawObject
+    const Fields = {}
+    const IsDecompressed = (Obj :: any).__type == "DecompressedObject"
+    const Unknown: {[number]: buffer}? = if WithUnknown then (Obj :: any).Unknown else nil
 
     -- A value the object carries wins over one it is keeping for the same id:
     -- the property has come back since, and what it holds now is the answer.
     if Unknown then
-        for Key in Unknown do
+        for Key, Raw in Unknown do
             if (Obj :: any).Properties[Key] == nil then
-                table.insert(Keys, Key)
+                Fields[Key] = Raw
             end
         end
     end
 
-    table.sort(Keys)
-
-    for _, Key in Keys do
-        const Entry = (Obj :: any).Properties[Key]
-
-        if Entry == nil and Unknown then
-            const Raw = Unknown[Key]
-            const IdSize = Varint.Measure(Key)
-            const Header = buffer.create(IdSize)
-            Varint.Write(Header, 0, Key)
-
-            table.insert(Buffers, Header)
-            table.insert(Buffers, Raw)
-            Size += IdSize + buffer.len(Raw)
-            Count += 1
-            continue
-        end
-
-        local Id, Type, Value
+    for Key, Entry in (Obj :: any).Properties do
+        local Id, Type, Value, Constraints
 
         if IsDecompressed then
             const Registry = Properties:GetRegistry(Key)
@@ -1303,35 +1424,64 @@ function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject,
                 continue
             end
 
-            Id, Type, Value = Key, Registry.Type, Entry
+            Id, Type, Value, Constraints = Key, Registry.Type, Entry, Registry.Constraints
         else
-            Id, Type, Value = Entry.Parent, Entry.Type, Entry.Value
+            Id, Type, Value, Constraints = Entry.Parent, Entry.Type, Entry.Value, Entry.Constraints
         end
 
-        const Written = WriteProperty(Buffers, Id, Type, Value)
-        if Written > 0 then
-            Size += Written
-            Count += 1
+        const Tagged = Compressor:CompressValue(Type, Value, Constraints)
+        if Tagged then
+            Fields[Id] = Tagged
         end
     end
 
-    const LocalId = if IsDecompressed
-        then (Obj :: DecompressedObject).LocalId
-        else (Obj :: ObjectTypes.Object).LocalId
+    return {
+        __type = "RawObject",
+        LocalId = if IsDecompressed
+            then (Obj :: DecompressedObject).LocalId
+            else (Obj :: ObjectTypes.Object).LocalId,
+        Registry = Obj.Registry,
+        Fields = Fields,
+    }
+end
+
+const function WriteRecord(Raw: RawObject): buffer
+    local Size = 0
+    local Count = 0
+    const Buffers = {}
+
+    -- Walked in id order rather than hash order, so the same object always
+    -- produces the same bytes. Hash order meant two identical objects serialized
+    -- differently, which rules out hashing, diffing or deduplicating saves.
+    for _, Key in SortedKeys(Raw.Fields) do
+        const Tagged = Raw.Fields[Key]
+        const IdSize = Varint.Measure(Key)
+        const Header = buffer.create(IdSize)
+        Varint.Write(Header, 0, Key)
+
+        table.insert(Buffers, Header)
+        table.insert(Buffers, Tagged)
+        Size += IdSize + buffer.len(Tagged)
+        Count += 1
+    end
 
     const PrefixSize = Varint.Measure(FORMAT_VERSION)
-        + Varint.Measure(Obj.Registry)
-        + Varint.Measure(LocalId)
+        + Varint.Measure(Raw.Registry)
+        + Varint.Measure(Raw.LocalId)
         + Varint.Measure(Count)
 
     const Prefix = buffer.create(PrefixSize)
 
     local At = Varint.Write(Prefix, 0, FORMAT_VERSION)
-    At += Varint.Write(Prefix, At, Obj.Registry)
-    At += Varint.Write(Prefix, At, LocalId)
+    At += Varint.Write(Prefix, At, Raw.Registry)
+    At += Varint.Write(Prefix, At, Raw.LocalId)
     Varint.Write(Prefix, At, Count)
 
     return Concat(OBJECT_HEADER, Prefix, Buffers, Size)
+end
+
+function Compressor:CompressObject(Obj: ObjectTypes.Object | DecompressedObject, WithUnknown: boolean?): buffer
+    return WriteRecord(ToRaw(Obj, WithUnknown))
 end
 
 function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
@@ -1359,7 +1509,6 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
         LocalId = LocalId,
         Registry = TypeId,
         Properties = {},
-        Source = CompressedObj,
     }
 
     for _ = 1, Count do
@@ -1383,206 +1532,929 @@ function Compressor:DecompressObject(CompressedObj: buffer): DecompressedObject
 end
 
 --=============================================================================
--- Metadata
+-- Packs
 --=============================================================================
 
--- [/mh][varint id][varint saved][varint published][varint count][properties...]
--- The format version lives on the containing pack rather than on every record.
-function Compressor:CompressMetadata(Metadata: DatabaseTypes.Metadata): buffer
+-- [varint version][varint flags][varint last id][body]
+--
+-- Both packs that are stored -- a scene's objects and a database shard's
+-- records -- are written as this. LastId is what stops a scene reopening a
+-- local id after the object holding it is gone, and a database reusing a
+-- record id: without it, unload and load would restart the counter and the
+-- second object ever created would answer to the name the first one was saved
+-- under.
+--
+-- Written as one record per row -- every value beside its property id, and
+-- every value a row held, defaults included, since a property starts out
+-- holding its default -- a level of 20,000 blocks came to 4.5MB, past what one
+-- DataStore key holds. A pack writes the same values and drops the repetition:
+--
+--   body     [varint group count][group...]
+--   group    [varint key][varint column count][column...]
+--            [varint row count][u8 partial]
+--            [varint id step...]                       one per row
+--            [present bitmap...]                       one per column, if partial
+--            [written bitmap...]                       one per column
+--            [values...]                               column by column
+--   column   [varint id][u8 encoding][tagged default][encoding's own]
+--
+-- Rows are grouped -- objects by type, records by the properties they carry --
+-- and a group's properties are written once as columns rather than once per
+-- row. A column says, one bit a row, which rows hold something other than the
+-- column's default, and writes only those. A partial group has rows missing
+-- some of its columns -- an object read from a save made before a property was
+-- added -- and says, one bit a row, which rows have each column.
+--
+-- Everything is column by column, the bitmaps and the values alike, rather than
+-- row by row. The bytes a pack is made of then come in long runs of the same
+-- kind -- every position, then every material -- which is what zstd finds
+-- repetition in.
+--
+-- The default is the pack's own, not the registry's: whatever value the column
+-- holds most often in this pack, written into the pack. A developer changing a
+-- property's default afterwards changes nothing about what is already saved,
+-- because nothing about the pack ever pointed at the registry. Every row reads
+-- back holding exactly the values it was written with.
+--
+-- A column writes its values in whichever of these is smallest for it:
+--
+--   raw      each value tagged, exactly as a record would hold it. What every
+--            column can fall back to, and what keeps a pack readable with no
+--            registry: a column of a type this build has never heard of is
+--            still a list of tagged values it can step over.
+--   bool     nothing: the written bit is the value. Only for a column holding
+--            Bools and nothing else.
+--   palette  [varint count][tagged value...] after the default, then one
+--            varint index per value. Materials, enums, mesh ids, colours: the
+--            columns a level repeats a handful of values across.
+--   grid     [varint scale] after the default, then each Vector as three signed
+--            varints of its components times the scale. Building games snap to
+--            a grid, so a position or a size is usually a few small integers
+--            rather than twelve bytes of float. A Vector off the grid escapes to
+--            its twelve bytes, so the column never refuses a value.
+--
+-- Whole, the body is then compressed with zstd when that comes out smaller,
+-- which flag 1 records. Most of what is left is a level repeating itself in
+-- ways no column can see, and zstd does see them.
+
+const PACK_COMPRESSED = 1
+const PACK_FLAGS = PACK_COMPRESSED
+
+-- How far a pack may unpack. A client can push a pack, and a few bytes of zstd
+-- can claim a gigabyte.
+const MAX_UNPACKED_SIZE = 64 * 1024 * 1024
+
+-- A scene is written when somebody saves, and its body is small by the time
+-- zstd sees it: 19 took 70ms over 11ms for 9 on a 35,000 object level, and came
+-- out 8% smaller. A shard is rewritten whole on every record created in it,
+-- inside an UpdateAsync transform, where 19 cost 680ms a write.
+const SCENE_COMPRESSION_LEVEL = 19
+const METADATA_COMPRESSION_LEVEL = 9
+
+const COLUMN_RAW = 0
+const COLUMN_BOOL = 1
+const COLUMN_PALETTE = 2
+const COLUMN_GRID = 3
+
+-- Steps a grid column may snap to, smallest first so that a tie goes to the
+-- smaller integers.
+const GRID_SCALES = {1, 2, 4, 5, 8, 10, 16, 20, 100, 1000}
+
+-- Past this a component is not a grid position in any sense that matters, and
+-- times a scale it would leave the varint's range.
+const GRID_LIMIT = 2 ^ 40
+
+const BOOL_FALSE = Compressor:CompressValue("Bool", false) :: buffer
+const BOOL_TRUE = Compressor:CompressValue("Bool", true) :: buffer
+const BOOL_FALSE_KEY = buffer.tostring(BOOL_FALSE)
+const BOOL_TRUE_KEY = buffer.tostring(BOOL_TRUE)
+const VECTOR_TAG = MakeTag(WIRE_FIXED12, PropertyTypes:GetTypeId("Vector") :: number)
+
+-- A buffer that grows as it is written, so a pack is built in one place rather
+-- than as thousands of pieces glued together at the end.
+type Writer = {Buf: buffer, At: number}
+
+const function NewWriter(): Writer
+    return {Buf = buffer.create(256), At = 0}
+end
+
+const function Reserve(W: Writer, Size: number)
+    const Need = W.At + Size
+    const Length = buffer.len(W.Buf)
+    if Need <= Length then
+        return
+    end
+
+    const Grown = buffer.create(math.max(Length * 2, Need))
+    buffer.copy(Grown, 0, W.Buf, 0, W.At)
+    W.Buf = Grown
+end
+
+const function PutU8(W: Writer, Value: number)
+    Reserve(W, 1)
+    buffer.writeu8(W.Buf, W.At, Value)
+    W.At += 1
+end
+
+const function PutVarint(W: Writer, Value: number)
+    Reserve(W, Varint.Measure(Value))
+    W.At += Varint.Write(W.Buf, W.At, Value)
+end
+
+const function PutSigned(W: Writer, Value: number)
+    Reserve(W, Varint.MeasureSigned(Value))
+    W.At += Varint.WriteSigned(W.Buf, W.At, Value)
+end
+
+const function PutBuffer(W: Writer, Part: buffer, Offset: number?, Length: number?)
+    const From = Offset or 0
+    const Size = Length or (buffer.len(Part) - From)
+    Reserve(W, Size)
+    buffer.copy(W.Buf, W.At, Part, From, Size)
+    W.At += Size
+end
+
+const function Finish(W: Writer): buffer
+    const Out = buffer.create(W.At)
+    buffer.copy(Out, 0, W.Buf, 0, W.At)
+    return Out
+end
+
+-- Whether a Vector's components all land on the grid. Exact or nothing, to the
+-- bit: a component read back from the grid has to be the same float the record
+-- held, or a save would move things by a rounding error every time. A -0 is
+-- off the grid for that reason, since the integer it scales to has no sign.
+const function FitsGrid(Tagged: buffer, Scale: number): boolean
+    for Index = 0, 2 do
+        const Component = buffer.readf32(Tagged, 1 + Index * 4)
+        const Scaled = math.round(Component * Scale)
+        if math.abs(Scaled) > GRID_LIMIT then
+            return false
+        end
+
+        buffer.writef32(Probe, 0, Scaled / Scale)
+        if buffer.readu32(Probe, 0) ~= buffer.readu32(Tagged, 1 + Index * 4) then
+            return false
+        end
+    end
+
+    return true
+end
+
+const function GridSize(Tagged: buffer, Scale: number): number
+    if not FitsGrid(Tagged, Scale) then
+        return 1 + 12
+    end
+
     local Size = 0
-    local Count = 0
-    const Buffers = {}
-
-    for Index, Prop in Metadata do
-        if type(Index) ~= "number" then
-            continue
-        end
-
-        const Written = WriteProperty(Buffers, Prop.Parent, Prop.Type, Prop.Value)
-        if Written > 0 then
-            Size += Written
-            Count += 1
-        end
+    for Index = 0, 2 do
+        const Scaled = math.round(buffer.readf32(Tagged, 1 + Index * 4) * Scale)
+        Size += if Index == 0
+            then Varint.Measure(Varint.Zigzag(Scaled) * 2)
+            else Varint.MeasureSigned(Scaled)
     end
 
-    const PrefixSize = Varint.Measure(Metadata.Id)
-        + Varint.Measure(Metadata.SavedVersion)
-        + Varint.Measure(Metadata.PublishedVersion)
-        + Varint.Measure(Count)
-
-    const Prefix = buffer.create(PrefixSize)
-    local At = Varint.Write(Prefix, 0, Metadata.Id)
-    At += Varint.Write(Prefix, At, Metadata.SavedVersion)
-    At += Varint.Write(Prefix, At, Metadata.PublishedVersion)
-    Varint.Write(Prefix, At, Count)
-
-    return Concat(METADATA_HEADER, Prefix, Buffers, Size)
+    return Size
 end
 
-function Compressor:DecompressMetadata(CompressedMetadata: buffer): DatabaseTypes.Metadata
-    if buffer.readstring(CompressedMetadata, 0, #METADATA_HEADER) ~= METADATA_HEADER then
-        Logger:Error("Tried to decompress invalid metadata buffer.")
+-- The first component carries the escape: an even varint is the component
+-- zigzagged and doubled, and a 1 means the twelve raw bytes follow instead.
+const function PutGrid(W: Writer, Tagged: buffer, Scale: number)
+    if not FitsGrid(Tagged, Scale) then
+        PutVarint(W, 1)
+        PutBuffer(W, Tagged, 1, 12)
+        return
     end
 
-    local Offset = #METADATA_HEADER
+    for Index = 0, 2 do
+        const Scaled = math.round(buffer.readf32(Tagged, 1 + Index * 4) * Scale)
+        if Index == 0 then
+            PutVarint(W, Varint.Zigzag(Scaled) * 2)
+        else
+            PutSigned(W, Scaled)
+        end
+    end
+end
 
-    const Id, IdRead = Varint.Read(CompressedMetadata, Offset)
-    Offset += IdRead
+type Column = {
+    Id: number,
+    Encoding: number,
+    Default: string,
+    Palette: {[string]: number}?,
+    Scale: number?,
+}
 
-    const Saved, SavedRead = Varint.Read(CompressedMetadata, Offset)
-    Offset += SavedRead
-
-    const Published, PublishedRead = Varint.Read(CompressedMetadata, Offset)
-    Offset += PublishedRead
-
-    const Count, CountRead = Varint.Read(CompressedMetadata, Offset)
-    Offset += CountRead
-
-    const Metadata = {
-        Id = Id,
-        SavedVersion = Saved,
-        PublishedVersion = Published,
-    }
-
-    for _ = 1, Count do
-        const PropertyId, Value, Consumed, Raw = ReadProperty(CompressedMetadata, Offset)
-        Offset += Consumed
-
-        -- Metadata does not keep what it cannot place. It is a database's own
-        -- bookkeeping rather than anybody's level, and has nowhere to hold it.
-        if PropertyId and not Raw then
-            const Prop = Properties.new(PropertyId)
-            Prop:Set(Value)
-            table.insert(Metadata, Prop)
+-- Decides how one column is written, from every value it holds in this pack.
+-- Values is by row, nil where a row does not carry the column.
+const function PlanColumn(Id: number, Values: {[number]: string}, Rows: number): Column
+    const Counts: {[string]: number} = {}
+    for Row = 1, Rows do
+        const Key = Values[Row]
+        if Key then
+            Counts[Key] = (Counts[Key] or 0) + 1
         end
     end
 
-    return Metadata :: any
+    -- Most common first, then by the bytes themselves, so the same column
+    -- always plans the same way and the same rows write the same pack.
+    const Distinct = {}
+    for Key in Counts do
+        table.insert(Distinct, Key)
+    end
+
+    table.sort(Distinct, function(A, B)
+        if Counts[A] ~= Counts[B] then
+            return Counts[A] > Counts[B]
+        end
+
+        return A < B
+    end)
+
+    const Default = Distinct[1]
+
+    local IsBool = true
+    for _, Key in Distinct do
+        if Key ~= BOOL_FALSE_KEY and Key ~= BOOL_TRUE_KEY then
+            IsBool = false
+            break
+        end
+    end
+
+    if IsBool then
+        return {Id = Id, Encoding = COLUMN_BOOL, Default = Default}
+    end
+
+    -- What each encoding would cost for the values that are not the default.
+    local Raw = 0
+    local Palette = Varint.Measure(#Distinct - 1)
+    const Index: {[string]: number} = {}
+
+    for Position = 2, #Distinct do
+        const Key = Distinct[Position]
+        Index[Key] = Position - 1
+        Palette += #Key
+        Raw += #Key * Counts[Key]
+        Palette += Varint.Measure(Position - 1) * Counts[Key]
+    end
+
+    local Grid = math.huge
+    local Scale = nil
+
+    local IsVector = true
+    for Position = 2, #Distinct do
+        if string.byte(Distinct[Position], 1) ~= VECTOR_TAG or #Distinct[Position] ~= 13 then
+            IsVector = false
+            break
+        end
+    end
+
+    if IsVector and #Distinct > 1 then
+        for _, Candidate in GRID_SCALES do
+            local Size = Varint.Measure(Candidate)
+            for Position = 2, #Distinct do
+                const Key = Distinct[Position]
+                Size += GridSize(buffer.fromstring(Key), Candidate) * Counts[Key]
+            end
+
+            if Size < Grid then
+                Grid, Scale = Size, Candidate
+            end
+        end
+    end
+
+    if Grid < Raw and Grid <= Palette then
+        return {Id = Id, Encoding = COLUMN_GRID, Default = Default, Scale = Scale}
+    elseif Palette < Raw then
+        return {Id = Id, Encoding = COLUMN_PALETTE, Default = Default, Palette = Index}
+    end
+
+    return {Id = Id, Encoding = COLUMN_RAW, Default = Default}
 end
 
---=============================================================================
--- Packing
---=============================================================================
+const function WriteColumn(W: Writer, Plan: Column)
+    PutVarint(W, Plan.Id)
+    PutU8(W, Plan.Encoding)
+    PutBuffer(W, buffer.fromstring(Plan.Default))
 
--- [/ph][varint count][[varint length][bytes]...]
-function Compressor:PackBuffers(Buffers: {buffer}): buffer
-    local Size = 0
-    for _, Part in Buffers do
-        const Length = buffer.len(Part)
-        Size += Varint.Measure(Length) + Length
+    if Plan.Encoding == COLUMN_PALETTE then
+        const Palette = Plan.Palette :: {[string]: number}
+        const Ordered = {}
+        for Key, Position in Palette do
+            Ordered[Position] = Key
+        end
+
+        PutVarint(W, #Ordered)
+        for _, Key in Ordered do
+            PutBuffer(W, buffer.fromstring(Key))
+        end
+    elseif Plan.Encoding == COLUMN_GRID then
+        PutVarint(W, Plan.Scale :: number)
     end
-
-    const CountSize = Varint.Measure(#Buffers)
-    const Pack = buffer.create(#PACK_HEADER + CountSize + Size)
-    buffer.writestring(Pack, 0, PACK_HEADER)
-    Varint.Write(Pack, #PACK_HEADER, #Buffers)
-
-    local Offset = #PACK_HEADER + CountSize
-    for _, Part in Buffers do
-        const Length = buffer.len(Part)
-        Offset += Varint.Write(Pack, Offset, Length)
-        buffer.copy(Pack, Offset, Part, 0)
-        Offset += Length
-    end
-
-    return Pack
 end
 
-function Compressor:UnpackBuffers(PackedBuffers: buffer, Offset: number?): {buffer}
-    local At = Offset or 0
-    if buffer.readstring(PackedBuffers, At, #PACK_HEADER) ~= PACK_HEADER then
-        Logger:Error("Tried to unpack invalid buffer pack.")
+const function WriteValue(W: Writer, Plan: Column, Key: string)
+    if Plan.Encoding == COLUMN_RAW then
+        PutBuffer(W, buffer.fromstring(Key))
+    elseif Plan.Encoding == COLUMN_PALETTE then
+        PutVarint(W, (Plan.Palette :: {[string]: number})[Key])
+    elseif Plan.Encoding == COLUMN_GRID then
+        PutGrid(W, buffer.fromstring(Key), Plan.Scale :: number)
     end
 
-    At += #PACK_HEADER
+    -- A bool column writes nothing: the written bit already said it.
+end
 
-    const Count, CountRead = Varint.Read(PackedBuffers, At)
-    At += CountRead
+const function PutBitmap(W: Writer, Bits: {boolean}, Count: number)
+    for Start = 1, Count, 8 do
+        local Byte = 0
+        for Bit = 0, math.min(7, Count - Start) do
+            if Bits[Start + Bit] then
+                Byte = bit32.bor(Byte, bit32.lshift(1, Bit))
+            end
+        end
 
-    const Unpacked = table.create(Count)
+        PutU8(W, Byte)
+    end
+end
+
+-- One group: its rows, and the column ids to write them under in that order.
+type Group = {Key: number, Rows: {RawObject}, Order: {number}}
+
+const function WriteGroup(W: Writer, Group: Group)
+    const Rows = Group.Rows
+    const Order = Group.Order
+
+    table.sort(Rows, function(A, B)
+        return A.LocalId < B.LocalId
+    end)
+
+    const Plans: {Column} = table.create(#Order)
+    const Keys: {{[number]: string}} = table.create(#Order)
+    local Partial = false
+
+    for Index, Id in Order do
+        const Values = {}
+        for Row, Raw in Rows do
+            const Tagged = Raw.Fields[Id]
+            if Tagged then
+                Values[Row] = buffer.tostring(Tagged)
+            else
+                Partial = true
+            end
+        end
+
+        Keys[Index] = Values
+        Plans[Index] = PlanColumn(Id, Values, #Rows)
+    end
+
+    PutVarint(W, Group.Key)
+    PutVarint(W, #Order)
+    for _, Plan in Plans do
+        WriteColumn(W, Plan)
+    end
+
+    PutVarint(W, #Rows)
+    PutU8(W, if Partial then 1 else 0)
+
+    local Previous = 0
+    for _, Raw in Rows do
+        PutVarint(W, Raw.LocalId - Previous)
+        Previous = Raw.LocalId
+    end
+
+    const Bits = table.create(#Rows)
+
+    if Partial then
+        for Index in Order do
+            for Row = 1, #Rows do
+                Bits[Row] = Keys[Index][Row] ~= nil
+            end
+
+            PutBitmap(W, Bits, #Rows)
+        end
+    end
+
+    for Index, Plan in Plans do
+        for Row = 1, #Rows do
+            const Key = Keys[Index][Row]
+            Bits[Row] = Key ~= nil and Key ~= Plan.Default
+        end
+
+        PutBitmap(W, Bits, #Rows)
+    end
+
+    for Index, Plan in Plans do
+        for Row = 1, #Rows do
+            const Key = Keys[Index][Row]
+            if Key ~= nil and Key ~= Plan.Default then
+                WriteValue(W, Plan, Key)
+            end
+        end
+    end
+end
+
+-- The header, then the body -- compressed when that makes it smaller. Kept only
+-- when it is: a pack of a few rows comes out larger under zstd than without
+-- it, and a build that cannot compress at all still writes a pack every build
+-- can read.
+const function WritePack(LastId: number, Groups: {Group}, Level: number): (buffer, number)
+    const Body = NewWriter()
+    PutVarint(Body, #Groups)
+    for _, Group in Groups do
+        WriteGroup(Body, Group)
+    end
+
+    local Payload = Finish(Body)
+    const Size = buffer.len(Payload)
+    local Flags = 0
+
+    const Ok, Compressed = pcall(function()
+        return EncodingService:CompressBuffer(Payload, Enum.CompressionAlgorithm.Zstd, Level)
+    end)
+
+    if Ok and buffer.len(Compressed) < Size then
+        Payload = Compressed
+        Flags += PACK_COMPRESSED
+    end
+
+    const Out = NewWriter()
+    PutVarint(Out, FORMAT_VERSION)
+    PutVarint(Out, Flags)
+    PutVarint(Out, LastId)
+    PutBuffer(Out, Payload)
+    return Finish(Out), Size
+end
+
+const function ReadBitmap(Buf: buffer, Offset: number, Count: number, Into: {boolean}): number
     for Index = 1, Count do
-        const Length, LengthRead = Varint.Read(PackedBuffers, At)
-        At += LengthRead
-
-        const Slice = buffer.create(Length)
-        buffer.copy(Slice, 0, PackedBuffers, At, Length)
-        Unpacked[Index] = Slice
-        At += Length
+        const Byte = buffer.readu8(Buf, Offset + (Index - 1) // 8)
+        Into[Index] = bit32.extract(Byte, (Index - 1) % 8) == 1
     end
 
-    return Unpacked
+    return (Count + 7) // 8
 end
 
--- [varint version][varint last id][pack of metadata buffers]
-function Compressor:CompressMetadatas(LastId: number, Metadatas: {DatabaseTypes.Metadata}): buffer
-    const Compressed = table.create(#Metadatas)
-    for Index, Metadata in Metadatas do
-        Compressed[Index] = Compressor:CompressMetadata(Metadata)
+-- A count read from the pack, refused when it claims more entries than there
+-- are bytes left for. Every entry takes at least one, and a count past that is
+-- a lie a table would otherwise be allocated for.
+const function ReadCount(Buf: buffer, Offset: number): (number, number)
+    const Count, Read = Varint.Read(Buf, Offset)
+    if Count > buffer.len(Buf) - Offset - Read then
+        Logger:Error(`A pack claims {Count} entries at offset {Offset} with fewer bytes left.`)
     end
 
-    const Packed = Compressor:PackBuffers(Compressed)
-    const PrefixSize = Varint.Measure(FORMAT_VERSION) + Varint.Measure(LastId)
+    return Count, Read
+end
 
-    const Result = buffer.create(PrefixSize + buffer.len(Packed))
-    const At = Varint.Write(Result, 0, FORMAT_VERSION)
-    Varint.Write(Result, At, LastId)
-    buffer.copy(Result, PrefixSize, Packed, 0)
-    return Result
+type ReadColumn = {
+    Id: number,
+    Encoding: number,
+    Default: buffer,
+    Other: buffer?,
+    Palette: {buffer}?,
+    Scale: number?,
+}
+
+-- Shared is every buffer the column hands to more than one row -- its default,
+-- its palette -- which the caller decodes once rather than once per row.
+const function ReadColumnHeader(Buf: buffer, Offset: number, Shared: {[buffer]: true}): (ReadColumn, number)
+    local At = Offset
+
+    const Id, IdRead = Varint.Read(Buf, At)
+    At += IdRead
+
+    const Encoding = buffer.readu8(Buf, At)
+    At += 1
+
+    const DefaultLength = TaggedLength(Buf, At)
+    const Default = Slice(Buf, At, DefaultLength)
+    At += DefaultLength
+
+    const Column: ReadColumn = {Id = Id, Encoding = Encoding, Default = Default}
+    Shared[Default] = true
+
+    if Encoding == COLUMN_BOOL then
+        const Key = buffer.tostring(Default)
+        if Key ~= BOOL_FALSE_KEY and Key ~= BOOL_TRUE_KEY then
+            Logger:Error(`Bool column {Id} has a default that is not a Bool.`)
+        end
+
+        const Other = buffer.fromstring(if Key == BOOL_FALSE_KEY then BOOL_TRUE_KEY else BOOL_FALSE_KEY)
+        Column.Other = Other
+        Shared[Other] = true
+    elseif Encoding == COLUMN_PALETTE then
+        const Count, CountRead = ReadCount(Buf, At)
+        At += CountRead
+
+        const Palette = table.create(Count)
+        for Index = 1, Count do
+            const Length = TaggedLength(Buf, At)
+            Palette[Index] = Slice(Buf, At, Length)
+            Shared[Palette[Index]] = true
+            At += Length
+        end
+
+        Column.Palette = Palette
+    elseif Encoding == COLUMN_GRID then
+        const Scale, ScaleRead = Varint.Read(Buf, At)
+        At += ScaleRead
+
+        if Scale == 0 then
+            Logger:Error(`Grid column {Id} has a scale of 0.`)
+        end
+
+        Column.Scale = Scale
+    elseif Encoding ~= COLUMN_RAW then
+        Logger:Error(`Column {Id} is written in encoding {Encoding}, which this build does not know.`)
+    end
+
+    return Column, At - Offset
+end
+
+const function ReadGrid(Buf: buffer, Offset: number, Scale: number): (buffer, number)
+    const Tagged = buffer.create(13)
+    buffer.writeu8(Tagged, 0, VECTOR_TAG)
+
+    const First, FirstRead = Varint.Read(Buf, Offset)
+    if First == 1 then
+        buffer.copy(Tagged, 1, Buf, Offset + FirstRead, 12)
+        return Tagged, FirstRead + 12
+    end
+
+    if First % 2 == 1 then
+        Logger:Error(`Malformed grid value at offset {Offset}.`)
+    end
+
+    local At = Offset + FirstRead
+    buffer.writef32(Tagged, 1, Varint.Unzigzag(First // 2) / Scale)
+
+    for Index = 1, 2 do
+        const Scaled, Read = Varint.ReadSigned(Buf, At)
+        At += Read
+        buffer.writef32(Tagged, 1 + Index * 4, Scaled / Scale)
+    end
+
+    return Tagged, At - Offset
+end
+
+-- A row as the pack holds it: the group's key, its id, its tagged values by
+-- column id, and the column ids in the order the group wrote them.
+type OnRow = (Key: number, LocalId: number, Fields: {[number]: buffer}, Order: {number}, Shared: {[buffer]: true}) -> ()
+
+-- Reads a pack's header and body, handing each row to OnRow. Returns
+-- the pack's LastId.
+const function ReadPack(Pack: buffer, Offset: number, Each: OnRow): number
+    local At = Offset
+
+    const Flags, FlagsRead = Varint.Read(Pack, At)
+    At += FlagsRead
+
+    if Flags ~= bit32.band(Flags, PACK_FLAGS) then
+        Logger:Error(`Pack carries flags {Flags}, some of which this build does not know.`)
+    end
+
+    const LastId, LastIdRead = Varint.Read(Pack, At)
+    At += LastIdRead
+
+    local Buf = Slice(Pack, At, buffer.len(Pack) - At)
+    if bit32.band(Flags, PACK_COMPRESSED) ~= 0 then
+        -- Asked before unpacking rather than after. The size is in the zstd
+        -- frame, and unpacking refuses a frame that does not have one.
+        const Size = EncodingService:GetDecompressedBufferSize(Buf, Enum.CompressionAlgorithm.Zstd)
+        if not Size or Size > MAX_UNPACKED_SIZE then
+            Logger:Error(`Pack unpacks to {tostring(Size)} bytes; at most {MAX_UNPACKED_SIZE} are read.`)
+        end
+
+        Buf = EncodingService:DecompressBuffer(Buf, Enum.CompressionAlgorithm.Zstd)
+    end
+
+    At = 0
+    const Shared: {[buffer]: true} = {}
+
+    const GroupCount, GroupCountRead = ReadCount(Buf, At)
+    At += GroupCountRead
+
+    for _ = 1, GroupCount do
+        const Key, KeyRead = Varint.Read(Buf, At)
+        At += KeyRead
+
+        const ColumnCount, ColumnCountRead = ReadCount(Buf, At)
+        At += ColumnCountRead
+
+        const Columns: {ReadColumn} = table.create(ColumnCount)
+        const Order: {number} = table.create(ColumnCount)
+        for Index = 1, ColumnCount do
+            const Column, Read = ReadColumnHeader(Buf, At, Shared)
+            Columns[Index] = Column
+            Order[Index] = Column.Id
+            At += Read
+        end
+
+        const RowCount, RowCountRead = ReadCount(Buf, At)
+        At += RowCountRead
+
+        const Partial = buffer.readu8(Buf, At) == 1
+        At += 1
+
+        const Ids: {number} = table.create(RowCount)
+        const Rows: {{[number]: buffer}} = table.create(RowCount)
+        local Previous = 0
+        for Row = 1, RowCount do
+            const Step, StepRead = Varint.Read(Buf, At)
+            At += StepRead
+
+            Previous += Step
+            Ids[Row] = Previous
+            Rows[Row] = {}
+        end
+
+        -- Left empty when no row is missing a column, which is nearly always.
+        const Present: {{boolean}} = {}
+        if Partial then
+            for Index = 1, ColumnCount do
+                const Bits = table.create(RowCount)
+                At += ReadBitmap(Buf, At, RowCount, Bits)
+                Present[Index] = Bits
+            end
+        end
+
+        const Written: {{boolean}} = table.create(ColumnCount)
+        for Index = 1, ColumnCount do
+            const Bits = table.create(RowCount)
+            At += ReadBitmap(Buf, At, RowCount, Bits)
+            Written[Index] = Bits
+        end
+
+        for Index, Column in Columns do
+            const Has, Wrote = Present[Index], Written[Index]
+
+            for Row = 1, RowCount do
+                if Has and not Has[Row] then
+                    continue
+                end
+
+                local Tagged: buffer
+
+                if not Wrote[Row] then
+                    Tagged = Column.Default
+                elseif Column.Encoding == COLUMN_BOOL then
+                    Tagged = Column.Other :: buffer
+                elseif Column.Encoding == COLUMN_PALETTE then
+                    const Position, Read = Varint.Read(Buf, At)
+                    At += Read
+
+                    const Entry = (Column.Palette :: {buffer})[Position]
+                    if not Entry then
+                        Logger:Error(`Column {Column.Id} names palette entry {Position}, which it does not have.`)
+                    end
+
+                    Tagged = Entry :: buffer
+                elseif Column.Encoding == COLUMN_GRID then
+                    const Value, Read = ReadGrid(Buf, At, Column.Scale :: number)
+                    At += Read
+                    Tagged = Value
+                else
+                    const Length = TaggedLength(Buf, At)
+                    Tagged = Slice(Buf, At, Length)
+                    At += Length
+                end
+
+                Rows[Row][Column.Id] = Tagged
+            end
+        end
+
+        for Row = 1, RowCount do
+            Each(Key, Ids[Row], Rows[Row], Order, Shared)
+        end
+    end
+
+    return LastId
+end
+
+-- A value read for the property it belongs to, decoded once when many rows
+-- share the same buffer.
+type Placed = {any}
+
+const function Decoder(): (PropertyTypes.PropertyIdentifier, buffer, {[buffer]: true}) -> (PropertyTypes.PropertyIdentifier?, any?, buffer?)
+    const Decoded: {[buffer]: Placed} = {}
+
+    return function(Id: PropertyTypes.PropertyIdentifier, Tagged: buffer, Shared: {[buffer]: true})
+        local Result = if Shared[Tagged] then Decoded[Tagged] else nil
+        if not Result then
+            const PropertyId, Value, _, Raw = ReadTagged(Id, Tagged, 0)
+            Result = {PropertyId, Value, Raw}
+            if Shared[Tagged] then
+                Decoded[Tagged] = Result
+            end
+        end
+
+        const Read = Result :: Placed
+        return Read[1], Read[2], Read[3]
+    end
+end
+
+--=============================================================================
+-- Metadata packs
+--=============================================================================
+
+-- A record's two version numbers ride as columns 0 and 1, and its properties as
+-- columns from 2 on, so a version can never be taken for a property. A group is
+-- every record carrying the same properties in the same order: a record's
+-- properties are read back by position as well as by id, and the order is the
+-- one a record was built in.
+const METADATA_SAVED = 0
+const METADATA_PUBLISHED = 1
+const METADATA_FIRST_PROPERTY = 2
+
+-- Returns the pack and the size of its body before compression, which is what a
+-- caller measures a shard by: rewriting it decodes and encodes all of that.
+function Compressor:CompressMetadatas(LastId: number, Metadatas: {DatabaseTypes.Metadata}): (buffer, number)
+    const Groups: {Group} = {}
+    const ByLayout: {[string]: Group} = {}
+
+    for _, Metadata in Metadatas do
+        const Fields = {
+            [METADATA_SAVED] = Compressor:CompressValue("Number", Metadata.SavedVersion) :: buffer,
+            [METADATA_PUBLISHED] = Compressor:CompressValue("Number", Metadata.PublishedVersion) :: buffer,
+        }
+
+        const Order = {METADATA_SAVED, METADATA_PUBLISHED}
+        for Index, Prop in Metadata do
+            if type(Index) ~= "number" then
+                continue
+            end
+
+            const Column = Prop.Parent + METADATA_FIRST_PROPERTY
+            if Fields[Column] then
+                Logger:Warn(`Record {Metadata.Id} carries property {Prop.Parent} twice. The second is not saved.`)
+                continue
+            end
+
+            const Tagged = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
+            if Tagged then
+                Fields[Column] = Tagged
+                table.insert(Order, Column)
+            end
+        end
+
+        const Layout = table.concat(Order, ",")
+        local Group = ByLayout[Layout]
+        if not Group then
+            const Made: Group = {Key = #Groups + 1, Rows = {}, Order = Order}
+            ByLayout[Layout] = Made
+            table.insert(Groups, Made)
+            Group = Made
+        end
+
+        table.insert(Group.Rows, {
+            __type = "RawObject",
+            LocalId = Metadata.Id,
+            Registry = 0,
+            Fields = Fields,
+        })
+    end
+
+    return WritePack(LastId, Groups, METADATA_COMPRESSION_LEVEL)
 end
 
 function Compressor:DecompressMetadatas(CompressedMetadatas: buffer): (number, {DatabaseTypes.Metadata})
     const Version, VersionRead = Varint.Read(CompressedMetadatas, 0)
     CheckVersion(Version, "Metadata pack")
 
-    const LastId, LastIdRead = Varint.Read(CompressedMetadatas, VersionRead)
-    const Metadatas = {}
+    const Metadatas: {DatabaseTypes.Metadata} = {}
+    const Decode = Decoder()
 
-    for _, Compressed in Compressor:UnpackBuffers(CompressedMetadatas, VersionRead + LastIdRead) do
-        table.insert(Metadatas, Compressor:DecompressMetadata(Compressed))
-    end
+    const LastId = ReadPack(CompressedMetadatas, VersionRead, function(_, Id, Fields, Order, Shared)
+        const Saved = Fields[METADATA_SAVED]
+        const Published = Fields[METADATA_PUBLISHED]
+
+        const Metadata: any = {
+            Id = Id,
+            SavedVersion = if Saved then Compressor:DecompressValue(Saved, 0) else 0,
+            PublishedVersion = if Published then Compressor:DecompressValue(Published, 0) else 0,
+        }
+
+        -- Metadata does not keep what it cannot place. It is a database's own
+        -- bookkeeping rather than anybody's level, and has nowhere to hold it.
+        for _, Column in Order do
+            const Tagged = Fields[Column]
+            if Column < METADATA_FIRST_PROPERTY or not Tagged then
+                continue
+            end
+
+            const PropertyId, Value, Raw = Decode(Column - METADATA_FIRST_PROPERTY, Tagged, Shared)
+            if PropertyId and not Raw then
+                -- Through any: Properties is the client's or the server's, and
+                -- the analyser will not call a union of the two.
+                const Prop = (Properties :: any).new(PropertyId)
+                Prop:Set(Value)
+                table.insert(Metadata, Prop)
+            end
+        end
+
+        table.insert(Metadatas, Metadata)
+    end)
+
+    -- In id order across groups: the order records were created in, which is
+    -- the order paging a shard relies on.
+    table.sort(Metadatas, function(A, B)
+        return A.Id < B.Id
+    end)
 
     return LastId, Metadatas
 end
 
 --=============================================================================
--- Scenes
+-- Scene packs
 --=============================================================================
 
--- [varint version][varint last id][pack of object buffers]
+-- Objects are grouped by type, the type's id the group's key, its columns in
+-- property id order.
 --
--- The same shape as a metadata pack, and for the same reason: LastId is what
--- stops a scene reopening a local id after the object holding it is gone.
--- Without it, unload and load would restart the counter and the second object
--- ever created would answer to the name the first one was saved under.
---
--- An entry that is already a buffer is an object record kept whole -- one whose
--- type this build does not have -- and goes back in exactly as it was read.
-function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object | DecompressedObject | buffer}): buffer
-    const Compressed = table.create(#Objects)
-    for Index, Obj in Objects do
-        Compressed[Index] = if type(Obj) == "buffer" then Obj else Compressor:CompressObject(Obj, true)
+-- A RawObject is an object kept whole -- one whose type this build does not
+-- have -- and goes back in exactly as it was read.
+function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object | DecompressedObject | RawObject}): buffer
+    const ByType: {[number]: {RawObject}} = {}
+    for _, Obj in Objects do
+        const Raw = if (Obj :: any).__type == "RawObject"
+            then Obj :: RawObject
+            else ToRaw(Obj :: any, true)
+
+        local Rows = ByType[Raw.Registry]
+        if not Rows then
+            Rows = {}
+            ByType[Raw.Registry] = Rows
+        end
+
+        table.insert(Rows :: {RawObject}, Raw)
     end
 
-    const Packed = Compressor:PackBuffers(Compressed)
-    const PrefixSize = Varint.Measure(FORMAT_VERSION) + Varint.Measure(LastId)
+    const Groups: {Group} = {}
+    for _, Registry in SortedKeys(ByType) do
+        const Rows = ByType[Registry]
+        const Ids: {[number]: true} = {}
+        for _, Raw in Rows do
+            for Id in Raw.Fields do
+                Ids[Id] = true
+            end
+        end
 
-    const Result = buffer.create(PrefixSize + buffer.len(Packed))
-    const At = Varint.Write(Result, 0, FORMAT_VERSION)
-    Varint.Write(Result, At, LastId)
-    buffer.copy(Result, PrefixSize, Packed, 0)
-    return Result
+        table.insert(Groups, {Key = Registry, Rows = Rows, Order = SortedKeys(Ids)})
+    end
+
+    const Pack = WritePack(LastId, Groups, SCENE_COMPRESSION_LEVEL)
+    return Pack
 end
 
 function Compressor:DecompressScene(CompressedScene: buffer): (number, {DecompressedObject})
     const Version, VersionRead = Varint.Read(CompressedScene, 0)
     CheckVersion(Version, "Scene pack")
 
-    const LastId, LastIdRead = Varint.Read(CompressedScene, VersionRead)
-    const Objects = {}
+    const Objects: {DecompressedObject} = {}
+    const Decode = Decoder()
 
-    for _, Compressed in Compressor:UnpackBuffers(CompressedScene, VersionRead + LastIdRead) do
-        table.insert(Objects, Compressor:DecompressObject(Compressed))
-    end
+    const LastId = ReadPack(CompressedScene, VersionRead, function(Registry, LocalId, Fields, Order, Shared)
+        const Obj: DecompressedObject = {
+            __type = "DecompressedObject",
+            LocalId = LocalId,
+            Registry = Registry,
+            Properties = {},
+            Source = {
+                __type = "RawObject",
+                LocalId = LocalId,
+                Registry = Registry,
+                Fields = Fields,
+            },
+        }
+
+        for _, Id in Order do
+            const Tagged = Fields[Id]
+            if not Tagged then
+                continue
+            end
+
+            const PropertyId, Value, Raw = Decode(Id, Tagged, Shared)
+            if Raw and PropertyId then
+                local Unknown = Obj.Unknown
+                if not Unknown then
+                    Unknown = {}
+                    Obj.Unknown = Unknown
+                end
+
+                (Unknown :: {[number]: buffer})[PropertyId] = Raw
+            elseif PropertyId then
+                Obj.Properties[PropertyId] = Value
+            end
+        end
+
+        table.insert(Objects, Obj)
+    end)
+
+    -- In local id order across types, which is the order a copy serializes
+    -- them in and the order a load builds them in.
+    table.sort(Objects, function(A, B)
+        return A.LocalId < B.LocalId
+    end)
 
     return LastId, Objects
 end
@@ -1641,7 +2513,7 @@ const function WriteValues(Buffers: {buffer}, Values: {[PropertyTypes.PropertyId
             Logger:Error(`Cannot write an operation carrying unregistered property id {Key}.`)
         end
 
-        const Written = WriteProperty(Buffers, Key, Registry.Type, Values[Key])
+        const Written = WriteProperty(Buffers, Key, Registry.Type, Values[Key], Registry.Constraints)
         if Written == 0 then
             Logger:Error(`Cannot write {Registry.Name} as a {Registry.Type}: the value it was given cannot be encoded.`)
         end
@@ -1673,10 +2545,23 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
             table.sort(Referenced)
         end
 
+        -- One operation index for an Object property. A Table of them writes a
+        -- zero first, which no operation index can be, then one entry per item:
+        -- the operation making that item's target, or zero for an item the
+        -- value already holds.
         local ReferenceSize = Varint.Measure(#Referenced)
         for _, PropertyId in Referenced do
+            const Names = (Operation.References :: any)[PropertyId]
             ReferenceSize += Varint.Measure(PropertyId)
-                + Varint.Measure((Operation.References :: any)[PropertyId])
+
+            if type(Names) == "table" then
+                ReferenceSize += 1 + Varint.Measure(#Names)
+                for _, Entry in Names do
+                    ReferenceSize += Varint.Measure(Entry)
+                end
+            else
+                ReferenceSize += Varint.Measure(Names)
+            end
         end
 
         const PrefixSize = 1
@@ -1697,8 +2582,18 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         const Tail = buffer.create(ReferenceSize)
         local Cursor = Varint.Write(Tail, 0, #Referenced)
         for _, PropertyId in Referenced do
+            const Names = (Operation.References :: any)[PropertyId]
             Cursor += Varint.Write(Tail, Cursor, PropertyId)
-            Cursor += Varint.Write(Tail, Cursor, (Operation.References :: any)[PropertyId])
+
+            if type(Names) == "table" then
+                Cursor += Varint.Write(Tail, Cursor, 0)
+                Cursor += Varint.Write(Tail, Cursor, #Names)
+                for _, Entry in Names do
+                    Cursor += Varint.Write(Tail, Cursor, Entry)
+                end
+            else
+                Cursor += Varint.Write(Tail, Cursor, Names)
+            end
         end
 
         table.insert(Buffers, Tail)
@@ -1710,7 +2605,7 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         end
 
         const Buffers = {}
-        const Size = WriteProperty(Buffers, Operation.Property, Registry.Type, Operation.Value)
+        const Size = WriteProperty(Buffers, Operation.Property, Registry.Type, Operation.Value, Registry.Constraints)
         if Size == 0 then
             Logger:Error(`Cannot write a set of {Registry.Name}: the value it was given cannot be encoded.`)
         end
@@ -1821,13 +2716,34 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
             const Referenced, ReferencedRead = Varint.Read(CompressedTransaction, Offset)
             Offset += ReferencedRead
 
-            local References: {[PropertyTypes.PropertyIdentifier]: number}? = nil
+            local References: {[PropertyTypes.PropertyIdentifier]: number | {number}}? = nil
             for _ = 1, Referenced do
                 const PropertyId, PropertyRead = Varint.Read(CompressedTransaction, Offset)
                 Offset += PropertyRead
 
-                const Operation, OperationRead = Varint.Read(CompressedTransaction, Offset)
+                local Operation: number | {number}, OperationRead = Varint.Read(CompressedTransaction, Offset)
                 Offset += OperationRead
+
+                -- A Table of references. Every entry takes at least a byte, so
+                -- a length past the bytes left is a lie, refused before a
+                -- list that long is allocated for it.
+                if Operation == 0 then
+                    const Length, LengthRead = Varint.Read(CompressedTransaction, Offset)
+                    Offset += LengthRead
+
+                    if Length > buffer.len(CompressedTransaction) - Offset then
+                        Logger:Error("A list of references claims more entries than the packet holds.")
+                    end
+
+                    const Entries = table.create(Length)
+                    for Index = 1, Length do
+                        const Entry, EntryRead = Varint.Read(CompressedTransaction, Offset)
+                        Offset += EntryRead
+                        Entries[Index] = Entry
+                    end
+
+                    Operation = Entries
+                end
 
                 -- Kept whatever the property turns out to be. Unlike a value,
                 -- which can be dropped and leave a readable record behind, a
@@ -1860,7 +2776,7 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
             -- receiver has to be told about: it decides whether the type the
             -- author wrote matches the property being set, and refuses the whole
             -- transaction when it does not.
-            const Value, ValueRead, Type = Compressor:DecompressValue(CompressedTransaction, Offset)
+            const Value, ValueRead, Type, ItemType = Compressor:DecompressValue(CompressedTransaction, Offset)
             Offset += ValueRead
 
             table.insert(Operations, {
@@ -1869,6 +2785,7 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
                 Property = Property,
                 Value = Value,
                 Type = Type,
+                ItemType = ItemType,
             })
         elseif Kind == TransactionTypes.Kinds.Destroy then
             const Target, TargetRead = Varint.Read(CompressedTransaction, Offset)
@@ -2152,9 +3069,18 @@ const DEFAULT_EXPIRATION = 90
 const DEFAULT_PAGE_SIZE = 50
 const ATTEMPTS = 5
 
--- DataStore caps a value at 4MB. Sealing at 3MB leaves room for the record that
--- crosses the line to still fit.
-const DEFAULT_SHARD_LIMIT = 3 * 1024 * 1024
+-- Measured before compression rather than as stored, and set by what a create
+-- costs rather than by what a key holds. A shard is decoded and encoded whole
+-- inside the UpdateAsync transform of every record created in it, and the
+-- transform cannot yield: a 20,000 record shard took about 0.8s to go round,
+-- and a shard filled to 3MB unpacked would hold 90,000 and stall the server
+-- for four seconds a create. 1MB is about 30,000 records and about the cost a
+-- create had before shards were compressed.
+--
+-- What is stored is a fraction of this -- a 20,000 record shard packed to
+-- 280KB -- and never more, since a pack keeps the uncompressed body whenever
+-- zstd would make it bigger, so the 4MB a DataStore value holds is never near.
+const DEFAULT_SHARD_LIMIT = 1024 * 1024
 
 -- MemoryStore caps a value at 32KB and base64 inflates by a third, so a page
 -- past this cannot be shared however many times it is retried.
@@ -2613,7 +3539,7 @@ const function __get<T>(self: Database<T>, CacheName: string, Page: number?): Pa
     -- Repopulate the shared tier, including on the bypass path: the data just
     -- came from the DataStore, so it is the freshest anyone has.
     const Ok, Encoded = pcall(function()
-        return Encoding.Encode(Compressor:CompressMetadatas(0, Result.Records))
+        return Encoding.Encode((Compressor:CompressMetadatas(0, Result.Records)))
     end)
 
     -- An oversized page is skipped rather than attempted: SetAsync would refuse
@@ -2732,9 +3658,9 @@ const function __create<T>(self: Database<T>): (boolean, number?)
 
             table.insert(Records, BuildMetadata(self, LastId))
 
-            const Packed = Compressor:CompressMetadatas(LastId, Records)
+            const Packed, Unpacked = Compressor:CompressMetadatas(LastId, Records)
             Created = LastId
-            Size = buffer.len(Packed)
+            Size = Unpacked
             return Packed, UserIdsOf(KeyInfo), Metadata
         end)
 
@@ -3183,6 +4109,7 @@ const Transactions = require("../Transactions/Client")
 const Network = require("./Network")
 const Listeners = require("../Listeners")
 const Logger = require("../Logger")
+const PropertyTypes = require("../Properties/Types")
 const Types = require("../Objects/Types")
 
 const History = {}
@@ -3506,7 +4433,7 @@ const function ApplyLocal(Step: Step, Forward: boolean): boolean
             const From, To = Ends(Entry, Forward)
 
             -- Changed since by something other than this step: left alone.
-            if Prop and Prop.Value == From then
+            if Prop and PropertyTypes:Equals(Prop.Type, Prop.Value, From) then
                 Obj:Set(Entry.Property :: number, if To == nil then Prop.DefaultValue else To)
             end
         elseif Present(Entry, Forward) then
@@ -4366,7 +5293,7 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
             const From, To = Ends(Entry, Forward)
 
             -- Changed since by something other than this step: left alone.
-            if not Prop or Prop.Value ~= From then
+            if not Prop or not PropertyTypes:Equals(Prop.Type, Prop.Value, From) then
                 continue
             end
 
@@ -4377,7 +5304,7 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
                 continue
             end
 
-            const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
+            const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
             if Compressed then
                 table.insert(Changes, {Object = Obj, Property = Entry.Property :: number, Value = Compressed})
             end
@@ -5634,6 +6561,33 @@ const function TemplateOf(Registry: ObjectRegistry): Instance?
     return nil
 end
 
+-- A value holding pending options with every one whose enum is registered now
+-- swapped for the real option: the option itself, or a fresh list for a Table
+-- of them. Nil when there is nothing to swap.
+const function SettleValue(Prop: PropertyTypes.Property<any>, Value: any): any?
+    if Prop.Type == "CustomEnum" then
+        return CustomEnum.Settle(Value)
+    end
+
+    if Prop.Type ~= "Table" or not Prop.Constraints or Prop.Constraints.Of ~= "CustomEnum" or type(Value) ~= "table" then
+        return nil
+    end
+
+    local List: {any}? = nil
+    for Index, Item in Value do
+        const Settled = CustomEnum.Settle(Item)
+        if Settled then
+            if not List then
+                List = table.clone(Value)
+            end
+
+            (List :: {any})[Index] = Settled
+        end
+    end
+
+    return if List then table.freeze(List) else nil
+end
+
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -5644,19 +6598,17 @@ const function __getter(self: Object, Reference: Types.PropertyReference): any?
 
     -- A pending option whose enum has been registered since, on an object the
     -- sweep below did not reach because it was set aside at the time.
-    if Prop.Type == "CustomEnum" then
-        const Settled = CustomEnum.Settle(Value)
-        if Settled then
-            return Settled
-        end
+    const Settled = SettleValue(Prop, Value)
+    if Settled then
+        return Settled
     end
 
     -- The live object rather than the id it is stored as, exactly as on the
     -- server. Nil while the target has not replicated here yet, which is the
     -- same nil a destroyed target reads as: the id is kept either way, so the
     -- link comes back the moment the object does.
-    if Prop.Type == "Object" then
-        return Shared.ResolveReference(self.InstanceId, Value, Find)
+    if PropertyTypes.HoldsReferences(Prop) then
+        return Shared.ResolveValue(self.InstanceId, Prop, Value, Find)
     end
 
     return Value
@@ -5723,7 +6675,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     -- from what the server holds, not from the last frame: a drag let go where
     -- it started is a cancel, and costs nothing.
     if Held then
-        if Prop.Value == Confirmed[Prop] then
+        if PropertyTypes:Equals(Prop.Type, Prop.Value, Confirmed[Prop]) then
             return true
         end
     elseif not Changed then
@@ -5735,7 +6687,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     -- do: the property no longer holds what the edit set.
     Listeners.Notify(Edited, self, Prop.Parent, Before, Prop.Value)
 
-    const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
+    const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
     if not Compressed then
         return false
     end
@@ -5910,7 +6862,7 @@ const function __local_setter(self: Object, Reference: Types.PropertyReference, 
 
     -- Against where the preview started rather than the last frame, for the
     -- same reason as the replicated setter: let go where it began is no edit.
-    if Accepted and Prop.Value ~= Before then
+    if Accepted and not PropertyTypes:Equals(Prop.Type, Prop.Value, Before) then
         Listeners.Notify(Edited, self, Prop.Parent, Before, Prop.Value)
     end
 
@@ -6077,7 +7029,7 @@ const function Construct(
             -- Against the copy the object is going into, as on the server: a
             -- reference is read against a copy, and the object carrying it does
             -- not exist yet.
-            if Prop.Type == "Object" then
+            if PropertyTypes.HoldsReferences(Prop) then
                 const Target, Why = Shared.Reference(Live.Id, Prop, Value, Find)
                 if Target == nil then
                     Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
@@ -6188,19 +7140,21 @@ function Objects:DuplicateGroup(List: {Object}): {Object}
         const Source = Sources[Index]
 
         for PropertyId, Prop in New.Properties do
-            if Prop.Type ~= "Object" then
+            if not PropertyTypes.HoldsReferences(Prop) then
                 continue
             end
 
             const Was = Source.Properties[PropertyId]
-            const Pointed = if Was then Shared.ResolveReference(Source.InstanceId, Was.Value, Find) else nil
-            if not Pointed then
-                continue
-            end
+            const Remapped = if Was
+                then Shared.Remap(Prop, Was.Value, function(Item: number): number?
+                    const Pointed = Shared.ResolveReference(Source.InstanceId, Item, Find)
+                    const Instead = if Pointed then Counterpart[Pointed] else nil
+                    return if Instead then Instead.LocalId else Item
+                end)
+                else nil
 
-            const Instead = Counterpart[Pointed]
-            if Instead then
-                Prop:Set(Instead.LocalId)
+            if Remapped ~= nil then
+                Prop:Set(Remapped)
             end
         end
     end
@@ -6664,12 +7618,8 @@ Network.ObjectAdded:Connect(AddObject)
 CustomEnum:OnRegistered(function()
     for _, Obj in Workspace do
         for _, Prop in Obj.Properties do
-            if Prop.Type ~= "CustomEnum" then
-                continue
-            end
-
             const Was = Prop.Value
-            const Settled = CustomEnum.Settle(Was)
+            const Settled = SettleValue(Prop, Was)
             if not Settled then
                 continue
             end
@@ -6943,8 +7893,8 @@ const function __getter(self: Object, Reference: Types.PropertyReference): any?
     -- Nothing is hidden by this: the raw id is still there on the property
     -- itself, through GetProperty, which is where everything Get and Set do
     -- not cover lives.
-    if Prop.Type == "Object" then
-        return Shared.ResolveReference(self.InstanceId, Value, Find)
+    if PropertyTypes.HoldsReferences(Prop) then
+        return Shared.ResolveValue(self.InstanceId, Prop, Value, Find)
     end
 
     return Value
@@ -6969,7 +7919,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     end
 
     if Changed then
-        const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
+        const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
         if Compressed then
             Audience.Fire(Network.PropertyChanged, self.Scene, ReachOf(self), self.RuntimeId, Prop.Parent, Compressed)
         end
@@ -7693,7 +8643,7 @@ const function Construct(
             -- copy its references will ever mean anything in. The object
             -- itself does not exist yet, and does not need to: a reference is
             -- read against the copy, not against whoever holds it.
-            if Prop.Type == "Object" then
+            if PropertyTypes.HoldsReferences(Prop) then
                 const Target, Why = Shared.Reference(Instance_.Id, Prop, Value, Find)
                 if Target == nil then
                     Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
@@ -7969,23 +8919,26 @@ function Objects:DuplicateGroup(List: {Object}, Target: any?): {Object}
         const Source = Sources[Index]
 
         for PropertyId, Prop in New.Properties do
-            if Prop.Type ~= "Object" then
+            if not PropertyTypes.HoldsReferences(Prop) then
                 continue
             end
 
             -- Read from the original, against the original's copy: that is
             -- where the id it was written with means what it meant. The
             -- duplicate holds the same id, but nothing says it names the same
-            -- object there.
+            -- object there. An id pointing outside the group keeps pointing
+            -- where it did.
             const Was = Source.Properties[PropertyId]
-            const Pointed = if Was then Shared.ResolveReference(Source.InstanceId, Was.Value, Find) else nil
-            if not Pointed then
-                continue
-            end
+            const Remapped = if Was
+                then Shared.Remap(Prop, Was.Value, function(Item: number): number?
+                    const Pointed = Shared.ResolveReference(Source.InstanceId, Item, Find)
+                    const Instead = if Pointed then Counterpart[Pointed] else nil
+                    return if Instead then Instead.LocalId else Item
+                end)
+                else nil
 
-            const Instead = Counterpart[Pointed]
-            if Instead then
-                Prop:Set(Instead.LocalId)
+            if Remapped ~= nil then
+                Prop:Set(Remapped)
             end
         end
     end
@@ -8331,12 +9284,18 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, Prop
 
     -- The payload is self describing, so this also confirms the client sent the
     -- type the property actually expects rather than trusting it to.
-    const Ok, Value, Type = pcall(function()
-        const Decoded, _, DecodedType = Compressor:DecompressValue(Compressed, 0)
-        return Decoded, DecodedType
+    const Ok, Value, Type, ItemType = pcall(function()
+        const Decoded, _, DecodedType, DecodedItemType = Compressor:DecompressValue(Compressed, 0)
+        return Decoded, DecodedType, DecodedItemType
     end)
 
     if not Ok or Type ~= Prop.Type then
+        return false
+    end
+
+    -- A list's items as well: Numbers sent to a list of references are all
+    -- numbers, and nothing after this could tell.
+    if Type == "Table" and ItemType and ItemType ~= Prop.Constraints.Of then
         return false
     end
 
@@ -8348,7 +9307,7 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, Prop
         return false
     end
 
-    if Prop.Value ~= Before then
+    if not PropertyTypes:Equals(Prop.Type, Prop.Value, Before) then
         for _, Callback in Edited do
             Callback(Plr, Obj, PropId, Before, Prop.Value)
         end
@@ -8601,6 +9560,12 @@ const function ValidateLinks(
             continue
         end
 
+        -- No instance member or attribute holds a Luau table.
+        if Registry.Type == "Table" then
+            Logger:Warn(`Object {Name} links {Registry.Name}, which is a Table. A list cannot drive an instance member. Link dropped.`)
+            continue
+        end
+
         const Inst = if Link.Descendant
             then Target:FindFirstChild(Link.Descendant, true)
             else Target
@@ -8752,6 +9717,29 @@ const function ResolveReference(Copy: Types.SceneInstanceId, Value: any, Find: F
     return Target
 end
 
+-- What reading a property that holds references answers: the object an Object
+-- property names, or the objects a Table of them names, in order. A list leaves
+-- out every item that does not resolve rather than holding a hole for it --
+-- the ids are still on the property, through GetProperty, for anyone who needs
+-- to know which were missing.
+const function ResolveValue(Copy: Types.SceneInstanceId, Prop: PropertyTypes.Property<any>, Value: any, Find: Find): any
+    if Prop.Type ~= "Table" then
+        return ResolveReference(Copy, Value, Find)
+    end
+
+    const Found = {}
+    if type(Value) == "table" then
+        for _, Item in Value do
+            const Target = ResolveReference(Copy, Item, Find)
+            if Target then
+                table.insert(Found, Target)
+            end
+        end
+    end
+
+    return table.freeze(Found)
+end
+
 -- What to store for a value someone wants to put in an Object property: a live
 -- object, a local id, or nil to clear it. Returns nil and a reason when the
 -- value cannot be held, so each caller can refuse the way its layer refuses --
@@ -8768,9 +9756,13 @@ end
 -- is not always there to take: Construct applies a create's initial values
 -- before the object they belong to has been assembled, and the copy is what the
 -- ids are read against in either case.
-const function Reference(
+--
+-- One item: the constraints are the property's own for an Object, the item
+-- constraints for a Table of them.
+const function ReferenceOne(
     Copy: Types.SceneInstanceId,
-    Prop: PropertyTypes.Property<any>,
+    Name: string,
+    Constraints: any,
     Value: any,
     Find: Find
 ): (number?, string?)
@@ -8807,11 +9799,81 @@ const function Reference(
     end
 
     const Found = Find(Copy, Target)
-    if Found and not Found.Destroyed and not AllowedType(Prop.Constraints, Found) then
-        return nil, `{Prop.Name} may not point at a {Found.Name}`
+    if Found and not Found.Destroyed and not AllowedType(Constraints, Found) then
+        return nil, `{Name} may not point at a {Found.Name}`
     end
 
     return Target
+end
+
+-- The same for a whole property: one id for an Object, a frozen list of them
+-- for a Table, every item read the way an Object property's value is and the
+-- whole list refused for any one item that cannot be held. Nil clears either:
+-- no target, or no items. Any other property type is not this function's to
+-- answer.
+const function Reference(
+    Copy: Types.SceneInstanceId,
+    Prop: PropertyTypes.Property<any>,
+    Value: any,
+    Find: Find
+): (any?, string?)
+    if Prop.Type ~= "Table" then
+        return ReferenceOne(Copy, Prop.Name, Prop.Constraints, Value, Find)
+    end
+
+    if Value == nil then
+        return table.freeze({})
+    end
+
+    -- An object is a table too, and one passed where its list was meant would
+    -- otherwise be walked as an empty list and clear the property.
+    if type(Value) ~= "table" or (Value :: any).RuntimeId ~= nil then
+        return nil, `a {typeof(Value)} is not a list`
+    end
+
+    const Item = Prop.Constraints and Prop.Constraints.Item
+    const List = table.create(#Value)
+
+    for Index, Each in Value do
+        if type(Index) ~= "number" then
+            return nil, "a list has only numbered items"
+        end
+
+        const Target, Why = ReferenceOne(Copy, `{Prop.Name}[{Index}]`, Item, Each, Find)
+        if Target == nil then
+            return nil, Why
+        end
+
+        List[Index] = Target
+    end
+
+    return table.freeze(List)
+end
+
+-- A held value with every id in it rewritten by Map, for the places that move a
+-- reference from one set of objects to another: a duplicate pointing at its
+-- group's duplicates, a placed pack pointing at what the placement made. Map
+-- answers nil for an id with nothing to stand for it, which leaves an Object
+-- property where it is -- nil comes back, and the caller sets nothing -- and
+-- drops the item from a Table.
+const function Remap(Prop: PropertyTypes.Property<any>, Value: any, Map: (number) -> number?): any?
+    if Prop.Type ~= "Table" then
+        return if type(Value) == "number" then Map(Value) else nil
+    end
+
+    if type(Value) ~= "table" then
+        return nil
+    end
+
+    const List = {}
+    for _, Item in Value do
+        const Instead = Map(Item)
+        if Instead ~= nil then
+            table.insert(List, Instead)
+        end
+    end
+
+    return table.freeze(List)
 end
 
 -- A saved object's values split in two: the ones that can be applied as they
@@ -8835,7 +9897,7 @@ const function SplitReferences(
 
     for Id, Value in Values do
         const Registry = Properties:GetRegistry(Id)
-        if Registry and Registry.Type == "Object" then
+        if Registry and PropertyTypes.HoldsReferences(Registry) then
             if not References then
                 References = {}
             end
@@ -8861,7 +9923,7 @@ const function Accept(
     Value: any,
     Find: Find
 ): (boolean, any)
-    if Prop.Type ~= "Object" then
+    if not PropertyTypes.HoldsReferences(Prop) then
         return true, Value
     end
 
@@ -8908,7 +9970,7 @@ const function Leftovers(Obj: Types.Object, Decompressed: any): {[PropertyTypes.
 
         -- Read against its registry, so the type is the one it was saved as.
         const Registry = Properties:GetRegistry(PropertyId)
-        const Tagged = if Registry then Compressor:CompressValue(Registry.Type, Value) else nil
+        const Tagged = if Registry then Compressor:CompressValue(Registry.Type, Value, Registry.Constraints) else nil
         if not Tagged then
             continue
         end
@@ -8967,7 +10029,9 @@ return {
 
     NO_TARGET = NO_TARGET,
     ResolveReference = ResolveReference,
+    ResolveValue = ResolveValue,
     Reference = Reference,
+    Remap = Remap,
     Accept = Accept,
     SplitReferences = SplitReferences,
 
@@ -10216,8 +11280,22 @@ const function Placeholder(Name: string): any
 end
 
 const function Register(Payload: any)
-    const Constraints = Payload.Constraints
-    if Payload.Type == "CustomEnum" and Constraints and type(Constraints.CustomEnum) == "string" then
+    -- Where the enum's name sits: on the constraints of a CustomEnum, on the
+    -- item constraints of a Table of them.
+    local Constraints = Payload.Constraints
+    if Payload.Type == "Table" and Constraints then
+        Constraints = if Constraints.Of == "CustomEnum" then Constraints.Item else nil
+    elseif Payload.Type ~= "CustomEnum" then
+        Constraints = nil
+    end
+
+    -- Frozen on the server, but a remote hands over a copy, and every property
+    -- built from this registry starts out holding this table.
+    if Payload.Type == "Table" and type(Payload.DefaultValue) == "table" and not table.isfrozen(Payload.DefaultValue) then
+        table.freeze(Payload.DefaultValue)
+    end
+
+    if Constraints and type(Constraints.CustomEnum) == "string" then
         const Name = Constraints.CustomEnum
         const Resolved = CustomEnum:GetEnum(Name)
         if not Resolved then
@@ -10311,14 +11389,29 @@ const Registered: {[PropertyIdentifier]: PropertyRegistry<any>} = {}
 -- no client ever received it. Only the enum's name crosses the wire; the client
 -- resolves it against its own registry, which is why custom enums have to be
 -- registered from shared code rather than server-only code.
+--
+-- A Table of CustomEnum carries the same enum one level down, in its item
+-- constraints, and crosses the same way.
 const function ToRegistryPayload(Registry: PropertyRegistry<any>): any
     const Constraints = (Registry :: any).Constraints
-    if Registry.Type ~= "CustomEnum" or not Constraints then
+    if not Constraints then
         return Registry
     end
 
-    const Copy = table.clone(Constraints)
-    Copy.CustomEnum = if Constraints.CustomEnum then Constraints.CustomEnum.Name else nil
+    local Copy
+
+    if Registry.Type == "CustomEnum" then
+        Copy = table.clone(Constraints)
+        Copy.CustomEnum = if Constraints.CustomEnum then Constraints.CustomEnum.Name else nil
+    elseif Registry.Type == "Table" and Constraints.Of == "CustomEnum" and Constraints.Item then
+        const Item: any = table.clone(Constraints.Item)
+        Item.CustomEnum = if Item.CustomEnum then Item.CustomEnum.Name else nil
+
+        Copy = table.clone(Constraints)
+        Copy.Item = Item
+    else
+        return Registry
+    end
 
     return {
         __type = "PropertyRegistry",
@@ -10349,27 +11442,65 @@ function Properties.Unretain(Identifier: PropertyIdentifier)
     Holders[Identifier] = if Count > 0 then Count else nil
 end
 
+-- Fills in what the constraints derive, in place. A Table's item constraints
+-- are a property's constraints one level down, so they get the same treatment.
+const function Prepare(Type: any, Constraints: any)
+    if Type == "Number" and Constraints.Precision then
+        local Scale = 1
+        while math.abs(Constraints.Precision * Scale - math.round(Constraints.Precision * Scale)) > 1e-9 do
+            Scale *= 10
+        end
+
+        Constraints.Scale = Scale
+    end
+
+    if Type == "Text" and Constraints.MaxLength then
+        Constraints.MaxLength = math.min(Constraints.MaxLength, MAX_TEXT_LENGTH)
+    end
+
+    if Type == "Table" then
+        Constraints.MaxItems = math.min(Constraints.MaxItems or Types.MAX_TABLE_ITEMS, Types.MAX_TABLE_ITEMS)
+
+        if Constraints.Item then
+            Prepare(Constraints.Of, Constraints.Item)
+        end
+    end
+end
+
 function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
+    const Constraints = Config.Constraints :: any
+    local Default: any = Config.DefaultValue
+
+    -- Settled before an id is claimed, because ids are never handed out twice
+    -- and a refused registration would burn one.
+    if Config.Type == "Table" then
+        if not Constraints or not Types.IsItemType(Constraints.Of) then
+            Logger:Warn(`Property {Config.Name} is a Table, which needs Constraints.Of naming the type of its items -- any property type but Table.`)
+            return
+        end
+
+        if Constraints.Item ~= nil and type(Constraints.Item) ~= "table" then
+            Logger:Warn(`Property {Config.Name} has Constraints.Item of type {type(Constraints.Item)}, not a table.`)
+            return
+        end
+
+        Prepare(Config.Type, Constraints)
+
+        -- Fixed and frozen like any value it will hold, because every property
+        -- built from the registry starts out holding this very table.
+        Default = Types:FixValue("Table", Default or {}, Constraints)
+        if Default == nil then
+            Logger:Warn(`Property {Config.Name} has a DefaultValue that is not a list its constraints accept.`)
+            return
+        end
+    elseif Constraints then
+        Prepare(Config.Type, Constraints)
+    end
+
     const Identifier = Ids:Claim()
     if not Identifier then
         Logger:Warn("The property id pool is exhausted.")
         return
-    end
-
-    const Constraints = Config.Constraints
-    if Constraints then
-        if Config.Type == "Number" and Constraints.Precision then
-            local Scale = 1
-            while math.abs(Constraints.Precision * Scale - math.round(Constraints.Precision * Scale)) > 1e-9 do
-                Scale *= 10
-            end
-
-            Constraints.Scale = Scale
-        end
-
-        if Config.Type == "Text" and Constraints.MaxLength then
-            Constraints.MaxLength = math.min(Constraints.MaxLength, MAX_TEXT_LENGTH)
-        end
     end
 
     const Prop = {}
@@ -10378,7 +11509,7 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     Prop.Name = Config.Name
     Prop.Type = Config.Type
     Prop.Constraints = Constraints
-    Prop.DefaultValue = Config.DefaultValue
+    Prop.DefaultValue = Default
 
     -- On the registry, which already replicates, so a client builds the same
     -- panel from the same metadata without being told anything extra.
@@ -10472,7 +11603,9 @@ const function __setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): (boole
         return false, false
     end
 
-    if Val == self.Value then
+    -- By value, not identity: a Table set to an equal list is no change, and
+    -- keeps the list it already held.
+    if Types:Equals(self.Type :: any, Val, self.Value) then
         return true, false
     end
 
@@ -10494,7 +11627,7 @@ const function __default_setter<T>(self: Property<T>, Value: Types.ValueFor<T>?)
         return false, false
     end
 
-    if Val == self.DefaultValue then
+    if Types:Equals(self.Type :: any, Val, self.DefaultValue) then
         return true, false
     end
 
@@ -10689,7 +11822,7 @@ return Shared
 const Handles = require("../Handles")
 const Codecs = require("../Codecs")
 
-export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum" | "Object"
+export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum" | "Object" | "Table"
 export type PropertyIdentifier = number
 
 export type TextConstraints = {
@@ -10742,6 +11875,25 @@ export type ObjectConstraints = {
     Types: {number | string}?,
 }
 
+-- A list of values that are all one other property type: Of names it, and Item
+-- holds that type's constraints, which every item is checked against exactly as
+-- a property of that type would be. Not nestable -- a Table of Tables has no
+-- item constraint that could say what it means.
+--
+-- Mandatory, unlike every other constraint here: without Of there is nothing to
+-- check an item against and nothing to tell a Number from an Object reference,
+-- both of which are Luau numbers.
+--
+-- MinItems refuses a shorter list, as MinLength refuses shorter text; MaxItems
+-- cuts a longer one, as MaxLength does. Registration caps MaxItems, and sets it
+-- when left out, so no list is unbounded.
+export type TableConstraints = {
+    Of: PropertyType,
+    Item: any?,
+    MinItems: number?,
+    MaxItems: number?,
+}
+
 type PropertyValues = {
     Text: string,
     Number: number,
@@ -10754,6 +11906,10 @@ type PropertyValues = {
 
     -- The target's local id, not the object. See Objects/Shared.
     Object: number,
+
+    -- Frozen. A list changed in place would never pass through Set, so nothing
+    -- -- undo, replication, listeners -- would hear that it had changed.
+    Table: {any},
 }
 
 type PropertyConstraints = {
@@ -10766,6 +11922,7 @@ type PropertyConstraints = {
     Enum: EnumConstraints,
     CustomEnum: CustomEnumConstraints,
     Object: ObjectConstraints,
+    Table: TableConstraints,
 }
 
 type function GetFromMap(Map, Key)
@@ -10864,6 +12021,7 @@ Types.Map = {
     Enum = "EnumItem",
     CustomEnum = "table",
     Object = "number",
+    Table = "table",
 }
 
 Types.Ids = {
@@ -10876,9 +12034,48 @@ Types.Ids = {
     Enum = 6,
     CustomEnum = 7,
     Object = 8,
+    Table = 9,
 }
 
+-- Hard ceiling on a list, and what MaxItems becomes when left out. Every item is
+-- validated on every set and sent whole on every change, so this is about the
+-- cost of one packet rather than what the format can write.
+Types.MAX_TABLE_ITEMS = 4096
+
 const F32_MAX = 3.4028235e+38
+
+-- An array and nothing else: every key a whole number from 1 to its length, so
+-- no holes and no fields. A dictionary passed as a list would be written in an
+-- order nobody chose and read back as something else.
+const function IsList(Value: {[any]: any}): boolean
+    const Length = #Value
+    local Keys = 0
+
+    for Key in Value do
+        if type(Key) ~= "number" or Key < 1 or Key > Length or Key % 1 ~= 0 then
+            return false
+        end
+
+        Keys += 1
+    end
+
+    return Keys == Length
+end
+
+-- What a Table may hold: any type but itself.
+function Types.IsItemType(Of: any): boolean
+    return type(Of) == "string" and Of ~= "Table" and (Types.Ids :: any)[Of] ~= nil
+end
+
+-- Whether a property holds references, alone or as a list of them. Takes a
+-- property or a registry: both carry Type and Constraints.
+function Types.HoldsReferences(Prop: any): boolean
+    if Prop.Type == "Object" then
+        return true
+    end
+
+    return Prop.Type == "Table" and Prop.Constraints ~= nil and Prop.Constraints.Of == "Object"
+end
 
 const function FixNumber(Value: ValueFor<"Number">, Constraints: ConstraintsFor<"Number">)
     if Constraints.Precision and Constraints.Scale then
@@ -10928,6 +12125,29 @@ function Types:IsValid<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraints
         return TypedValue >= 0
             and TypedValue <= Handles.MAX_LOCAL
             and TypedValue % 1 == 0
+    end
+
+    -- Every item as a property of the item type would be. Object items are
+    -- held to the bounds an Object property is, and like one, whether each
+    -- names anything is left to Objects/Shared.
+    if Type == "Table" then
+        const List = (Value :: any) :: {any}
+        const TableConstraints = (Constraints :: any) :: TableConstraints?
+        if not TableConstraints or not Types.IsItemType(TableConstraints.Of) then
+            return false
+        end
+
+        if not IsList(List) or #List < (TableConstraints.MinItems or 0) then
+            return false
+        end
+
+        for _, Item in List do
+            if not Types:IsValid(TableConstraints.Of, Item, TableConstraints.Item) then
+                return false
+            end
+        end
+
+        return true
     end
 
     if Constraints then
@@ -11041,9 +12261,58 @@ function Types:FixValue<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraint
         )
 
         return TypedValue
+    elseif Type == "Table" then
+        const List = (Value :: any) :: {any}
+        const TableConstraints = (Constraints :: any) :: TableConstraints
+        const Length = math.min(#List, TableConstraints.MaxItems or Types.MAX_TABLE_ITEMS)
+
+        const Fixed = table.create(Length)
+        local Same = Length == #List
+
+        for Index = 1, Length do
+            const Item = Types:FixValue(TableConstraints.Of, List[Index], TableConstraints.Item)
+            Fixed[Index] = Item
+            if Item ~= List[Index] then
+                Same = false
+            end
+        end
+
+        -- A frozen list nothing had to change is handed back as it is, so a
+        -- value read out of a property goes back in as the same table.
+        if Same and table.isfrozen(List) then
+            return List :: any
+        end
+
+        return table.freeze(Fixed) :: any
     end
 
     return Value
+end
+
+-- Whether two values of one type are the same value. Plain equality for every
+-- type but Table, whose values would otherwise compare by identity: two lists
+-- holding the same items read as a change, and a step of history holding one
+-- list never matched the property holding another.
+function Types:Equals(Type: PropertyType, Left: any, Right: any): boolean
+    if Left == Right then
+        return true
+    end
+
+    if Type ~= "Table" or type(Left) ~= "table" or type(Right) ~= "table" then
+        return false
+    end
+
+    if #Left ~= #Right then
+        return false
+    end
+
+    for Index = 1, #Left do
+        if Left[Index] ~= Right[Index] then
+            return false
+        end
+    end
+
+    return true
 end
 
 local ReverseIds;
@@ -11689,10 +12958,17 @@ const function __place(self: SceneInstance, Pack: buffer): any
     for _, Entry in Pending do
         for PropertyId, Saved in Entry.References do
             const Prop = Entry.Object.Properties[PropertyId]
-            const Target = Placed[Saved]
+            if not Prop then
+                continue
+            end
 
-            if Prop and Target then
-                Prop:Set(Target.LocalId)
+            const Remapped = ObjectShared.Remap(Prop, Saved, function(Item: number): number?
+                const Target = Placed[Item]
+                return if Target then Target.LocalId else nil
+            end)
+
+            if Remapped ~= nil then
+                Prop:Set(Remapped)
             end
         end
     end
@@ -11731,7 +13007,7 @@ const function __instance_serialize(self: SceneInstance): buffer
         return A.LocalId < B.LocalId
     end)
 
-    -- Each kept record as the bytes it was read from, untouched.
+    -- Each kept object as the tagged values it was read with, untouched.
     for Index, Entry in List do
         if Entry.__type == "DecompressedObject" then
             List[Index] = Entry.Source
@@ -12207,6 +13483,7 @@ const Network = require("./Network")
 const Handles = require("../Handles")
 const IdPool = require("../IdPool")
 const Logger = require("../Logger")
+const Try = require("../Try")
 const ObjectTypes = require("../Objects/Types")
 const Types = require("./Types")
 
@@ -12468,12 +13745,20 @@ const function __place(self: SceneInstance, Pack: buffer): {ObjectTypes.Object}?
     for _, Entry in Pending do
         for PropertyId, Saved in Entry.References do
             const Prop = Entry.Object.Properties[PropertyId]
-            const Target = Placed[Saved]
+            if not Prop then
+                continue
+            end
 
             -- Left at nothing when the pack did not carry what it pointed at,
-            -- which is what a property never written reads as.
-            if Prop and Target then
-                Prop:Set(Target.LocalId)
+            -- which is what a property never written reads as. A list loses
+            -- just that item.
+            const Remapped = ObjectShared.Remap(Prop, Saved, function(Item: number): number?
+                const Target = Placed[Item]
+                return if Target then Target.LocalId else nil
+            end)
+
+            if Remapped ~= nil then
+                Prop:Set(Remapped)
             end
         end
     end
@@ -12505,7 +13790,7 @@ const function __instance_serialize(self: SceneInstance): buffer
         return A.LocalId < B.LocalId
     end)
 
-    -- Each kept record as the bytes it was read from, untouched.
+    -- Each kept object as the tagged values it was read with, untouched.
     for Index, Entry in List do
         if Entry.__type == "DecompressedObject" then
             List[Index] = Entry.Source
@@ -12816,6 +14101,20 @@ const function __serialize(self: Scene): buffer
     return self.Data or Compressor:CompressScene(self.LastId, {})
 end
 
+const SAVE_ATTEMPTS = 5
+
+-- The buffer itself rather than buffer.tostring of it. A DataStore only takes
+-- a string that is valid UTF-8, and a pack is binary through and through: any
+-- byte past 127 that does not open a UTF-8 sequence makes the write fail.
+const function __save(self: Scene, Store: GlobalDataStore, Key: string): boolean
+    const Success = Try(SAVE_ATTEMPTS, Store.SetAsync, Store, Key, __serialize(self))
+    if not Success then
+        Logger:Warn(`Failed to save scene {self.Name} to key {Key}.`)
+    end
+
+    return Success
+end
+
 const function __get_instances(self: Scene): {any}
     const List = {}
     for _, Instance_ in self.Instances do
@@ -12989,6 +14288,7 @@ function Scenes.new(Config: SceneConfig): Scene?
     Scene.Open = __open
     Scene.Unload = __unload
     Scene.Serialize = __serialize
+    Scene.Save = __save
     Scene.GetInstances = __get_instances
     Scene.Destroy = __destroy
     Scene.Admit = __admit
@@ -13027,6 +14327,29 @@ function Scenes.fromBuffer(Config: SceneConfig, Data: buffer): Scene?
 
     Scene.Data = Data
     return Scene
+end
+
+-- Registers a scene around what Save wrote to a key. A key holding nothing is a
+-- level nobody has saved yet, and comes back as an empty scene; nil means the
+-- key could not be read, or holds something that is not a pack, and nothing
+-- was registered.
+function Scenes.fromDataStore(Config: SceneConfig, Store: GlobalDataStore, Key: string): Scene?
+    const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key)
+    if not Success then
+        Logger:Warn(`Failed to read scene {Config.Name} from key {Key}.`)
+        return nil
+    end
+
+    if Stored == nil then
+        return Scenes.new(Config)
+    end
+
+    if type(Stored) == "buffer" then
+        return Scenes.fromBuffer(Config, Stored)
+    end
+
+    Logger:Warn(`Key {Key} holds a {typeof(Stored)}, not a scene pack.`)
+    return nil
 end
 
 function Scenes:Get(Name: string): Scene?
@@ -13387,6 +14710,10 @@ export type Scene = {
 -- one that has admitted anybody is told to them and to nobody else -- its name,
 -- its copies and its objects alike.
 export type ServerScene = Scene & {
+    -- Writes the committed pack to a DataStore key, as the buffer itself.
+    -- False when every attempt failed.
+    Save: (self: ServerScene, Store: GlobalDataStore, Key: string) -> boolean,
+
     -- Whether the scene is anybody's to see. A private scene is told to the
     -- players it admits and to nobody else; a public one is everybody's, and
     -- its admitted list is inert.
@@ -13785,8 +15112,9 @@ type PlannedCreate = {
     Properties: {[number]: any},
 
     -- By position in this plan's own create list, not by the operation index
-    -- the builder wrote.
-    References: {[number]: number}?,
+    -- the builder wrote. A list for a Table of references, zero for an item
+    -- keeping the id its value gives it.
+    References: {[number]: number | {number}}?,
 }
 
 type LocalPlan = {
@@ -13805,7 +15133,7 @@ const function Plan(Transaction: Transaction): LocalPlan?
     const Doomed: {[number]: true} = {}
     const Withdrawn: {[number]: true} = {}
     const CreateAt: {[number]: number} = {}
-    const Pending: {{At: number, References: {[number]: number}}} = {}
+    const Pending: {{At: number, References: {[number]: number | {number}}}} = {}
 
     for Index, Operation in Transaction.Operations do
         const Op = Operation :: any
@@ -13891,13 +15219,41 @@ const function Plan(Transaction: Transaction): LocalPlan?
     -- A reference names the operation that makes its target, because the id it
     -- will hold is minted as the creates run. Answered here, against the whole
     -- list, since the create it names may be further down it.
+    const function Locate(Names: number): number?
+        const At = CreateAt[Names]
+        if not At then
+            Logger:Warn(`A local transaction has a reference naming operation {Names}, which is not a create in it.`)
+        end
+
+        return At
+    end
+
     for _, Entry in Pending do
-        const Resolved: {[number]: number} = {}
+        const Resolved: {[number]: number | {number}} = {}
 
         for PropertyId, Names in Entry.References do
-            const At = CreateAt[Names]
+            if type(Names) == "table" then
+                const List = table.create(#Names)
+                for Index, Operation in Names do
+                    if Operation == 0 then
+                        List[Index] = 0
+                        continue
+                    end
+
+                    const At = Locate(Operation)
+                    if not At then
+                        return nil
+                    end
+
+                    List[Index] = At
+                end
+
+                Resolved[PropertyId] = List
+                continue
+            end
+
+            const At = Locate(Names :: number)
             if not At then
-                Logger:Warn(`A local transaction has a reference naming operation {Names}, which is not a create in it.`)
                 return nil
             end
 
@@ -13956,8 +15312,29 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
             const Obj = Created[Index]
             for PropertyId, Names in Create.References do
                 const Prop = Obj.Properties[PropertyId]
+                if not Prop then
+                    continue
+                end
+
+                -- Item by item, as on the server: the made object's id where an
+                -- entry names a create, the held id where it does not.
+                if type(Names) == "table" then
+                    const Held = if type(Prop.Value) == "table" then Prop.Value else {}
+                    const List = table.create(#Names)
+
+                    for Item, Entry in Names do
+                        const Points = if Entry ~= 0 then Created[Entry] else nil
+                        List[Item] = if Points then Points.LocalId
+                            elseif Entry == 0 then Held[Item] or ObjectShared.NO_TARGET
+                            else ObjectShared.NO_TARGET
+                    end
+
+                    Prop:Set(table.freeze(List))
+                    continue
+                end
+
                 const Points = Created[Names]
-                if Prop and Points then
+                if Points then
                     Prop:Set(Points.LocalId)
                 end
             end
@@ -14212,6 +15589,7 @@ const Properties = require("../Properties/Server")
 const ObjectTypes = require("../Objects/Types")
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
+const ObjectShared = require("../Objects/Shared")
 const Scenes = require("../Scenes/Server")
 const Audience = require("../Scenes/Audience")
 const Network = require("./Network")
@@ -14275,8 +15653,9 @@ type PlannedCreate = {
     -- Object properties pointing at something else this transaction creates,
     -- by the position of that object in the plan's own create list rather than
     -- by the operation index the packet named. Resolved to ids once the creates
-    -- have run and the copy has minted them.
-    References: {[PropertyTypes.PropertyIdentifier]: number}?,
+    -- have run and the copy has minted them. A Table of references holds a list,
+    -- zero for an item that keeps the id its value gives it.
+    References: {[PropertyTypes.PropertyIdentifier]: number | {number}}?,
 }
 
 type PlannedSet = {
@@ -14300,8 +15679,9 @@ type PendingReference = {
     Property: PropertyTypes.PropertyIdentifier,
 
     -- The operation the author named, and the copy the create carrying this
-    -- reference is going into, as the packet wrote it.
-    Operation: number,
+    -- reference is going into, as the packet wrote it. A list for a Table of
+    -- references, zero for an item naming no operation.
+    Operation: number | {number},
     Instance: number,
 }
 
@@ -14462,8 +15842,11 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                         return Refuse(Plr, `property {PropertyId} is not registered.`)
                     end
 
-                    if PropertyRegistry.Type ~= "Object" then
-                        return Refuse(Plr, `{PropertyRegistry.Name} is a {PropertyRegistry.Type}, which cannot hold a reference.`)
+                    -- A list of operations for a list of references, one for
+                    -- one, and never the other way round.
+                    const IsList = type(Names) == "table"
+                    if not PropertyTypes.HoldsReferences(PropertyRegistry) or IsList ~= (PropertyRegistry.Type == "Table") then
+                        return Refuse(Plr, `{PropertyRegistry.Name} is a {PropertyRegistry.Type}, which cannot hold {if IsList then "a list of references" else "a reference"}.`)
                     end
 
                     -- A reference is a write of that property, so it asks for
@@ -14510,6 +15893,12 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 return Refuse(Plr, `{Prop.Name} is a {Prop.Type} and the operation carried a {tostring(Operation.Type)}.`)
             end
 
+            -- And a list's items, which IsValid cannot tell apart where they
+            -- are all numbers. An empty list has no item type to disagree.
+            if Prop.Type == "Table" and Operation.ItemType and Operation.ItemType ~= Prop.Constraints.Of then
+                return Refuse(Plr, `{Prop.Name} holds {Prop.Constraints.Of} and the operation carried {Operation.ItemType}.`)
+            end
+
             if not PropertyTypes:IsValid(Prop.Type, Operation.Value, Prop.Constraints) then
                 return Refuse(Plr, `{Prop.Name} cannot hold {tostring(Operation.Value)}.`)
             end
@@ -14520,7 +15909,7 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             -- the object being written. Refused here, where the world has not
             -- moved, rather than dropped inside the apply.
             local Value = Operation.Value
-            if Prop.Type == "Object" then
+            if PropertyTypes.HoldsReferences(Prop) then
                 const Reference, Why = Objects.Reference(Obj.InstanceId, Prop, Value)
                 if Reference == nil then
                     return Refuse(Plr, `{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)
@@ -14636,19 +16025,53 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
     end
 
     -- Now that every operation has been read, the references can be answered.
-    for _, Reference in Pending do
-        const Names = CreateAt[Reference.Operation]
+    -- Where in Creates the operation a reference names ended up, or why it
+    -- cannot be pointed at.
+    const function Locate(Operation: number, Instance: number): (number?, string?)
+        const Names = CreateAt[Operation]
         if not Names then
-            return Refuse(Plr, `a reference names operation {Reference.Operation}, which is not a create in this transaction.`)
+            return nil, `a reference names operation {Operation}, which is not a create in this transaction.`
         end
 
         -- Both creates have to land in the same copy, because a local id means
         -- nothing outside one. Compared as the packet wrote them: two creates
         -- of one group carry the same copy, and a caller mixing "this copy" and
         -- "wherever creates go" is told so rather than guessed at.
-        const Other = Operations[Reference.Operation] :: Types.CreateOperation
-        if Other.Instance ~= Reference.Instance then
-            return Refuse(Plr, "a reference names a create going into another copy.")
+        const Other = Operations[Operation] :: Types.CreateOperation
+        if Other.Instance ~= Instance then
+            return nil, "a reference names a create going into another copy."
+        end
+
+        return Names
+    end
+
+    for _, Reference in Pending do
+        local Names: number | {number}
+
+        if type(Reference.Operation) == "table" then
+            const Resolved = table.create(#Reference.Operation)
+            for Index, Operation in Reference.Operation do
+                if Operation == 0 then
+                    Resolved[Index] = 0
+                    continue
+                end
+
+                const At, Why = Locate(Operation, Reference.Instance)
+                if not At then
+                    return Refuse(Plr, Why :: string)
+                end
+
+                Resolved[Index] = At
+            end
+
+            Names = Resolved
+        else
+            const At, Why = Locate(Reference.Operation :: number, Reference.Instance)
+            if not At then
+                return Refuse(Plr, Why :: string)
+            end
+
+            Names = At
         end
 
         const Create = Creates[Reference.Create]
@@ -14773,9 +16196,28 @@ function Transactions.Apply(
             const Obj = Created[Index]
             for PropertyId, Names in Create.References do
                 const Prop = Obj.Properties[PropertyId]
-                const Points = Created[Names]
-                if not Prop or not Points then
+                if not Prop then
                     continue
+                end
+
+                -- A list is put together item by item: the object a create made
+                -- where an entry names one, and the id the value already held
+                -- where it does not.
+                local Points: any
+                if type(Names) == "table" then
+                    const Held = if type(Prop.Value) == "table" then Prop.Value else {}
+                    Points = table.create(#Names)
+
+                    for Item, Entry in Names do
+                        Points[Item] = if Entry == 0
+                            then Held[Item] or ObjectShared.NO_TARGET
+                            else Created[Entry] or ObjectShared.NO_TARGET
+                    end
+                else
+                    Points = Created[Names]
+                    if not Points then
+                        continue
+                    end
                 end
 
                 -- Through the same check a set makes, against the objects now
@@ -14784,7 +16226,7 @@ function Transactions.Apply(
                 -- the rollback below rather than leaving half a wiring.
                 const Target, Why = Objects.Reference(Obj.InstanceId, Prop, Points)
                 if Target == nil then
-                    error(`{Obj.Name}.{Prop.Name} cannot point at {Points.Name}: {Why}.`)
+                    error(`{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)
                 end
 
                 Prop:Set(Target)
@@ -14810,7 +16252,7 @@ function Transactions.Apply(
                 continue
             end
 
-            const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
+            const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
             if not Compressed then
                 continue
             end
@@ -15189,7 +16631,38 @@ function Shared.factory(
 
             for PropertyId, Value in Operation.Properties do
                 const Prop = Source:GetProperty(PropertyId)
-                if not Prop or Prop.Type ~= "Object" then
+                if not Prop or not PropertyTypes.HoldsReferences(Prop) then
+                    continue
+                end
+
+                -- A list: one entry per item, naming the create for an item
+                -- pointing into the group and zero for one that keeps its id.
+                -- The value goes along with zero where the create fills in, so
+                -- the items pointing outside the group still have something to
+                -- say what they are.
+                if Prop.Type == "Table" then
+                    const Names = table.create(#Value)
+                    const Kept = table.create(#Value)
+                    local Any = false
+
+                    for Index, Item in Value do
+                        const Pointed = Objects:Resolve(Source.InstanceId, Item)
+                        const Instead = if Pointed then MadeBy[Pointed] else nil
+
+                        Names[Index] = Instead or 0
+                        Kept[Index] = if Instead then ObjectShared.NO_TARGET else Item
+                        Any = Any or Instead ~= nil
+                    end
+
+                    if Any then
+                        if not Operation.References then
+                            Operation.References = {}
+                        end
+
+                        (Operation.References :: any)[PropertyId] = Names
+                        Operation.Properties[PropertyId] = table.freeze(Kept)
+                    end
+
                     continue
                 end
 
@@ -15275,7 +16748,20 @@ function Shared.factory(
             const Operation = self.Operations[Entry.Index] :: Types.CreateOperation
 
             for PropertyId, Saved in Entry.References do
-                const Names = Placed[Saved]
+                -- A list keeps only the items whose target the pack carried,
+                -- each naming the create that makes it.
+                local Names: any = nil
+                if type(Saved) == "table" then
+                    Names = {}
+                    for _, Item in Saved do
+                        if Placed[Item] then
+                            table.insert(Names, Placed[Item])
+                        end
+                    end
+                else
+                    Names = Placed[Saved]
+                end
+
                 if not Names then
                     continue
                 end
@@ -15318,7 +16804,7 @@ function Shared.factory(
         -- thing Object:Set takes, and so pointing at an object in another copy
         -- is refused where the objects are still both in hand to be named.
         local Held = Value
-        if Prop.Type == "Object" then
+        if PropertyTypes.HoldsReferences(Prop) then
             const Target, Why = Objects.Reference(Obj.InstanceId, Prop, Value)
             if Target == nil then
                 Reject(self, `{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)
@@ -15559,7 +17045,12 @@ export type CreateOperation = {
     -- This is what lets a group of objects be duplicated together with the
     -- references between them following the copies, and it is also the only way
     -- to create two objects and wire them to each other in one transaction.
-    References: {[PropertyTypes.PropertyIdentifier]: number}?,
+    --
+    -- A Table of references gets a list instead, one entry per item: the create
+    -- operation making that item's target, or zero for an item that keeps what
+    -- Properties gives it -- a target outside the group, which already has an
+    -- id. The value in Properties holds zero where an entry names a create.
+    References: {[PropertyTypes.PropertyIdentifier]: number | {number}}?,
 }
 
 export type SetOperation = {
@@ -15576,6 +17067,11 @@ export type SetOperation = {
     -- Nil where this build has no name for the type the author used, which is
     -- itself a mismatch and refused as one.
     Type: PropertyTypes.PropertyType?,
+
+    -- For a Table, the type its items were written as, nil for an empty list.
+    -- Compared against Of for the same reason: a Number list sent to a list of
+    -- references is all numbers, and IsValid cannot tell.
+    ItemType: PropertyTypes.PropertyType?,
 }
 
 export type DestroyOperation = {
@@ -16626,9 +18122,11 @@ T:Test("FixValue truncates text and applies AllowDecimals", function()
     T:Eq(PropertyTypes:FixValue("Number", 5.7, {AllowDecimals = false}), 6, "rounded")
 end)
 
-T:Test("Table is gone from the type system", function()
-    T:Eq(PropertyTypes.Ids.Table, nil, "no id")
-    T:Eq(PropertyTypes.Map.Table, nil, "no map entry")
+T:Test("Table is a type of its own", function()
+    -- Its id is written into saved data as a value's semantic type, so it
+    -- cannot move once anything has been saved with it.
+    T:Eq(PropertyTypes.Ids.Table, 9, "its id")
+    T:Eq(PropertyTypes.Map.Table, "table", "held as a Luau table")
 end)
 
 --=============================================================================
@@ -16724,39 +18222,6 @@ T:Test("SCHEMA DRIFT: an unknown semantic type is skipped, not fatal", function(
     T:Eq(Value, nil, "value dropped")
     T:Eq(Type, nil, "type unknown")
     T:Eq(Consumed, buffer.len(Buf), "skipped exactly the whole value")
-end)
-
---=============================================================================
--- Compressor: packing
---=============================================================================
-
-T:Describe("Compressor packing")
-
-T:Test("packs and unpacks buffers in order", function()
-    const Parts = {}
-    for Index = 1, 5 do
-        const Part = buffer.create(Index)
-        buffer.writeu8(Part, 0, Index * 10)
-        table.insert(Parts, Part)
-    end
-
-    const Unpacked = Compressor:UnpackBuffers(Compressor:PackBuffers(Parts))
-    T:Eq(#Unpacked, 5, "count")
-
-    for Index = 1, 5 do
-        T:Eq(buffer.len(Unpacked[Index]), Index, `part {Index} length`)
-        T:Eq(buffer.readu8(Unpacked[Index], 0), Index * 10, `part {Index} contents`)
-    end
-end)
-
-T:Test("handles an empty pack", function()
-    T:Eq(#Compressor:UnpackBuffers(Compressor:PackBuffers({})), 0, "empty")
-end)
-
-T:Test("rejects a buffer that is not a pack", function()
-    T:Throws(function()
-        Compressor:UnpackBuffers(buffer.create(16))
-    end, "bad header")
 end)
 
 --=============================================================================
@@ -17019,7 +18484,8 @@ T:Test("metadata round trips", function()
         Plays,
     }
 
-    const Back = Compressor:DecompressMetadata(Compressor:CompressMetadata(Record :: any))
+    const _, Records = Compressor:DecompressMetadatas((Compressor:CompressMetadatas(7, {Record :: any})))
+    const Back = Records[1]
     T:Eq(Back.Id, 7, "id")
     T:Eq(Back.SavedVersion, 2, "saved version")
     T:Eq(Back.PublishedVersion, 1, "published version")
@@ -17046,7 +18512,7 @@ T:Test("metadata packs round trip and preserve LastId", function()
     end
 
     const Records = {Build(1, "One"), Build(2, "Two"), Build(3, "Three")}
-    const LastId, Back = Compressor:DecompressMetadatas(Compressor:CompressMetadatas(42, Records :: any))
+    const LastId, Back = Compressor:DecompressMetadatas((Compressor:CompressMetadatas(42, Records :: any)))
 
     T:Eq(LastId, 42, "last id")
     T:Eq(#Back, 3, "count")
@@ -17054,10 +18520,57 @@ T:Test("metadata packs round trip and preserve LastId", function()
     T:Eq(Back[3][1].Value, "Three", "third record value")
 end)
 
-T:Test("rejects a buffer that is not metadata", function()
+const function Record(Id: number, Values: {{any}}, Saved: number?): any
+    const Out: any = {Id = Id, SavedVersion = Saved or 0, PublishedVersion = 0}
+    for _, Pair in Values do
+        const Prop = Properties.new(Pair[1])
+        Prop:Set(Pair[2])
+        table.insert(Out, Prop)
+    end
+
+    return Out
+end
+
+T:Test("a metadata pack keeps each record's properties in their order", function()
+    const Records = {
+        Record(1, {{TitleId, "A"}, {PlaysId, 5}}, 3),
+        Record(2, {{PlaysId, 9}, {TitleId, "B"}}),
+        Record(3, {{TitleId, "C"}}),
+        Record(5, {{TitleId, "E"}, {PlaysId, 0}}),
+    }
+
+    const LastId, Back = Compressor:DecompressMetadatas((Compressor:CompressMetadatas(5, Records)))
+    T:Eq(LastId, 5, "last id")
+    T:Eq(#Back, 4, "every record")
+    T:Eq(Back[1].SavedVersion, 3, "a version")
+    T:Eq(Back[1][1].Parent, TitleId, "first property first")
+    T:Eq(Back[2][1].Parent, PlaysId, "a record built in another order keeps it")
+    T:Eq(Back[2][2].Value, "B", "with its values")
+    T:Eq(#Back[3], 1, "a record with fewer properties has only those")
+    T:Eq(Back[4].Id, 5, "in id order")
+end)
+
+T:Test("a metadata pack costs a few bytes a record", function()
+    const Records = {}
+    for Id = 1, 2000 do
+        Records[Id] = Record(Id, {{TitleId, `Level {Id % 40}`}, {PlaysId, if Id % 5 == 0 then Id else 0}})
+    end
+
+    const Packed, Unpacked = Compressor:CompressMetadatas(2000, Records)
+
+    T:Ok(buffer.len(Packed) < 2000 * 5, `{buffer.len(Packed)} bytes for 2000 records`)
+    T:Ok(Unpacked >= buffer.len(Packed), "the size before compression is reported")
+
+    const _, Back = Compressor:DecompressMetadatas(Packed)
+    T:Eq(Back[2000][1].Value, "Level 0", "and it reads back")
+end)
+
+T:Test("rejects a metadata pack from a newer format", function()
+    const Pack = buffer.create(32)
+    buffer.writeu8(Pack, 0, 2)
     T:Throws(function()
-        Compressor:DecompressMetadata(buffer.create(32))
-    end, "bad header")
+        Compressor:DecompressMetadatas(Pack)
+    end, "refused")
 end)
 
 --=============================================================================
@@ -17585,6 +19098,266 @@ T:Test("a pack loads into a different scene without colliding", function()
 
     Source:Destroy()
     Copy:Destroy()
+end)
+
+-- One property for each way a pack column can be written: a grid for the
+-- position, a bit for the flag, a palette for the material, raw for colours
+-- that are all different.
+const SpotId = Properties:Register({Name = "TestSpot", Type = "Vector", DefaultValue = Vector3.zero}) :: number
+const FlagId = Properties:Register({Name = "TestFlag", Type = "Bool", DefaultValue = false}) :: number
+const SurfaceId = Properties:Register({
+    Name = "TestSurface",
+    Type = "Enum",
+    DefaultValue = Enum.Material.Plastic,
+    Constraints = {Enum = Enum.Material},
+}) :: number
+
+const BlockId = Objects:Register({
+    Name = "TestBlock",
+    Properties = {TitleId, TintId, SpotId, FlagId, SurfaceId},
+}) :: number
+
+const Surfaces = {Enum.Material.Plastic, Enum.Material.Wood, Enum.Material.Slate}
+
+-- Values a level actually holds: positions on a half stud grid with a few that
+-- are not, a flag that is usually off, three materials, and colours that are
+-- all different.
+const function BlockValues(Index: number): {[number]: any}
+    local Spot = Vector3.new(Index * 0.5, 3, -Index)
+    if Index % 50 == 0 then
+        Spot = Vector3.new(Index + 0.1, 0.3, 7)
+    elseif Index % 70 == 0 then
+        Spot = Vector3.new(-0, 1, 2)
+    end
+
+    return {
+        [TitleId] = if Index % 3 == 0 then "Wall" elseif Index % 3 == 1 then "Floor" else "Roof",
+        [TintId] = Color3.fromRGB(Index % 256, (Index * 7) % 256, (Index * 13) % 256),
+        [SpotId] = Spot,
+        [FlagId] = Index % 10 == 0,
+        [SurfaceId] = Surfaces[Index % 3 + 1],
+    }
+end
+
+const function Header(Version: number, Flags: number, LastId: number): buffer
+    const Out = buffer.create(Varint.Measure(Version) + Varint.Measure(Flags) + Varint.Measure(LastId))
+    local At = Varint.Write(Out, 0, Version)
+    At += Varint.Write(Out, At, Flags)
+    Varint.Write(Out, At, LastId)
+    return Out
+end
+
+const function Join(A: buffer, B: buffer): buffer
+    const Out = buffer.create(buffer.len(A) + buffer.len(B))
+    buffer.copy(Out, 0, A, 0)
+    buffer.copy(Out, buffer.len(A), B, 0)
+    return Out
+end
+
+T:Test("a pack reads back every value of every column", function()
+    const Scene = Scenes.new({Name = "TestPackColumns"})
+    const Live = Scene:Load()
+    const Made = {}
+    for Index = 1, 300 do
+        Made[Index] = Live:Create(BlockId, BlockValues(Index))
+    end
+
+    const Pack = Live:Serialize()
+    const Copy = Scenes.fromBuffer({Name = "TestPackColumnsBack"}, Pack)
+    const Back = Copy:Load()
+
+    local Wrong = 0
+    for _, Original in Live:GetObjects() do
+        const Restored = Back:Find(Original.LocalId)
+        if not Restored then
+            Wrong += 1
+            continue
+        end
+
+        for Id in BlockValues(1) do
+            if Restored:Get(Id) ~= Original:Get(Id) then
+                Wrong += 1
+            end
+        end
+    end
+
+    T:Eq(#Back:GetObjects(), 300, "every object came back")
+    T:Eq(Wrong, 0, "holding the values it was saved with")
+
+    -- Equal is not enough for a float: -0 == 0, and a save that turned one
+    -- into the other would be changing the level a bit every time.
+    const Signed = Back:Find(Made[70].LocalId)
+    T:Eq(Signed and 1 / Signed:Get(SpotId).X, -math.huge, "a -0 kept its sign")
+
+    Scene:Destroy()
+    Copy:Destroy()
+end)
+
+T:Test("a saved level keeps its values when a default changes", function()
+    const Scene = Scenes.new({Name = "TestPackDefault"})
+    const Live = Scene:Load()
+
+    -- Most objects hold the registry's default, which a pack does not write
+    -- once per object -- and must not read back from the registry either.
+    const Odd = Live:Create(BlockId, {[TitleId] = "Odd"})
+    for _ = 2, 20 do
+        Live:Create(BlockId)
+    end
+
+    Live:Commit()
+    Scene:Unload()
+
+    const Registry = Properties:GetRegistry(TitleId) :: any
+    const Before = Registry.DefaultValue
+    Registry.DefaultValue = "Renamed"
+
+    const Back = Scene:Load()
+    local Kept = 0
+    for _, Obj in Back:GetObjects() do
+        if Obj:Get(TitleId) == "Untitled" then
+            Kept += 1
+        end
+    end
+
+    Registry.DefaultValue = Before
+
+    T:Eq(Kept, 19, "every object that held the old default still holds it")
+    const Restored = Back:Find(Odd.LocalId)
+    T:Eq(Restored and Restored:Get(TitleId), "Odd", "and the one that did not, its own value")
+
+    Scene:Destroy()
+end)
+
+T:Test("a pack is a fraction of one record per object", function()
+    const Scene = Scenes.new({Name = "TestPackSize"})
+    const Live = Scene:Load()
+    for Index = 1, 2000 do
+        Live:Create(BlockId, BlockValues(Index))
+    end
+
+    -- Against the records replication sends, one per object, every value
+    -- beside its id: what a pack written row by row would come to.
+    const Current = buffer.len(Live:Serialize())
+    local Records = 0
+    for _, Obj in Live:GetObjects() do
+        Records += buffer.len(Compressor:CompressObject(Obj))
+    end
+
+    T:Ok(Current * 4 < Records, `{Current} bytes against {Records} one record per object`)
+
+    Scene:Destroy()
+end)
+
+T:Test("the same copy writes the same bytes", function()
+    const Scene = Scenes.new({Name = "TestPackSame"})
+    const Live = Scene:Load()
+    for Index = 1, 200 do
+        Live:Create(BlockId, BlockValues(Index))
+    end
+
+    T:Eq(buffer.tostring(Live:Serialize()), buffer.tostring(Live:Serialize()), "byte for byte")
+
+    Scene:Destroy()
+end)
+
+T:Test("an object missing a column reads back without it", function()
+    const Full: {[number]: any} = {[FlagId] = true}
+    Full[TitleId] = "Full"
+
+    const Pack = Compressor:CompressScene(2, {
+        {__type = "DecompressedObject", LocalId = 1, Registry = BlockId, Properties = Full},
+        {__type = "DecompressedObject", LocalId = 2, Registry = BlockId, Properties = {[FlagId] = true}},
+    } :: any)
+
+    const _, Back = Compressor:DecompressScene(Pack)
+    T:Eq(Back[1].Properties[TitleId], "Full", "the full row")
+    T:Eq(Back[2].Properties[TitleId], nil, "the partial row holds no title")
+    T:Eq(Back[2].Properties[FlagId], true, "but holds the rest")
+end)
+
+T:Test("a pack this build cannot read is refused", function()
+    T:Throws(function()
+        Compressor:DecompressScene(Header(2, 0, 0))
+    end, "a newer version")
+
+    T:Throws(function()
+        Compressor:DecompressScene(Join(Header(1, 2, 0), buffer.create(1)))
+    end, "a flag it does not know")
+
+    -- One type, one column, written in encoding 9.
+    const Default = Compressor:CompressValue("Bool", true) :: buffer
+    const Body = buffer.create(64)
+    local At = Varint.Write(Body, 0, 1)
+    At += Varint.Write(Body, At, BlockId)
+    At += Varint.Write(Body, At, 1)
+    At += Varint.Write(Body, At, FlagId)
+    buffer.writeu8(Body, At, 9)
+    buffer.copy(Body, At + 1, Default, 0)
+    T:Throws(function()
+        Compressor:DecompressScene(Join(Header(1, 0, 0), Body))
+    end, "a column encoding it does not know")
+end)
+
+-- A DataStore that keeps keys in a table and refuses what a real one refuses:
+-- a string that is not valid UTF-8.
+const function FakeStore(): any
+    const Keys = {}
+    return {
+        Keys = Keys,
+        SetAsync = function(_, Key: string, Value: any)
+            if type(Value) == "string" and not utf8.len(Value) then
+                error("not valid UTF-8")
+            end
+
+            Keys[Key] = Value
+        end,
+        GetAsync = function(_, Key: string)
+            return Keys[Key]
+        end,
+    }
+end
+
+T:Test("a scene saves to a DataStore key and reads back from it", function()
+    const Store = FakeStore()
+    const Scene = Scenes.new({Name = "TestSaved"}) :: any
+    const Live = Scene:Load()
+    for Index = 1, 50 do
+        Live:Create(BlockId, BlockValues(Index))
+    end
+
+    Live:Commit()
+    T:Ok(Scene:Save(Store, "Level"), "saved")
+    T:Eq(type(Store.Keys.Level), "buffer", "as the buffer itself")
+
+    -- What the old instructions said to do, which a real store refuses.
+    T:Ok(not utf8.len(buffer.tostring(Scene:Serialize())), "a pack is not valid UTF-8 as a string")
+    Scene:Destroy()
+
+    const Back = Scenes.fromDataStore({Name = "TestSavedBack"}, Store, "Level")
+    T:Eq(Back and #Back:Load():GetObjects(), 50, "every object came back")
+
+    const Empty = Scenes.fromDataStore({Name = "TestSavedEmpty"}, Store, "Nothing")
+    T:Eq(Empty and #Empty:Load():GetObjects(), 0, "a key never saved is an empty scene")
+
+    if Back then
+        Back:Destroy()
+    end
+
+    if Empty then
+        Empty:Destroy()
+    end
+end)
+
+T:Test("a pack that unpacks past the limit is refused before it is unpacked", function()
+    const Bomb = game:GetService("EncodingService"):CompressBuffer(
+        buffer.create(64 * 1024 * 1024 + 1),
+        Enum.CompressionAlgorithm.Zstd,
+        1
+    )
+
+    T:Throws(function()
+        Compressor:DecompressScene(Join(Header(1, 1, 0), Bomb))
+    end, "refused")
 end)
 
 -- A pack an older or newer build wrote: an object of a type this one never
@@ -20142,6 +21915,270 @@ T:Test("a placement a client is not allowed refuses whole", function()
     T:Ok(not Applied, "refused")
     T:Eq(#Copy:GetObjects(), 0, "and placed nothing")
 
+    Scene:Destroy()
+end)
+
+--=============================================================================
+-- Tables
+--=============================================================================
+
+T:Describe("Tables")
+
+const ScoresId = Properties:Register({
+    Name = "TestScores",
+    Type = "Table",
+    Constraints = {Of = "Number", Item = {MinValue = 0, AllowDecimals = false}, MaxItems = 4},
+    DefaultValue = {},
+}) :: number
+
+const DoorsId = Properties:Register({
+    Name = "TestDoors",
+    Type = "Table",
+    Constraints = {Of = "Object", Item = {Types = {"TestDoor"}}},
+    DefaultValue = {},
+}) :: number
+
+const PanelId = Objects:Register({
+    Name = "TestPanel",
+    Properties = {TitleId, ScoresId, DoorsId},
+}) :: number
+
+T:Test("a Table needs an item type that is not a Table", function()
+    T:Eq(Properties:Register({Name = "TestNoOf", Type = "Table", DefaultValue = {}} :: any), nil, "no Of")
+    T:Eq(Properties:Register({Name = "TestNested", Type = "Table", Constraints = {Of = "Table"}, DefaultValue = {}} :: any), nil, "a Table of Tables")
+    T:Eq(Properties:Register({Name = "TestBadDefault", Type = "Table", Constraints = {Of = "Text"}, DefaultValue = {1}} :: any), nil, "a default that does not fit")
+
+    const Default = Properties:GetRegistry(ScoresId).DefaultValue
+    T:Ok(table.isfrozen(Default), "the default is frozen")
+end)
+
+T:Test("a list holds its items to the item constraints", function()
+    const Scene, Copy = Room("TableNumbers")
+    const Panel = Copy:Create(PanelId)
+
+    T:Ok(Panel:Set(ScoresId, {3, -2, 7.4, 1, 9}), "a list is taken")
+
+    const Held = Panel:Get(ScoresId)
+    T:Eq(#Held, 4, "cut to MaxItems")
+    T:Eq(Held[2], 0, "clamped to MinValue")
+    T:Eq(Held[3], 7, "rounded")
+    T:Ok(table.isfrozen(Held), "and frozen, so it cannot change behind Set")
+
+    T:Ok(not Panel:Set(ScoresId, {1, "two"}), "an item of the wrong type is refused")
+    T:Ok(not Panel:Set(ScoresId, {First = 1}), "a dictionary is not a list")
+    T:Eq(Panel:Get(ScoresId), Held, "and the list is untouched")
+
+    -- Equal is no change, which is what keeps a drag from flooding history.
+    T:Ok(Panel:Set(ScoresId, {3, 0, 7, 1}), "an equal list is accepted")
+    T:Eq(Panel:Get(ScoresId), Held, "and the list held is kept")
+
+    Scene:Destroy()
+end)
+
+T:Test("a list survives a commit and a reload", function()
+    const Scene = Scenes.new({Name = "TableSaved"})
+    const Copy = Scene:Load() :: any
+
+    const Door = Copy:Create(DoorId)
+    const Panel = Copy:Create(PanelId)
+    Panel:Set(ScoresId, {5, 1e9, 0})
+    Panel:Set(DoorsId, {Door})
+
+    Copy:Commit()
+    Copy:Unload()
+
+    const Reloaded = Scene:Load() :: any
+    const Back = Reloaded:Find(Panel.LocalId)
+
+    T:Ok(Back, "the panel came back")
+    const Scores = Back:Get(ScoresId)
+    T:Eq(#Scores, 3, "every item")
+    T:Eq(Scores[2], 1e9, "a large whole number intact")
+    T:Eq(Back:Get(DoorsId)[1], Reloaded:Find(Door.LocalId), "the reference still names the door")
+
+    Scene:Destroy()
+end)
+
+T:Test("a list of references reads as the objects it names", function()
+    const Scene, Copy = Room("TableRefs")
+    const Left = Copy:Create(DoorId)
+    const Right = Copy:Create(DoorId)
+    const Button = Copy:Create(ButtonId)
+    const Panel = Copy:Create(PanelId)
+
+    T:Ok(Panel:Set(DoorsId, {Left, Right.LocalId}), "takes objects and ids alike")
+
+    const Read = Panel:Get(DoorsId)
+    T:Eq(Read[1], Left, "first door")
+    T:Eq(Read[2], Right, "second door")
+    T:Eq(Panel:GetProperty(DoorsId).Value[1], Left.LocalId, "stored as local ids")
+
+    T:Ok(not Panel:Set(DoorsId, {Left, Button}), "an item the constraint refuses refuses the list")
+    T:Ok(not Panel:Set(DoorsId, Left), "an object is not a list of them")
+
+    const Elsewhere = Scene:Load() :: any
+    T:Ok(not Panel:Set(DoorsId, {Elsewhere:Create(DoorId)}), "an item in another copy is refused")
+
+    Right:Destroy()
+    T:Eq(#Panel:Get(DoorsId), 1, "a destroyed target is left out of what reads back")
+    T:Eq(#Panel:GetProperty(DoorsId).Value, 2, "while its id is kept")
+
+    T:Ok(Panel:Set(DoorsId, nil), "nil clears")
+    T:Eq(#Panel:GetProperty(DoorsId).Value, 0, "to an empty list")
+
+    Scene:Destroy()
+end)
+
+T:Test("a list cannot drive an instance", function()
+    const Linked = Objects:Register({
+        Name = "TestLinkedTable",
+        Properties = {ScoresId},
+        Instance = Template,
+        Links = {{Property = ScoresId, Type = "Attribute", Name = "Scores"}},
+    }) :: number
+
+    T:Eq(Objects:GetRegistry(Linked).Links, nil, "the link was dropped")
+    Objects:Unregister(Linked)
+end)
+
+T:Test("a group duplicate remaps the items pointing into it", function()
+    const Scene, Copy = Room("TableDuplicate")
+    const Inside = Copy:Create(DoorId)
+    const Outside = Copy:Create(DoorId)
+    const Panel = Copy:Create(PanelId)
+    Panel:Set(DoorsId, {Inside, Outside})
+
+    const Made = Objects:DuplicateGroup({Panel, Inside})
+    const NewPanel, NewInside = Made[1], Made[2]
+
+    const Read = NewPanel:Get(DoorsId)
+    T:Eq(Read[1], NewInside, "the item in the group follows the copy")
+    T:Eq(Read[2], Outside, "the item outside it keeps its target")
+    T:Eq(Panel:Get(DoorsId)[1], Inside, "the original is untouched")
+
+    Scene:Destroy()
+end)
+
+T:Test("a transaction duplicates a group with its lists remapped", function()
+    const Scene, Copy = Room("TableGroupTransaction")
+    const Inside = Copy:Create(DoorId)
+    const Outside = Copy:Create(DoorId)
+    const Panel = Copy:Create(PanelId)
+    Panel:Set(DoorsId, {Outside, Inside})
+
+    const Edit = Transactions.new():DuplicateGroup({Panel, Inside})
+
+    -- Across the wire, as a client would send it.
+    const Operations = Compressor:DecompressTransaction(Compressor:CompressTransaction(Edit.Operations))
+    T:Eq(typeof(Operations[1].References[DoorsId]), "table", "a list of references rides the wire as a list")
+
+    const Applied, Created = Transactions.Apply(nil, Operations)
+    T:Ok(Applied, "applied")
+
+    const NewPanel = Objects:Get(Created[1])
+    const NewInside = Objects:Get(Created[2])
+    const Read = NewPanel:Get(DoorsId)
+
+    T:Eq(Read[1], Outside, "the outside item kept")
+    T:Eq(Read[2], NewInside, "the inside item remapped, in its place")
+
+    Scene:Destroy()
+end)
+
+T:Test("a list naming an operation that is not a create is refused", function()
+    const Scene, Copy = Room("TableBadOperation")
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = PanelId, Instance = Copy.Id, Properties = {}, References = {[DoorsId] = {0, 5}}},
+    } :: any), "no operation 5")
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = PanelId, Instance = Copy.Id, Properties = {}, References = {[DoorsId] = 2}},
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {}},
+    } :: any), "a single reference for a list")
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = ButtonId, Instance = Copy.Id, Properties = {}, References = {[TargetId] = {2}}},
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {}},
+    } :: any), "a list for a single reference")
+
+    T:Eq(#Copy:GetObjects(), 0, "nothing was created")
+    Scene:Destroy()
+end)
+
+T:Test("a set of a list checks its item type", function()
+    const Scene, Copy = Room("TableItemType")
+    const Panel = Copy:Create(PanelId)
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Set", Target = Panel.RuntimeId, Property = DoorsId, Value = {1}, Type = "Table", ItemType = "Number"},
+    } :: any), "numbers are not references")
+
+    T:Ok(Transactions.Apply(nil, {
+        {Kind = "Set", Target = Panel.RuntimeId, Property = ScoresId, Value = {1, 2}, Type = "Table", ItemType = "Number"},
+    } :: any), "numbers are numbers")
+
+    T:Eq(#Panel:Get(ScoresId), 2, "and landed")
+    Scene:Destroy()
+end)
+
+T:Test("a placed pack keeps the list items it carried", function()
+    const Source = Scenes.new({Name = "TablePrefab"}) :: any
+    const SourceCopy = Source:Load()
+
+    const Kept = SourceCopy:Create(DoorId, {[TitleId] = "Kept"})
+    const Gone = SourceCopy:Create(DoorId, {[TitleId] = "Gone"})
+    const Panel = SourceCopy:Create(PanelId, {[TitleId] = "Panel"})
+    Panel:Set(DoorsId, {Gone, Kept})
+    Gone:Destroy()
+
+    const Pack = SourceCopy:Serialize()
+    Source:Destroy()
+
+    const Scene, Copy = Room("TablePlaced")
+    const Made = Copy:Place(Pack) :: any
+
+    local Door, Placed
+    for _, Obj in Made do
+        if Obj:Get(TitleId) == "Kept" then
+            Door = Obj
+        elseif Obj:Get(TitleId) == "Panel" then
+            Placed = Obj
+        end
+    end
+
+    T:Ok(Door and Placed, "found both")
+    if Door and Placed then
+        T:Eq(#Placed:GetProperty(DoorsId).Value, 1, "the item the pack did not carry is dropped")
+        T:Eq(Placed:Get(DoorsId)[1], Door, "the one it did follows it")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("undoing a list set puts the list back", function()
+    const Scene, Copy = Room("TableHistory")
+    const Plr = Editor(-6200, Scene)
+    const Panel = Copy:Create(PanelId)
+
+    const function Set(Value: {number})
+        return Transactions.Apply(Plr, {
+            {Kind = "Set", Target = Panel.RuntimeId, Property = ScoresId, Value = Value, Type = "Table", ItemType = "Number"},
+        } :: any)
+    end
+
+    T:Ok(Set({1}), "first")
+    T:Ok(Set({1, 2}), "second")
+
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(#Panel:Get(ScoresId), 1, "back to the first list")
+    T:Ok(History:Redo(Plr), "redone")
+    T:Eq(#Panel:Get(ScoresId), 2, "forward to the second")
+    T:Ok(History:Undo(Plr), "undone again")
+    T:Eq(#Panel:Get(ScoresId), 1, "and back, with lists compared by their items")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
     Scene:Destroy()
 end)
 

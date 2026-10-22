@@ -21,6 +21,7 @@ local IdPool = require("../src/IdPool")
 local Codecs = require("../src/Codecs")
 local PermissionsShared = require("../src/Permissions/Shared")
 local PropertiesShared = require("../src/Properties/Shared")
+local PropertyTypes = require("../src/Properties/Types")
 local Try = require("../src/Try")
 local CustomEnum = require("../src/CustomEnum")
 
@@ -486,6 +487,80 @@ end
 do
     ok(CustomEnum.UNKNOWN ~= nil, "UNKNOWN should exist")
     ok(CustomEnum.UNKNOWN.Value == "Unknown", `UNKNOWN.Value was {tostring(CustomEnum.UNKNOWN.Value)}`)
+end
+
+-- Table: a list of one item type, every item held to that type's constraints.
+do
+    local Numbers = {Of = "Number", Item = {MinValue = 0, MaxValue = 10, AllowDecimals = false}, MinItems = 1, MaxItems = 3}
+
+    ok(PropertyTypes:IsValid("Table", {1, 2, 3}, Numbers), "a list of whole numbers in range should be valid")
+    ok(not PropertyTypes:IsValid("Table", {}, Numbers), "a list shorter than MinItems should be refused")
+    local wrong: any = {1}
+    wrong[2] = "two"
+    ok(not PropertyTypes:IsValid("Table", wrong, Numbers), "an item of the wrong type should be refused")
+    local holed: any = {1}
+    holed[3] = 3
+    ok(not PropertyTypes:IsValid("Table", holed, Numbers), "a list with a hole should be refused")
+    ok(not PropertyTypes:IsValid("Table", {1, Extra = 2} :: any, Numbers), "a list with a named field should be refused")
+    ok(not PropertyTypes:IsValid("Table", {1, 2}, nil), "a Table with no constraints names no item type")
+    ok(not PropertyTypes:IsValid("Table", {{1}}, {Of = "Table"}), "a Table of Tables should be refused")
+    ok(not PropertyTypes:IsValid("Table", 5 :: any, Numbers), "a number is not a list")
+
+    -- MaxItems cuts and each item is fixed as its own type would be.
+    local fixed = PropertyTypes:FixValue("Table", {12, 4.6, -1, 7}, Numbers) :: {number}
+    ok(fixed ~= nil and #fixed == 3, `MaxItems should cut to three, got {fixed and #fixed}`)
+    ok(fixed[1] == 10 and fixed[2] == 5 and fixed[3] == 0, `items should be clamped and rounded, got {fixed[1]}, {fixed[2]}, {fixed[3]}`)
+    ok(table.isfrozen(fixed), "a fixed list should be frozen")
+
+    -- A frozen list nothing had to change comes back as the same table.
+    local same: any = table.freeze({1, 2})
+    ok(PropertyTypes:FixValue("Table", same, Numbers) :: any == same, "an untouched frozen list should come back as itself")
+
+    -- Object items keep an Object property's bounds.
+    local Refs = {Of = "Object"}
+    ok(PropertyTypes:IsValid("Table", {0, 3, 9}, Refs), "whole local ids should be valid references")
+    ok(not PropertyTypes:IsValid("Table", {1.5}, Refs), "a fractional id is not a reference")
+    ok(not PropertyTypes:IsValid("Table", {-1}, Refs), "a negative id is not a reference")
+
+    ok(PropertyTypes.HoldsReferences({Type = "Table", Constraints = Refs}), "a Table of Object holds references")
+    ok(not PropertyTypes.HoldsReferences({Type = "Table", Constraints = Numbers}), "a Table of Number does not")
+    ok(PropertyTypes.HoldsReferences({Type = "Object"}), "an Object property holds a reference")
+end
+
+-- Equals compares lists by their items, everything else as == does.
+do
+    ok(PropertyTypes:Equals("Table", {1, 2}, {1, 2}), "two lists with the same items should be equal")
+    ok(not PropertyTypes:Equals("Table", {1, 2}, {2, 1}), "order should matter")
+    ok(not PropertyTypes:Equals("Table", {1, 2}, {1, 2, 3}), "length should matter")
+    ok(not PropertyTypes:Equals("Table", {1}, nil), "a list is not nil")
+    ok(PropertyTypes:Equals("Number", 3, 3), "numbers compare as ==")
+    ok(not PropertyTypes:Equals("Text", {} :: any, {} :: any), "only a Table compares by items")
+end
+
+-- A property set to an equal list is no change, and keeps the list it held.
+do
+    local Registry = {
+        Id = 1,
+        Name = "TestList",
+        Type = "Table",
+        Constraints = {Of = "Text"},
+        DefaultValue = table.freeze({}),
+    }
+
+    local prop = PropertiesShared.new({[1] = Registry :: any}, 1)
+    local accepted, changed = prop:Set({"a", "b"})
+    ok(accepted and changed, "setting a new list should be a change")
+
+    local held = prop.Value
+    ok(table.isfrozen(held), "the held list should be frozen")
+
+    accepted, changed = prop:Set({"a", "b"})
+    ok(accepted and not changed, "setting an equal list should not be a change")
+    ok(prop.Value == held, "an equal set should keep the list already held")
+
+    local mixed: any = {"a"}
+    mixed[2] = 1
+    ok(not (prop:Set(mixed)), "a list with a wrong item should be refused")
 end
 
 print(`{checks - failures}/{checks} checks passed`)

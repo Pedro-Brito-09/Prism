@@ -160,6 +160,10 @@ export type Scene = {
 -- one that has admitted anybody is told to them and to nobody else -- its name,
 -- its copies and its objects alike.
 export type ServerScene = Scene & {
+    -- Writes the committed pack to a DataStore key, as the buffer itself.
+    -- False when every attempt failed.
+    Save: (self: ServerScene, Store: GlobalDataStore, Key: string) -> boolean,
+
     -- Whether the scene is anybody's to see. A private scene is told to the
     -- players it admits and to nobody else; a public one is everybody's, and
     -- its admitted list is inert.

@@ -370,9 +370,11 @@ T:Test("FixValue truncates text and applies AllowDecimals", function()
     T:Eq(PropertyTypes:FixValue("Number", 5.7, {AllowDecimals = false}), 6, "rounded")
 end)
 
-T:Test("Table is gone from the type system", function()
-    T:Eq(PropertyTypes.Ids.Table, nil, "no id")
-    T:Eq(PropertyTypes.Map.Table, nil, "no map entry")
+T:Test("Table is a type of its own", function()
+    -- Its id is written into saved data as a value's semantic type, so it
+    -- cannot move once anything has been saved with it.
+    T:Eq(PropertyTypes.Ids.Table, 9, "its id")
+    T:Eq(PropertyTypes.Map.Table, "table", "held as a Luau table")
 end)
 
 --=============================================================================
@@ -468,39 +470,6 @@ T:Test("SCHEMA DRIFT: an unknown semantic type is skipped, not fatal", function(
     T:Eq(Value, nil, "value dropped")
     T:Eq(Type, nil, "type unknown")
     T:Eq(Consumed, buffer.len(Buf), "skipped exactly the whole value")
-end)
-
---=============================================================================
--- Compressor: packing
---=============================================================================
-
-T:Describe("Compressor packing")
-
-T:Test("packs and unpacks buffers in order", function()
-    const Parts = {}
-    for Index = 1, 5 do
-        const Part = buffer.create(Index)
-        buffer.writeu8(Part, 0, Index * 10)
-        table.insert(Parts, Part)
-    end
-
-    const Unpacked = Compressor:UnpackBuffers(Compressor:PackBuffers(Parts))
-    T:Eq(#Unpacked, 5, "count")
-
-    for Index = 1, 5 do
-        T:Eq(buffer.len(Unpacked[Index]), Index, `part {Index} length`)
-        T:Eq(buffer.readu8(Unpacked[Index], 0), Index * 10, `part {Index} contents`)
-    end
-end)
-
-T:Test("handles an empty pack", function()
-    T:Eq(#Compressor:UnpackBuffers(Compressor:PackBuffers({})), 0, "empty")
-end)
-
-T:Test("rejects a buffer that is not a pack", function()
-    T:Throws(function()
-        Compressor:UnpackBuffers(buffer.create(16))
-    end, "bad header")
 end)
 
 --=============================================================================
@@ -763,7 +732,8 @@ T:Test("metadata round trips", function()
         Plays,
     }
 
-    const Back = Compressor:DecompressMetadata(Compressor:CompressMetadata(Record :: any))
+    const _, Records = Compressor:DecompressMetadatas((Compressor:CompressMetadatas(7, {Record :: any})))
+    const Back = Records[1]
     T:Eq(Back.Id, 7, "id")
     T:Eq(Back.SavedVersion, 2, "saved version")
     T:Eq(Back.PublishedVersion, 1, "published version")
@@ -790,7 +760,7 @@ T:Test("metadata packs round trip and preserve LastId", function()
     end
 
     const Records = {Build(1, "One"), Build(2, "Two"), Build(3, "Three")}
-    const LastId, Back = Compressor:DecompressMetadatas(Compressor:CompressMetadatas(42, Records :: any))
+    const LastId, Back = Compressor:DecompressMetadatas((Compressor:CompressMetadatas(42, Records :: any)))
 
     T:Eq(LastId, 42, "last id")
     T:Eq(#Back, 3, "count")
@@ -798,10 +768,57 @@ T:Test("metadata packs round trip and preserve LastId", function()
     T:Eq(Back[3][1].Value, "Three", "third record value")
 end)
 
-T:Test("rejects a buffer that is not metadata", function()
+const function Record(Id: number, Values: {{any}}, Saved: number?): any
+    const Out: any = {Id = Id, SavedVersion = Saved or 0, PublishedVersion = 0}
+    for _, Pair in Values do
+        const Prop = Properties.new(Pair[1])
+        Prop:Set(Pair[2])
+        table.insert(Out, Prop)
+    end
+
+    return Out
+end
+
+T:Test("a metadata pack keeps each record's properties in their order", function()
+    const Records = {
+        Record(1, {{TitleId, "A"}, {PlaysId, 5}}, 3),
+        Record(2, {{PlaysId, 9}, {TitleId, "B"}}),
+        Record(3, {{TitleId, "C"}}),
+        Record(5, {{TitleId, "E"}, {PlaysId, 0}}),
+    }
+
+    const LastId, Back = Compressor:DecompressMetadatas((Compressor:CompressMetadatas(5, Records)))
+    T:Eq(LastId, 5, "last id")
+    T:Eq(#Back, 4, "every record")
+    T:Eq(Back[1].SavedVersion, 3, "a version")
+    T:Eq(Back[1][1].Parent, TitleId, "first property first")
+    T:Eq(Back[2][1].Parent, PlaysId, "a record built in another order keeps it")
+    T:Eq(Back[2][2].Value, "B", "with its values")
+    T:Eq(#Back[3], 1, "a record with fewer properties has only those")
+    T:Eq(Back[4].Id, 5, "in id order")
+end)
+
+T:Test("a metadata pack costs a few bytes a record", function()
+    const Records = {}
+    for Id = 1, 2000 do
+        Records[Id] = Record(Id, {{TitleId, `Level {Id % 40}`}, {PlaysId, if Id % 5 == 0 then Id else 0}})
+    end
+
+    const Packed, Unpacked = Compressor:CompressMetadatas(2000, Records)
+
+    T:Ok(buffer.len(Packed) < 2000 * 5, `{buffer.len(Packed)} bytes for 2000 records`)
+    T:Ok(Unpacked >= buffer.len(Packed), "the size before compression is reported")
+
+    const _, Back = Compressor:DecompressMetadatas(Packed)
+    T:Eq(Back[2000][1].Value, "Level 0", "and it reads back")
+end)
+
+T:Test("rejects a metadata pack from a newer format", function()
+    const Pack = buffer.create(32)
+    buffer.writeu8(Pack, 0, 2)
     T:Throws(function()
-        Compressor:DecompressMetadata(buffer.create(32))
-    end, "bad header")
+        Compressor:DecompressMetadatas(Pack)
+    end, "refused")
 end)
 
 --=============================================================================
@@ -1329,6 +1346,266 @@ T:Test("a pack loads into a different scene without colliding", function()
 
     Source:Destroy()
     Copy:Destroy()
+end)
+
+-- One property for each way a pack column can be written: a grid for the
+-- position, a bit for the flag, a palette for the material, raw for colours
+-- that are all different.
+const SpotId = Properties:Register({Name = "TestSpot", Type = "Vector", DefaultValue = Vector3.zero}) :: number
+const FlagId = Properties:Register({Name = "TestFlag", Type = "Bool", DefaultValue = false}) :: number
+const SurfaceId = Properties:Register({
+    Name = "TestSurface",
+    Type = "Enum",
+    DefaultValue = Enum.Material.Plastic,
+    Constraints = {Enum = Enum.Material},
+}) :: number
+
+const BlockId = Objects:Register({
+    Name = "TestBlock",
+    Properties = {TitleId, TintId, SpotId, FlagId, SurfaceId},
+}) :: number
+
+const Surfaces = {Enum.Material.Plastic, Enum.Material.Wood, Enum.Material.Slate}
+
+-- Values a level actually holds: positions on a half stud grid with a few that
+-- are not, a flag that is usually off, three materials, and colours that are
+-- all different.
+const function BlockValues(Index: number): {[number]: any}
+    local Spot = Vector3.new(Index * 0.5, 3, -Index)
+    if Index % 50 == 0 then
+        Spot = Vector3.new(Index + 0.1, 0.3, 7)
+    elseif Index % 70 == 0 then
+        Spot = Vector3.new(-0, 1, 2)
+    end
+
+    return {
+        [TitleId] = if Index % 3 == 0 then "Wall" elseif Index % 3 == 1 then "Floor" else "Roof",
+        [TintId] = Color3.fromRGB(Index % 256, (Index * 7) % 256, (Index * 13) % 256),
+        [SpotId] = Spot,
+        [FlagId] = Index % 10 == 0,
+        [SurfaceId] = Surfaces[Index % 3 + 1],
+    }
+end
+
+const function Header(Version: number, Flags: number, LastId: number): buffer
+    const Out = buffer.create(Varint.Measure(Version) + Varint.Measure(Flags) + Varint.Measure(LastId))
+    local At = Varint.Write(Out, 0, Version)
+    At += Varint.Write(Out, At, Flags)
+    Varint.Write(Out, At, LastId)
+    return Out
+end
+
+const function Join(A: buffer, B: buffer): buffer
+    const Out = buffer.create(buffer.len(A) + buffer.len(B))
+    buffer.copy(Out, 0, A, 0)
+    buffer.copy(Out, buffer.len(A), B, 0)
+    return Out
+end
+
+T:Test("a pack reads back every value of every column", function()
+    const Scene = Scenes.new({Name = "TestPackColumns"})
+    const Live = Scene:Load()
+    const Made = {}
+    for Index = 1, 300 do
+        Made[Index] = Live:Create(BlockId, BlockValues(Index))
+    end
+
+    const Pack = Live:Serialize()
+    const Copy = Scenes.fromBuffer({Name = "TestPackColumnsBack"}, Pack)
+    const Back = Copy:Load()
+
+    local Wrong = 0
+    for _, Original in Live:GetObjects() do
+        const Restored = Back:Find(Original.LocalId)
+        if not Restored then
+            Wrong += 1
+            continue
+        end
+
+        for Id in BlockValues(1) do
+            if Restored:Get(Id) ~= Original:Get(Id) then
+                Wrong += 1
+            end
+        end
+    end
+
+    T:Eq(#Back:GetObjects(), 300, "every object came back")
+    T:Eq(Wrong, 0, "holding the values it was saved with")
+
+    -- Equal is not enough for a float: -0 == 0, and a save that turned one
+    -- into the other would be changing the level a bit every time.
+    const Signed = Back:Find(Made[70].LocalId)
+    T:Eq(Signed and 1 / Signed:Get(SpotId).X, -math.huge, "a -0 kept its sign")
+
+    Scene:Destroy()
+    Copy:Destroy()
+end)
+
+T:Test("a saved level keeps its values when a default changes", function()
+    const Scene = Scenes.new({Name = "TestPackDefault"})
+    const Live = Scene:Load()
+
+    -- Most objects hold the registry's default, which a pack does not write
+    -- once per object -- and must not read back from the registry either.
+    const Odd = Live:Create(BlockId, {[TitleId] = "Odd"})
+    for _ = 2, 20 do
+        Live:Create(BlockId)
+    end
+
+    Live:Commit()
+    Scene:Unload()
+
+    const Registry = Properties:GetRegistry(TitleId) :: any
+    const Before = Registry.DefaultValue
+    Registry.DefaultValue = "Renamed"
+
+    const Back = Scene:Load()
+    local Kept = 0
+    for _, Obj in Back:GetObjects() do
+        if Obj:Get(TitleId) == "Untitled" then
+            Kept += 1
+        end
+    end
+
+    Registry.DefaultValue = Before
+
+    T:Eq(Kept, 19, "every object that held the old default still holds it")
+    const Restored = Back:Find(Odd.LocalId)
+    T:Eq(Restored and Restored:Get(TitleId), "Odd", "and the one that did not, its own value")
+
+    Scene:Destroy()
+end)
+
+T:Test("a pack is a fraction of one record per object", function()
+    const Scene = Scenes.new({Name = "TestPackSize"})
+    const Live = Scene:Load()
+    for Index = 1, 2000 do
+        Live:Create(BlockId, BlockValues(Index))
+    end
+
+    -- Against the records replication sends, one per object, every value
+    -- beside its id: what a pack written row by row would come to.
+    const Current = buffer.len(Live:Serialize())
+    local Records = 0
+    for _, Obj in Live:GetObjects() do
+        Records += buffer.len(Compressor:CompressObject(Obj))
+    end
+
+    T:Ok(Current * 4 < Records, `{Current} bytes against {Records} one record per object`)
+
+    Scene:Destroy()
+end)
+
+T:Test("the same copy writes the same bytes", function()
+    const Scene = Scenes.new({Name = "TestPackSame"})
+    const Live = Scene:Load()
+    for Index = 1, 200 do
+        Live:Create(BlockId, BlockValues(Index))
+    end
+
+    T:Eq(buffer.tostring(Live:Serialize()), buffer.tostring(Live:Serialize()), "byte for byte")
+
+    Scene:Destroy()
+end)
+
+T:Test("an object missing a column reads back without it", function()
+    const Full: {[number]: any} = {[FlagId] = true}
+    Full[TitleId] = "Full"
+
+    const Pack = Compressor:CompressScene(2, {
+        {__type = "DecompressedObject", LocalId = 1, Registry = BlockId, Properties = Full},
+        {__type = "DecompressedObject", LocalId = 2, Registry = BlockId, Properties = {[FlagId] = true}},
+    } :: any)
+
+    const _, Back = Compressor:DecompressScene(Pack)
+    T:Eq(Back[1].Properties[TitleId], "Full", "the full row")
+    T:Eq(Back[2].Properties[TitleId], nil, "the partial row holds no title")
+    T:Eq(Back[2].Properties[FlagId], true, "but holds the rest")
+end)
+
+T:Test("a pack this build cannot read is refused", function()
+    T:Throws(function()
+        Compressor:DecompressScene(Header(2, 0, 0))
+    end, "a newer version")
+
+    T:Throws(function()
+        Compressor:DecompressScene(Join(Header(1, 2, 0), buffer.create(1)))
+    end, "a flag it does not know")
+
+    -- One type, one column, written in encoding 9.
+    const Default = Compressor:CompressValue("Bool", true) :: buffer
+    const Body = buffer.create(64)
+    local At = Varint.Write(Body, 0, 1)
+    At += Varint.Write(Body, At, BlockId)
+    At += Varint.Write(Body, At, 1)
+    At += Varint.Write(Body, At, FlagId)
+    buffer.writeu8(Body, At, 9)
+    buffer.copy(Body, At + 1, Default, 0)
+    T:Throws(function()
+        Compressor:DecompressScene(Join(Header(1, 0, 0), Body))
+    end, "a column encoding it does not know")
+end)
+
+-- A DataStore that keeps keys in a table and refuses what a real one refuses:
+-- a string that is not valid UTF-8.
+const function FakeStore(): any
+    const Keys = {}
+    return {
+        Keys = Keys,
+        SetAsync = function(_, Key: string, Value: any)
+            if type(Value) == "string" and not utf8.len(Value) then
+                error("not valid UTF-8")
+            end
+
+            Keys[Key] = Value
+        end,
+        GetAsync = function(_, Key: string)
+            return Keys[Key]
+        end,
+    }
+end
+
+T:Test("a scene saves to a DataStore key and reads back from it", function()
+    const Store = FakeStore()
+    const Scene = Scenes.new({Name = "TestSaved"}) :: any
+    const Live = Scene:Load()
+    for Index = 1, 50 do
+        Live:Create(BlockId, BlockValues(Index))
+    end
+
+    Live:Commit()
+    T:Ok(Scene:Save(Store, "Level"), "saved")
+    T:Eq(type(Store.Keys.Level), "buffer", "as the buffer itself")
+
+    -- What the old instructions said to do, which a real store refuses.
+    T:Ok(not utf8.len(buffer.tostring(Scene:Serialize())), "a pack is not valid UTF-8 as a string")
+    Scene:Destroy()
+
+    const Back = Scenes.fromDataStore({Name = "TestSavedBack"}, Store, "Level")
+    T:Eq(Back and #Back:Load():GetObjects(), 50, "every object came back")
+
+    const Empty = Scenes.fromDataStore({Name = "TestSavedEmpty"}, Store, "Nothing")
+    T:Eq(Empty and #Empty:Load():GetObjects(), 0, "a key never saved is an empty scene")
+
+    if Back then
+        Back:Destroy()
+    end
+
+    if Empty then
+        Empty:Destroy()
+    end
+end)
+
+T:Test("a pack that unpacks past the limit is refused before it is unpacked", function()
+    const Bomb = game:GetService("EncodingService"):CompressBuffer(
+        buffer.create(64 * 1024 * 1024 + 1),
+        Enum.CompressionAlgorithm.Zstd,
+        1
+    )
+
+    T:Throws(function()
+        Compressor:DecompressScene(Join(Header(1, 1, 0), Bomb))
+    end, "refused")
 end)
 
 -- A pack an older or newer build wrote: an object of a type this one never
@@ -3886,6 +4163,270 @@ T:Test("a placement a client is not allowed refuses whole", function()
     T:Ok(not Applied, "refused")
     T:Eq(#Copy:GetObjects(), 0, "and placed nothing")
 
+    Scene:Destroy()
+end)
+
+--=============================================================================
+-- Tables
+--=============================================================================
+
+T:Describe("Tables")
+
+const ScoresId = Properties:Register({
+    Name = "TestScores",
+    Type = "Table",
+    Constraints = {Of = "Number", Item = {MinValue = 0, AllowDecimals = false}, MaxItems = 4},
+    DefaultValue = {},
+}) :: number
+
+const DoorsId = Properties:Register({
+    Name = "TestDoors",
+    Type = "Table",
+    Constraints = {Of = "Object", Item = {Types = {"TestDoor"}}},
+    DefaultValue = {},
+}) :: number
+
+const PanelId = Objects:Register({
+    Name = "TestPanel",
+    Properties = {TitleId, ScoresId, DoorsId},
+}) :: number
+
+T:Test("a Table needs an item type that is not a Table", function()
+    T:Eq(Properties:Register({Name = "TestNoOf", Type = "Table", DefaultValue = {}} :: any), nil, "no Of")
+    T:Eq(Properties:Register({Name = "TestNested", Type = "Table", Constraints = {Of = "Table"}, DefaultValue = {}} :: any), nil, "a Table of Tables")
+    T:Eq(Properties:Register({Name = "TestBadDefault", Type = "Table", Constraints = {Of = "Text"}, DefaultValue = {1}} :: any), nil, "a default that does not fit")
+
+    const Default = Properties:GetRegistry(ScoresId).DefaultValue
+    T:Ok(table.isfrozen(Default), "the default is frozen")
+end)
+
+T:Test("a list holds its items to the item constraints", function()
+    const Scene, Copy = Room("TableNumbers")
+    const Panel = Copy:Create(PanelId)
+
+    T:Ok(Panel:Set(ScoresId, {3, -2, 7.4, 1, 9}), "a list is taken")
+
+    const Held = Panel:Get(ScoresId)
+    T:Eq(#Held, 4, "cut to MaxItems")
+    T:Eq(Held[2], 0, "clamped to MinValue")
+    T:Eq(Held[3], 7, "rounded")
+    T:Ok(table.isfrozen(Held), "and frozen, so it cannot change behind Set")
+
+    T:Ok(not Panel:Set(ScoresId, {1, "two"}), "an item of the wrong type is refused")
+    T:Ok(not Panel:Set(ScoresId, {First = 1}), "a dictionary is not a list")
+    T:Eq(Panel:Get(ScoresId), Held, "and the list is untouched")
+
+    -- Equal is no change, which is what keeps a drag from flooding history.
+    T:Ok(Panel:Set(ScoresId, {3, 0, 7, 1}), "an equal list is accepted")
+    T:Eq(Panel:Get(ScoresId), Held, "and the list held is kept")
+
+    Scene:Destroy()
+end)
+
+T:Test("a list survives a commit and a reload", function()
+    const Scene = Scenes.new({Name = "TableSaved"})
+    const Copy = Scene:Load() :: any
+
+    const Door = Copy:Create(DoorId)
+    const Panel = Copy:Create(PanelId)
+    Panel:Set(ScoresId, {5, 1e9, 0})
+    Panel:Set(DoorsId, {Door})
+
+    Copy:Commit()
+    Copy:Unload()
+
+    const Reloaded = Scene:Load() :: any
+    const Back = Reloaded:Find(Panel.LocalId)
+
+    T:Ok(Back, "the panel came back")
+    const Scores = Back:Get(ScoresId)
+    T:Eq(#Scores, 3, "every item")
+    T:Eq(Scores[2], 1e9, "a large whole number intact")
+    T:Eq(Back:Get(DoorsId)[1], Reloaded:Find(Door.LocalId), "the reference still names the door")
+
+    Scene:Destroy()
+end)
+
+T:Test("a list of references reads as the objects it names", function()
+    const Scene, Copy = Room("TableRefs")
+    const Left = Copy:Create(DoorId)
+    const Right = Copy:Create(DoorId)
+    const Button = Copy:Create(ButtonId)
+    const Panel = Copy:Create(PanelId)
+
+    T:Ok(Panel:Set(DoorsId, {Left, Right.LocalId}), "takes objects and ids alike")
+
+    const Read = Panel:Get(DoorsId)
+    T:Eq(Read[1], Left, "first door")
+    T:Eq(Read[2], Right, "second door")
+    T:Eq(Panel:GetProperty(DoorsId).Value[1], Left.LocalId, "stored as local ids")
+
+    T:Ok(not Panel:Set(DoorsId, {Left, Button}), "an item the constraint refuses refuses the list")
+    T:Ok(not Panel:Set(DoorsId, Left), "an object is not a list of them")
+
+    const Elsewhere = Scene:Load() :: any
+    T:Ok(not Panel:Set(DoorsId, {Elsewhere:Create(DoorId)}), "an item in another copy is refused")
+
+    Right:Destroy()
+    T:Eq(#Panel:Get(DoorsId), 1, "a destroyed target is left out of what reads back")
+    T:Eq(#Panel:GetProperty(DoorsId).Value, 2, "while its id is kept")
+
+    T:Ok(Panel:Set(DoorsId, nil), "nil clears")
+    T:Eq(#Panel:GetProperty(DoorsId).Value, 0, "to an empty list")
+
+    Scene:Destroy()
+end)
+
+T:Test("a list cannot drive an instance", function()
+    const Linked = Objects:Register({
+        Name = "TestLinkedTable",
+        Properties = {ScoresId},
+        Instance = Template,
+        Links = {{Property = ScoresId, Type = "Attribute", Name = "Scores"}},
+    }) :: number
+
+    T:Eq(Objects:GetRegistry(Linked).Links, nil, "the link was dropped")
+    Objects:Unregister(Linked)
+end)
+
+T:Test("a group duplicate remaps the items pointing into it", function()
+    const Scene, Copy = Room("TableDuplicate")
+    const Inside = Copy:Create(DoorId)
+    const Outside = Copy:Create(DoorId)
+    const Panel = Copy:Create(PanelId)
+    Panel:Set(DoorsId, {Inside, Outside})
+
+    const Made = Objects:DuplicateGroup({Panel, Inside})
+    const NewPanel, NewInside = Made[1], Made[2]
+
+    const Read = NewPanel:Get(DoorsId)
+    T:Eq(Read[1], NewInside, "the item in the group follows the copy")
+    T:Eq(Read[2], Outside, "the item outside it keeps its target")
+    T:Eq(Panel:Get(DoorsId)[1], Inside, "the original is untouched")
+
+    Scene:Destroy()
+end)
+
+T:Test("a transaction duplicates a group with its lists remapped", function()
+    const Scene, Copy = Room("TableGroupTransaction")
+    const Inside = Copy:Create(DoorId)
+    const Outside = Copy:Create(DoorId)
+    const Panel = Copy:Create(PanelId)
+    Panel:Set(DoorsId, {Outside, Inside})
+
+    const Edit = Transactions.new():DuplicateGroup({Panel, Inside})
+
+    -- Across the wire, as a client would send it.
+    const Operations = Compressor:DecompressTransaction(Compressor:CompressTransaction(Edit.Operations))
+    T:Eq(typeof(Operations[1].References[DoorsId]), "table", "a list of references rides the wire as a list")
+
+    const Applied, Created = Transactions.Apply(nil, Operations)
+    T:Ok(Applied, "applied")
+
+    const NewPanel = Objects:Get(Created[1])
+    const NewInside = Objects:Get(Created[2])
+    const Read = NewPanel:Get(DoorsId)
+
+    T:Eq(Read[1], Outside, "the outside item kept")
+    T:Eq(Read[2], NewInside, "the inside item remapped, in its place")
+
+    Scene:Destroy()
+end)
+
+T:Test("a list naming an operation that is not a create is refused", function()
+    const Scene, Copy = Room("TableBadOperation")
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = PanelId, Instance = Copy.Id, Properties = {}, References = {[DoorsId] = {0, 5}}},
+    } :: any), "no operation 5")
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = PanelId, Instance = Copy.Id, Properties = {}, References = {[DoorsId] = 2}},
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {}},
+    } :: any), "a single reference for a list")
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = ButtonId, Instance = Copy.Id, Properties = {}, References = {[TargetId] = {2}}},
+        {Kind = "Create", Object = DoorId, Instance = Copy.Id, Properties = {}},
+    } :: any), "a list for a single reference")
+
+    T:Eq(#Copy:GetObjects(), 0, "nothing was created")
+    Scene:Destroy()
+end)
+
+T:Test("a set of a list checks its item type", function()
+    const Scene, Copy = Room("TableItemType")
+    const Panel = Copy:Create(PanelId)
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Set", Target = Panel.RuntimeId, Property = DoorsId, Value = {1}, Type = "Table", ItemType = "Number"},
+    } :: any), "numbers are not references")
+
+    T:Ok(Transactions.Apply(nil, {
+        {Kind = "Set", Target = Panel.RuntimeId, Property = ScoresId, Value = {1, 2}, Type = "Table", ItemType = "Number"},
+    } :: any), "numbers are numbers")
+
+    T:Eq(#Panel:Get(ScoresId), 2, "and landed")
+    Scene:Destroy()
+end)
+
+T:Test("a placed pack keeps the list items it carried", function()
+    const Source = Scenes.new({Name = "TablePrefab"}) :: any
+    const SourceCopy = Source:Load()
+
+    const Kept = SourceCopy:Create(DoorId, {[TitleId] = "Kept"})
+    const Gone = SourceCopy:Create(DoorId, {[TitleId] = "Gone"})
+    const Panel = SourceCopy:Create(PanelId, {[TitleId] = "Panel"})
+    Panel:Set(DoorsId, {Gone, Kept})
+    Gone:Destroy()
+
+    const Pack = SourceCopy:Serialize()
+    Source:Destroy()
+
+    const Scene, Copy = Room("TablePlaced")
+    const Made = Copy:Place(Pack) :: any
+
+    local Door, Placed
+    for _, Obj in Made do
+        if Obj:Get(TitleId) == "Kept" then
+            Door = Obj
+        elseif Obj:Get(TitleId) == "Panel" then
+            Placed = Obj
+        end
+    end
+
+    T:Ok(Door and Placed, "found both")
+    if Door and Placed then
+        T:Eq(#Placed:GetProperty(DoorsId).Value, 1, "the item the pack did not carry is dropped")
+        T:Eq(Placed:Get(DoorsId)[1], Door, "the one it did follows it")
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("undoing a list set puts the list back", function()
+    const Scene, Copy = Room("TableHistory")
+    const Plr = Editor(-6200, Scene)
+    const Panel = Copy:Create(PanelId)
+
+    const function Set(Value: {number})
+        return Transactions.Apply(Plr, {
+            {Kind = "Set", Target = Panel.RuntimeId, Property = ScoresId, Value = Value, Type = "Table", ItemType = "Number"},
+        } :: any)
+    end
+
+    T:Ok(Set({1}), "first")
+    T:Ok(Set({1, 2}), "second")
+
+    T:Ok(History:Undo(Plr), "undone")
+    T:Eq(#Panel:Get(ScoresId), 1, "back to the first list")
+    T:Ok(History:Redo(Plr), "redone")
+    T:Eq(#Panel:Get(ScoresId), 2, "forward to the second")
+    T:Ok(History:Undo(Plr), "undone again")
+    T:Eq(#Panel:Get(ScoresId), 1, "and back, with lists compared by their items")
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
     Scene:Destroy()
 end)
 

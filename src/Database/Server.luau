@@ -65,9 +65,18 @@ const DEFAULT_EXPIRATION = 90
 const DEFAULT_PAGE_SIZE = 50
 const ATTEMPTS = 5
 
--- DataStore caps a value at 4MB. Sealing at 3MB leaves room for the record that
--- crosses the line to still fit.
-const DEFAULT_SHARD_LIMIT = 3 * 1024 * 1024
+-- Measured before compression rather than as stored, and set by what a create
+-- costs rather than by what a key holds. A shard is decoded and encoded whole
+-- inside the UpdateAsync transform of every record created in it, and the
+-- transform cannot yield: a 20,000 record shard took about 0.8s to go round,
+-- and a shard filled to 3MB unpacked would hold 90,000 and stall the server
+-- for four seconds a create. 1MB is about 30,000 records and about the cost a
+-- create had before shards were compressed.
+--
+-- What is stored is a fraction of this -- a 20,000 record shard packed to
+-- 280KB -- and never more, since a pack keeps the uncompressed body whenever
+-- zstd would make it bigger, so the 4MB a DataStore value holds is never near.
+const DEFAULT_SHARD_LIMIT = 1024 * 1024
 
 -- MemoryStore caps a value at 32KB and base64 inflates by a third, so a page
 -- past this cannot be shared however many times it is retried.
@@ -526,7 +535,7 @@ const function __get<T>(self: Database<T>, CacheName: string, Page: number?): Pa
     -- Repopulate the shared tier, including on the bypass path: the data just
     -- came from the DataStore, so it is the freshest anyone has.
     const Ok, Encoded = pcall(function()
-        return Encoding.Encode(Compressor:CompressMetadatas(0, Result.Records))
+        return Encoding.Encode((Compressor:CompressMetadatas(0, Result.Records)))
     end)
 
     -- An oversized page is skipped rather than attempted: SetAsync would refuse
@@ -645,9 +654,9 @@ const function __create<T>(self: Database<T>): (boolean, number?)
 
             table.insert(Records, BuildMetadata(self, LastId))
 
-            const Packed = Compressor:CompressMetadatas(LastId, Records)
+            const Packed, Unpacked = Compressor:CompressMetadatas(LastId, Records)
             Created = LastId
-            Size = buffer.len(Packed)
+            Size = Unpacked
             return Packed, UserIdsOf(KeyInfo), Metadata
         end)
 

@@ -487,7 +487,7 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
             const From, To = Ends(Entry, Forward)
 
             -- Changed since by something other than this step: left alone.
-            if not Prop or Prop.Value ~= From then
+            if not Prop or not PropertyTypes:Equals(Prop.Type, Prop.Value, From) then
                 continue
             end
 
@@ -498,7 +498,7 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
                 continue
             end
 
-            const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
+            const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
             if Compressed then
                 table.insert(Changes, {Object = Obj, Property = Entry.Property :: number, Value = Compressed})
             end

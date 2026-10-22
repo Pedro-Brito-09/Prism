@@ -209,6 +209,12 @@ const function ValidateLinks(
             continue
         end
 
+        -- No instance member or attribute holds a Luau table.
+        if Registry.Type == "Table" then
+            Logger:Warn(`Object {Name} links {Registry.Name}, which is a Table. A list cannot drive an instance member. Link dropped.`)
+            continue
+        end
+
         const Inst = if Link.Descendant
             then Target:FindFirstChild(Link.Descendant, true)
             else Target
@@ -360,6 +366,29 @@ const function ResolveReference(Copy: Types.SceneInstanceId, Value: any, Find: F
     return Target
 end
 
+-- What reading a property that holds references answers: the object an Object
+-- property names, or the objects a Table of them names, in order. A list leaves
+-- out every item that does not resolve rather than holding a hole for it --
+-- the ids are still on the property, through GetProperty, for anyone who needs
+-- to know which were missing.
+const function ResolveValue(Copy: Types.SceneInstanceId, Prop: PropertyTypes.Property<any>, Value: any, Find: Find): any
+    if Prop.Type ~= "Table" then
+        return ResolveReference(Copy, Value, Find)
+    end
+
+    const Found = {}
+    if type(Value) == "table" then
+        for _, Item in Value do
+            const Target = ResolveReference(Copy, Item, Find)
+            if Target then
+                table.insert(Found, Target)
+            end
+        end
+    end
+
+    return table.freeze(Found)
+end
+
 -- What to store for a value someone wants to put in an Object property: a live
 -- object, a local id, or nil to clear it. Returns nil and a reason when the
 -- value cannot be held, so each caller can refuse the way its layer refuses --
@@ -376,9 +405,13 @@ end
 -- is not always there to take: Construct applies a create's initial values
 -- before the object they belong to has been assembled, and the copy is what the
 -- ids are read against in either case.
-const function Reference(
+--
+-- One item: the constraints are the property's own for an Object, the item
+-- constraints for a Table of them.
+const function ReferenceOne(
     Copy: Types.SceneInstanceId,
-    Prop: PropertyTypes.Property<any>,
+    Name: string,
+    Constraints: any,
     Value: any,
     Find: Find
 ): (number?, string?)
@@ -415,11 +448,81 @@ const function Reference(
     end
 
     const Found = Find(Copy, Target)
-    if Found and not Found.Destroyed and not AllowedType(Prop.Constraints, Found) then
-        return nil, `{Prop.Name} may not point at a {Found.Name}`
+    if Found and not Found.Destroyed and not AllowedType(Constraints, Found) then
+        return nil, `{Name} may not point at a {Found.Name}`
     end
 
     return Target
+end
+
+-- The same for a whole property: one id for an Object, a frozen list of them
+-- for a Table, every item read the way an Object property's value is and the
+-- whole list refused for any one item that cannot be held. Nil clears either:
+-- no target, or no items. Any other property type is not this function's to
+-- answer.
+const function Reference(
+    Copy: Types.SceneInstanceId,
+    Prop: PropertyTypes.Property<any>,
+    Value: any,
+    Find: Find
+): (any?, string?)
+    if Prop.Type ~= "Table" then
+        return ReferenceOne(Copy, Prop.Name, Prop.Constraints, Value, Find)
+    end
+
+    if Value == nil then
+        return table.freeze({})
+    end
+
+    -- An object is a table too, and one passed where its list was meant would
+    -- otherwise be walked as an empty list and clear the property.
+    if type(Value) ~= "table" or (Value :: any).RuntimeId ~= nil then
+        return nil, `a {typeof(Value)} is not a list`
+    end
+
+    const Item = Prop.Constraints and Prop.Constraints.Item
+    const List = table.create(#Value)
+
+    for Index, Each in Value do
+        if type(Index) ~= "number" then
+            return nil, "a list has only numbered items"
+        end
+
+        const Target, Why = ReferenceOne(Copy, `{Prop.Name}[{Index}]`, Item, Each, Find)
+        if Target == nil then
+            return nil, Why
+        end
+
+        List[Index] = Target
+    end
+
+    return table.freeze(List)
+end
+
+-- A held value with every id in it rewritten by Map, for the places that move a
+-- reference from one set of objects to another: a duplicate pointing at its
+-- group's duplicates, a placed pack pointing at what the placement made. Map
+-- answers nil for an id with nothing to stand for it, which leaves an Object
+-- property where it is -- nil comes back, and the caller sets nothing -- and
+-- drops the item from a Table.
+const function Remap(Prop: PropertyTypes.Property<any>, Value: any, Map: (number) -> number?): any?
+    if Prop.Type ~= "Table" then
+        return if type(Value) == "number" then Map(Value) else nil
+    end
+
+    if type(Value) ~= "table" then
+        return nil
+    end
+
+    const List = {}
+    for _, Item in Value do
+        const Instead = Map(Item)
+        if Instead ~= nil then
+            table.insert(List, Instead)
+        end
+    end
+
+    return table.freeze(List)
 end
 
 -- A saved object's values split in two: the ones that can be applied as they
@@ -443,7 +546,7 @@ const function SplitReferences(
 
     for Id, Value in Values do
         const Registry = Properties:GetRegistry(Id)
-        if Registry and Registry.Type == "Object" then
+        if Registry and PropertyTypes.HoldsReferences(Registry) then
             if not References then
                 References = {}
             end
@@ -469,7 +572,7 @@ const function Accept(
     Value: any,
     Find: Find
 ): (boolean, any)
-    if Prop.Type ~= "Object" then
+    if not PropertyTypes.HoldsReferences(Prop) then
         return true, Value
     end
 
@@ -516,7 +619,7 @@ const function Leftovers(Obj: Types.Object, Decompressed: any): {[PropertyTypes.
 
         -- Read against its registry, so the type is the one it was saved as.
         const Registry = Properties:GetRegistry(PropertyId)
-        const Tagged = if Registry then Compressor:CompressValue(Registry.Type, Value) else nil
+        const Tagged = if Registry then Compressor:CompressValue(Registry.Type, Value, Registry.Constraints) else nil
         if not Tagged then
             continue
         end
@@ -575,7 +678,9 @@ return {
 
     NO_TARGET = NO_TARGET,
     ResolveReference = ResolveReference,
+    ResolveValue = ResolveValue,
     Reference = Reference,
+    Remap = Remap,
     Accept = Accept,
     SplitReferences = SplitReferences,
 
