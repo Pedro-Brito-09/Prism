@@ -3067,6 +3067,50 @@ T:Test("a reference survives a commit and a reload", function()
     Scene:Destroy()
 end)
 
+T:Test("many references to nearby objects survive a save and cost almost nothing", function()
+    const Scene = Scenes.new({Name = "RefMany"})
+    const Copy = Scene:Load() :: any
+
+    -- Each button made right after its door, the way an editor makes an
+    -- attribute right after its block; and one pointing far back, and one at
+    -- nothing, so the column holds more than one kind of distance.
+    const Pairs = {}
+    for Index = 1, 1000 do
+        const Door = Copy:Create(DoorId)
+        const Button = Copy:Create(ButtonId)
+        Button:Set(TargetId, Door)
+        Pairs[Index] = {Door = Door.LocalId, Button = Button.LocalId}
+    end
+
+    const Far = Copy:Create(ButtonId)
+    Far:Set(TargetId, Copy:Find(Pairs[1].Door))
+    const Nowhere = Copy:Create(ButtonId)
+
+    Copy:Commit()
+
+    -- Written as the target's id, a thousand references to a thousand
+    -- different doors would not fit in this.
+    const Size = buffer.len(Scene:Serialize())
+    T:Ok(Size < 1000, `{Size} bytes for 2002 objects and 1001 references`)
+
+    Copy:Unload()
+    const Reloaded = Scene:Load() :: any
+
+    local Wrong = 0
+    for _, Pair in Pairs do
+        const Button = Reloaded:Find(Pair.Button)
+        if not Button or Button:GetProperty(TargetId).Value ~= Pair.Door then
+            Wrong += 1
+        end
+    end
+
+    T:Eq(Wrong, 0, "every button still points at its own door")
+    T:Eq(Reloaded:Find(Far.LocalId):GetProperty(TargetId).Value, Pairs[1].Door, "the one pointing far back too")
+    T:Eq(Reloaded:Find(Nowhere.LocalId):GetProperty(TargetId).Value, 0, "and the one pointing at nothing")
+
+    Scene:Destroy()
+end)
+
 T:Test("a link on a reference is refused at registration", function()
     -- An Object is a number as far as Luau is concerned, so the type check
     -- would pass and the part would be driven with an id meaning nothing

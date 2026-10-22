@@ -1588,6 +1588,17 @@ end
 --            a grid, so a position or a size is usually a few small integers
 --            rather than twelve bytes of float. A Vector off the grid escapes to
 --            its twelve bytes, so the column never refuses a value.
+--   delta    [varint scale] after the default, then the grid again, written as
+--            how far each Vector moved from the one before it: a bitmap of
+--            which values are off the grid, every X step, every Y step, every
+--            Z step, then the twelve bytes of each value off the grid. Blocks
+--            are placed one after another near each other, so the steps are
+--            smaller than the positions, and one axis at a time is what zstd
+--            finds the most repetition in.
+--   relative each reference as a signed varint of how far the object it names
+--            is from the row's own id. An attribute made right after its block
+--            names the object one before it, every time; written as the id
+--            itself, that was a different number on every row.
 --
 -- Whole, the body is then compressed with zstd when that comes out smaller,
 -- which flag 1 records. Most of what is left is a level repeating itself in
@@ -1611,6 +1622,8 @@ const COLUMN_RAW = 0
 const COLUMN_BOOL = 1
 const COLUMN_PALETTE = 2
 const COLUMN_GRID = 3
+const COLUMN_RELATIVE = 4
+const COLUMN_GRID_DELTA = 5
 
 -- Steps a grid column may snap to, smallest first so that a tie goes to the
 -- smaller integers.
@@ -1625,6 +1638,7 @@ const BOOL_TRUE = Compressor:CompressValue("Bool", true) :: buffer
 const BOOL_FALSE_KEY = buffer.tostring(BOOL_FALSE)
 const BOOL_TRUE_KEY = buffer.tostring(BOOL_TRUE)
 const VECTOR_TAG = MakeTag(WIRE_FIXED12, PropertyTypes:GetTypeId("Vector") :: number)
+const OBJECT_TAG = MakeTag(WIRE_VARINT, PropertyTypes:GetTypeId("Object") :: number)
 
 -- A buffer that grows as it is written, so a pack is built in one place rather
 -- than as thousands of pieces glued together at the end.
@@ -1732,6 +1746,35 @@ const function PutGrid(W: Writer, Tagged: buffer, Scale: number)
     end
 end
 
+-- The grid integers a Vector lands on at Scale, or nil when it is off the grid.
+const function GridInts(Tagged: buffer, Scale: number): {number}?
+    if not FitsGrid(Tagged, Scale) then
+        return nil
+    end
+
+    return {
+        math.round(buffer.readf32(Tagged, 1) * Scale),
+        math.round(buffer.readf32(Tagged, 5) * Scale),
+        math.round(buffer.readf32(Tagged, 9) * Scale),
+    }
+end
+
+-- The local id a tagged reference holds, or nil when the value is not exactly
+-- one: a column holding anything else cannot be written relative to its rows.
+const function TargetOf(Key: string): number?
+    if string.byte(Key, 1) ~= OBJECT_TAG then
+        return nil
+    end
+
+    const Buf = buffer.fromstring(Key)
+    const Ok, Target, Read = pcall(Varint.Read, Buf, 1)
+    if not Ok or 1 + Read ~= #Key then
+        return nil
+    end
+
+    return Target
+end
+
 type Column = {
     Id: number,
     Encoding: number,
@@ -1741,8 +1784,9 @@ type Column = {
 }
 
 -- Decides how one column is written, from every value it holds in this pack.
--- Values is by row, nil where a row does not carry the column.
-const function PlanColumn(Id: number, Values: {[number]: string}, Rows: number): Column
+-- Values is by row, nil where a row does not carry the column; LocalIds is
+-- each row's id, which a reference is written relative to.
+const function PlanColumn(Id: number, Values: {[number]: string}, Rows: number, LocalIds: {number}): Column
     const Counts: {[string]: number} = {}
     for Row = 1, Rows do
         const Key = Values[Row]
@@ -1818,13 +1862,97 @@ const function PlanColumn(Id: number, Values: {[number]: string}, Rows: number):
         end
     end
 
-    if Grid < Raw and Grid <= Palette then
-        return {Id = Id, Encoding = COLUMN_GRID, Default = Default, Scale = Scale}
-    elseif Palette < Raw then
-        return {Id = Id, Encoding = COLUMN_PALETTE, Default = Default, Palette = Index}
+    -- The values that are written, in the order they are written: a delta and
+    -- a relative reference both depend on where in the column a value falls.
+    const Written: {string} = {}
+    const WrittenRows: {number} = {}
+    for Row = 1, Rows do
+        const Key = Values[Row]
+        if Key ~= nil and Key ~= Default then
+            table.insert(Written, Key)
+            table.insert(WrittenRows, Row)
+        end
     end
 
-    return {Id = Id, Encoding = COLUMN_RAW, Default = Default}
+    local Delta = math.huge
+    local DeltaScale = nil
+
+    if IsVector and #Distinct > 1 then
+        for _, Candidate in GRID_SCALES do
+            -- Nil for a value off the grid at this scale.
+            const Ints: {[string]: {number}?} = {}
+            for Position = 2, #Distinct do
+                const Key = Distinct[Position]
+                Ints[Key] = GridInts(buffer.fromstring(Key), Candidate)
+            end
+
+            local Size = Varint.Measure(Candidate) + (#Written + 7) // 8
+            local X, Y, Z = 0, 0, 0
+            for _, Key in Written do
+                const Step = Ints[Key]
+                if Step then
+                    Size += Varint.MeasureSigned(Step[1] - X)
+                        + Varint.MeasureSigned(Step[2] - Y)
+                        + Varint.MeasureSigned(Step[3] - Z)
+                    X, Y, Z = Step[1], Step[2], Step[3]
+                else
+                    Size += 12
+                end
+            end
+
+            if Size < Delta then
+                Delta, DeltaScale = Size, Candidate
+            end
+        end
+    end
+
+    local Relative = math.huge
+    if #Distinct > 1 then
+        const Targets: {[string]: number} = {}
+        local Fits = true
+        for Position = 2, #Distinct do
+            const Target = TargetOf(Distinct[Position])
+            if not Target then
+                Fits = false
+                break
+            end
+
+            Targets[Distinct[Position]] = Target
+        end
+
+        if Fits then
+            Relative = 0
+            for Position, Key in Written do
+                Relative += Varint.MeasureSigned(Targets[Key] - LocalIds[WrittenRows[Position]])
+            end
+        end
+    end
+
+    -- The smallest wins, and a tie goes to the simpler encoding.
+    local Best, Encoding = Raw, COLUMN_RAW
+    if Palette < Best then
+        Best, Encoding = Palette, COLUMN_PALETTE
+    end
+
+    if Grid < Best then
+        Best, Encoding = Grid, COLUMN_GRID
+    end
+
+    if Delta < Best then
+        Best, Encoding = Delta, COLUMN_GRID_DELTA
+    end
+
+    if Relative < Best then
+        Best, Encoding = Relative, COLUMN_RELATIVE
+    end
+
+    return {
+        Id = Id,
+        Encoding = Encoding,
+        Default = Default,
+        Palette = if Encoding == COLUMN_PALETTE then Index else nil,
+        Scale = if Encoding == COLUMN_GRID then Scale elseif Encoding == COLUMN_GRID_DELTA then DeltaScale else nil,
+    }
 end
 
 const function WriteColumn(W: Writer, Plan: Column)
@@ -1843,21 +1971,9 @@ const function WriteColumn(W: Writer, Plan: Column)
         for _, Key in Ordered do
             PutBuffer(W, buffer.fromstring(Key))
         end
-    elseif Plan.Encoding == COLUMN_GRID then
+    elseif Plan.Encoding == COLUMN_GRID or Plan.Encoding == COLUMN_GRID_DELTA then
         PutVarint(W, Plan.Scale :: number)
     end
-end
-
-const function WriteValue(W: Writer, Plan: Column, Key: string)
-    if Plan.Encoding == COLUMN_RAW then
-        PutBuffer(W, buffer.fromstring(Key))
-    elseif Plan.Encoding == COLUMN_PALETTE then
-        PutVarint(W, (Plan.Palette :: {[string]: number})[Key])
-    elseif Plan.Encoding == COLUMN_GRID then
-        PutGrid(W, buffer.fromstring(Key), Plan.Scale :: number)
-    end
-
-    -- A bool column writes nothing: the written bit already said it.
 end
 
 const function PutBitmap(W: Writer, Bits: {boolean}, Count: number)
@@ -1870,6 +1986,67 @@ const function PutBitmap(W: Writer, Bits: {boolean}, Count: number)
         end
 
         PutU8(W, Byte)
+    end
+end
+
+-- Every value a column writes, in row order. A whole column at a time rather
+-- than a value at a time, because a delta is from the value before it and its
+-- axes are written one after another.
+const function PutColumnValues(W: Writer, Plan: Column, Values: {[number]: string}, Rows: number, LocalIds: {number})
+    const Written: {string} = {}
+    const WrittenRows: {number} = {}
+    for Row = 1, Rows do
+        const Key = Values[Row]
+        if Key ~= nil and Key ~= Plan.Default then
+            table.insert(Written, Key)
+            table.insert(WrittenRows, Row)
+        end
+    end
+
+    if Plan.Encoding == COLUMN_GRID_DELTA then
+        const Scale = Plan.Scale :: number
+        const Ints: {{number}?} = table.create(#Written)
+        const Escaped: {boolean} = table.create(#Written)
+        for Index, Key in Written do
+            const Step = GridInts(buffer.fromstring(Key), Scale)
+            Ints[Index] = Step
+            Escaped[Index] = Step == nil
+        end
+
+        PutBitmap(W, Escaped, #Written)
+
+        for Axis = 1, 3 do
+            local Previous = 0
+            for Index = 1, #Written do
+                const Step = Ints[Index]
+                if Step then
+                    PutSigned(W, Step[Axis] - Previous)
+                    Previous = Step[Axis]
+                end
+            end
+        end
+
+        for Index, Key in Written do
+            if Escaped[Index] then
+                PutBuffer(W, buffer.fromstring(Key), 1, 12)
+            end
+        end
+
+        return
+    end
+
+    for Index, Key in Written do
+        if Plan.Encoding == COLUMN_RAW then
+            PutBuffer(W, buffer.fromstring(Key))
+        elseif Plan.Encoding == COLUMN_PALETTE then
+            PutVarint(W, (Plan.Palette :: {[string]: number})[Key])
+        elseif Plan.Encoding == COLUMN_GRID then
+            PutGrid(W, buffer.fromstring(Key), Plan.Scale :: number)
+        elseif Plan.Encoding == COLUMN_RELATIVE then
+            PutSigned(W, (TargetOf(Key) :: number) - LocalIds[WrittenRows[Index]])
+        end
+
+        -- A bool column writes nothing: the written bit already said it.
     end
 end
 
@@ -1888,6 +2065,11 @@ const function WriteGroup(W: Writer, Group: Group)
     const Keys: {{[number]: string}} = table.create(#Order)
     local Partial = false
 
+    const LocalIds: {number} = table.create(#Rows)
+    for Row, Raw in Rows do
+        LocalIds[Row] = Raw.LocalId
+    end
+
     for Index, Id in Order do
         const Values = {}
         for Row, Raw in Rows do
@@ -1900,7 +2082,7 @@ const function WriteGroup(W: Writer, Group: Group)
         end
 
         Keys[Index] = Values
-        Plans[Index] = PlanColumn(Id, Values, #Rows)
+        Plans[Index] = PlanColumn(Id, Values, #Rows, LocalIds)
     end
 
     PutVarint(W, Group.Key)
@@ -1940,12 +2122,7 @@ const function WriteGroup(W: Writer, Group: Group)
     end
 
     for Index, Plan in Plans do
-        for Row = 1, #Rows do
-            const Key = Keys[Index][Row]
-            if Key ~= nil and Key ~= Plan.Default then
-                WriteValue(W, Plan, Key)
-            end
-        end
+        PutColumnValues(W, Plan, Keys[Index], #Rows, LocalIds)
     end
 end
 
@@ -2051,7 +2228,7 @@ const function ReadColumnHeader(Buf: buffer, Offset: number, Shared: {[buffer]: 
         end
 
         Column.Palette = Palette
-    elseif Encoding == COLUMN_GRID then
+    elseif Encoding == COLUMN_GRID or Encoding == COLUMN_GRID_DELTA then
         const Scale, ScaleRead = Varint.Read(Buf, At)
         At += ScaleRead
 
@@ -2060,7 +2237,7 @@ const function ReadColumnHeader(Buf: buffer, Offset: number, Shared: {[buffer]: 
         end
 
         Column.Scale = Scale
-    elseif Encoding ~= COLUMN_RAW then
+    elseif Encoding ~= COLUMN_RAW and Encoding ~= COLUMN_RELATIVE then
         Logger:Error(`Column {Id} is written in encoding {Encoding}, which this build does not know.`)
     end
 
@@ -2091,6 +2268,109 @@ const function ReadGrid(Buf: buffer, Offset: number, Scale: number): (buffer, nu
     end
 
     return Tagged, At - Offset
+end
+
+-- A Vector rebuilt from its grid integers, which the writer only used when they
+-- give back the same floats exactly.
+const function GridVector(X: number, Y: number, Z: number, Scale: number): buffer
+    const Tagged = buffer.create(13)
+    buffer.writeu8(Tagged, 0, VECTOR_TAG)
+    buffer.writef32(Tagged, 1, X / Scale)
+    buffer.writef32(Tagged, 5, Y / Scale)
+    buffer.writef32(Tagged, 9, Z / Scale)
+    return Tagged
+end
+
+-- Every value a column wrote, into the rows that wrote one. Returns how many
+-- bytes they took.
+const function ReadColumnValues(
+    Buf: buffer,
+    Offset: number,
+    Column: ReadColumn,
+    WrittenRows: {number},
+    Ids: {number},
+    Rows: {{[number]: buffer}}
+): number
+    local At = Offset
+    const Count = #WrittenRows
+
+    if Column.Encoding == COLUMN_GRID_DELTA then
+        const Scale = Column.Scale :: number
+        const Escaped: {boolean} = table.create(Count)
+        At += ReadBitmap(Buf, At, Count, Escaped)
+
+        const Axes: {{number}} = {table.create(Count), table.create(Count), table.create(Count)}
+        for Axis = 1, 3 do
+            const Values = Axes[Axis]
+            local Previous = 0
+            for Index = 1, Count do
+                if not Escaped[Index] then
+                    const Step, Read = Varint.ReadSigned(Buf, At)
+                    At += Read
+                    Previous += Step
+                    Values[Index] = Previous
+                end
+            end
+        end
+
+        for Index, Row in WrittenRows do
+            local Tagged: buffer
+            if Escaped[Index] then
+                Tagged = buffer.create(13)
+                buffer.writeu8(Tagged, 0, VECTOR_TAG)
+                buffer.copy(Tagged, 1, Buf, At, 12)
+                At += 12
+            else
+                Tagged = GridVector(Axes[1][Index], Axes[2][Index], Axes[3][Index], Scale)
+            end
+
+            Rows[Row][Column.Id] = Tagged
+        end
+
+        return At - Offset
+    end
+
+    for _, Row in WrittenRows do
+        local Tagged: buffer
+
+        if Column.Encoding == COLUMN_BOOL then
+            Tagged = Column.Other :: buffer
+        elseif Column.Encoding == COLUMN_PALETTE then
+            const Position, Read = Varint.Read(Buf, At)
+            At += Read
+
+            const Entry = (Column.Palette :: {buffer})[Position]
+            if not Entry then
+                Logger:Error(`Column {Column.Id} names palette entry {Position}, which it does not have.`)
+            end
+
+            Tagged = Entry :: buffer
+        elseif Column.Encoding == COLUMN_GRID then
+            const Value, Read = ReadGrid(Buf, At, Column.Scale :: number)
+            At += Read
+            Tagged = Value
+        elseif Column.Encoding == COLUMN_RELATIVE then
+            const Distance, Read = Varint.ReadSigned(Buf, At)
+            At += Read
+
+            const Target = Ids[Row] + Distance
+            if Target < 0 then
+                Logger:Error(`Column {Column.Id} points row {Ids[Row]} at {Target}, which is not an id.`)
+            end
+
+            Tagged = buffer.create(1 + Varint.Measure(Target))
+            buffer.writeu8(Tagged, 0, OBJECT_TAG)
+            Varint.Write(Tagged, 1, Target)
+        else
+            const Length = TaggedLength(Buf, At)
+            Tagged = Slice(Buf, At, Length)
+            At += Length
+        end
+
+        Rows[Row][Column.Id] = Tagged
+    end
+
+    return At - Offset
 end
 
 -- A row as the pack holds it: the group's key, its id, its tagged values by
@@ -2183,40 +2463,21 @@ const function ReadPack(Pack: buffer, Offset: number, Each: OnRow): number
 
         for Index, Column in Columns do
             const Has, Wrote = Present[Index], Written[Index]
+            const WrittenRows: {number} = {}
 
             for Row = 1, RowCount do
                 if Has and not Has[Row] then
                     continue
                 end
 
-                local Tagged: buffer
-
-                if not Wrote[Row] then
-                    Tagged = Column.Default
-                elseif Column.Encoding == COLUMN_BOOL then
-                    Tagged = Column.Other :: buffer
-                elseif Column.Encoding == COLUMN_PALETTE then
-                    const Position, Read = Varint.Read(Buf, At)
-                    At += Read
-
-                    const Entry = (Column.Palette :: {buffer})[Position]
-                    if not Entry then
-                        Logger:Error(`Column {Column.Id} names palette entry {Position}, which it does not have.`)
-                    end
-
-                    Tagged = Entry :: buffer
-                elseif Column.Encoding == COLUMN_GRID then
-                    const Value, Read = ReadGrid(Buf, At, Column.Scale :: number)
-                    At += Read
-                    Tagged = Value
+                if Wrote[Row] then
+                    table.insert(WrittenRows, Row)
                 else
-                    const Length = TaggedLength(Buf, At)
-                    Tagged = Slice(Buf, At, Length)
-                    At += Length
+                    Rows[Row][Column.Id] = Column.Default
                 end
-
-                Rows[Row][Column.Id] = Tagged
             end
+
+            At += ReadColumnValues(Buf, At, Column, WrittenRows, Ids, Rows)
         end
 
         for Row = 1, RowCount do

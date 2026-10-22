@@ -32,6 +32,11 @@ const UNREGISTER_MARKER = "UnregisterPulse"
 const OPENED_MARKER = "OpenedPulse"
 const TIMEOUT = 15
 
+-- The live fixtures are made once the server's own suite has run, so waiting
+-- for them is waiting for that suite. It outgrew TIMEOUT when the load tests
+-- started building tens of thousands of objects.
+const FIXTURE_TIMEOUT = 90
+
 const Prism = require("./Prism")
 const Harness = require("./Harness")
 
@@ -77,8 +82,8 @@ const function FindLiveObject(TypeId: number, PropertyId: number, Marker: string
     return nil
 end
 
-const function WaitFor(What: string, Check: () -> any): any
-    const Deadline = os.clock() + TIMEOUT
+const function WaitFor(What: string, Check: () -> any, Timeout: number?): any
+    const Deadline = os.clock() + (Timeout or TIMEOUT)
 
     while os.clock() < Deadline do
         const Result = Check()
@@ -118,19 +123,19 @@ end)
 const Denied = if CrateId and TitleId
     then WaitFor("denied fixture", function()
         return FindLiveObject(CrateId, TitleId, DENIED_MARKER)
-    end)
+    end, FIXTURE_TIMEOUT)
     else nil
 
 const Editable = if BareId and TitleId
     then WaitFor("editable fixture", function()
         return FindLiveObject(BareId, TitleId, EDITABLE_MARKER)
-    end)
+    end, FIXTURE_TIMEOUT)
     else nil
 
 const Destroyable = if BareId and TitleId
     then WaitFor("destroy fixture", function()
         return FindLiveObject(BareId, TitleId, DESTROY_MARKER)
-    end)
+    end, FIXTURE_TIMEOUT)
     else nil
 
 -- Rights on the default scene, where every editable fixture lives.
@@ -138,7 +143,7 @@ const Builder = if Editable
     then WaitFor("TestBuilder rights", function()
         const Rights = Permissions:GetOn(Editable.Scene)
         return if Rights and Rights.Role == "TestBuilder" then Rights else nil
-    end)
+    end, FIXTURE_TIMEOUT)
     else nil
 
 --=============================================================================

@@ -1505,6 +1505,12 @@ Each column is written whichever of these ways comes out smallest:
 - **grid**: a Vector as three small integers on a step such as half a stud.
   A Vector off the grid, `-0` included, is written as its twelve bytes instead.
   A value read back from the grid is always the same float, bit for bit.
+- **delta**: the grid again, but each Vector as how far it moved from the one
+  before it, every X step first, then every Y, then every Z. Blocks are placed
+  near the last one, so the steps are smaller than the positions.
+- **relative**: a reference as how far its target is from the object holding
+  it. Something made right after the thing it points at -- an attribute after
+  its block, a button after its door -- is one step back, every time.
 
 Everything is written column by column, bitmaps and values alike, so similar
 bytes sit together. The pack is then compressed with zstd, at level 19 for
@@ -1513,10 +1519,10 @@ how far a pack claims to unpack before unpacking it, and refuses anything past
 64MB, because a client can push a pack.
 
 Measured on a real building game's level of 20,287 blocks and 14,631 block
-attributes (34,918 objects): 4.22MB written as one record per object, 416KB
-in columns, and 163KB as stored after zstd. Positions are most of what is
-left; the level's blocks sit on a grid, which is why they cost as little as
-they do.
+attributes (34,918 objects): 4.22MB written as one record per object, 353KB
+in columns, and 129KB as stored after zstd. Writing references relative to
+their object took 33KB off that, and position steps a little more. Positions
+are most of what is left.
 
 Reading that pack back takes about a third of a second. Loading it takes
 longer, and not because of the pack: building 34,918 objects and 20,287 parts
