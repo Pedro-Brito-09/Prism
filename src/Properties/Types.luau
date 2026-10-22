@@ -2,7 +2,7 @@ const CustomEnum = require("../CustomEnum")
 const Handles = require("../Handles")
 const Codecs = require("../Codecs")
 
-export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum" | "Object"
+export type PropertyType = "Text" | "Number" | "Bool" | "Color" | "Vector" | "CFrame" | "Enum" | "CustomEnum" | "Object" | "Table"
 export type PropertyIdentifier = number
 
 export type TextConstraints = {
@@ -55,6 +55,25 @@ export type ObjectConstraints = {
     Types: {number | string}?,
 }
 
+-- A list of values that are all one other property type: Of names it, and Item
+-- holds that type's constraints, which every item is checked against exactly as
+-- a property of that type would be. Not nestable -- a Table of Tables has no
+-- item constraint that could say what it means.
+--
+-- Mandatory, unlike every other constraint here: without Of there is nothing to
+-- check an item against and nothing to tell a Number from an Object reference,
+-- both of which are Luau numbers.
+--
+-- MinItems refuses a shorter list, as MinLength refuses shorter text; MaxItems
+-- cuts a longer one, as MaxLength does. Registration caps MaxItems, and sets it
+-- when left out, so no list is unbounded.
+export type TableConstraints = {
+    Of: PropertyType,
+    Item: any?,
+    MinItems: number?,
+    MaxItems: number?,
+}
+
 type PropertyValues = {
     Text: string,
     Number: number,
@@ -67,6 +86,10 @@ type PropertyValues = {
 
     -- The target's local id, not the object. See Objects/Shared.
     Object: number,
+
+    -- Frozen. A list changed in place would never pass through Set, so nothing
+    -- -- undo, replication, listeners -- would hear that it had changed.
+    Table: {any},
 }
 
 type PropertyConstraints = {
@@ -79,6 +102,7 @@ type PropertyConstraints = {
     Enum: EnumConstraints,
     CustomEnum: CustomEnumConstraints,
     Object: ObjectConstraints,
+    Table: TableConstraints,
 }
 
 type function GetFromMap(Map, Key)
@@ -177,6 +201,7 @@ Types.Map = {
     Enum = "EnumItem",
     CustomEnum = "table",
     Object = "number",
+    Table = "table",
 }
 
 Types.Ids = {
@@ -189,9 +214,48 @@ Types.Ids = {
     Enum = 6,
     CustomEnum = 7,
     Object = 8,
+    Table = 9,
 }
 
+-- Hard ceiling on a list, and what MaxItems becomes when left out. Every item is
+-- validated on every set and sent whole on every change, so this is about the
+-- cost of one packet rather than what the format can write.
+Types.MAX_TABLE_ITEMS = 4096
+
 const F32_MAX = 3.4028235e+38
+
+-- An array and nothing else: every key a whole number from 1 to its length, so
+-- no holes and no fields. A dictionary passed as a list would be written in an
+-- order nobody chose and read back as something else.
+const function IsList(Value: {[any]: any}): boolean
+    const Length = #Value
+    local Keys = 0
+
+    for Key in Value do
+        if type(Key) ~= "number" or Key < 1 or Key > Length or Key % 1 ~= 0 then
+            return false
+        end
+
+        Keys += 1
+    end
+
+    return Keys == Length
+end
+
+-- What a Table may hold: any type but itself.
+function Types.IsItemType(Of: any): boolean
+    return type(Of) == "string" and Of ~= "Table" and (Types.Ids :: any)[Of] ~= nil
+end
+
+-- Whether a property holds references, alone or as a list of them. Takes a
+-- property or a registry: both carry Type and Constraints.
+function Types.HoldsReferences(Prop: any): boolean
+    if Prop.Type == "Object" then
+        return true
+    end
+
+    return Prop.Type == "Table" and Prop.Constraints ~= nil and Prop.Constraints.Of == "Object"
+end
 
 const function FixNumber(Value: ValueFor<"Number">, Constraints: ConstraintsFor<"Number">)
     if Constraints.Precision and Constraints.Scale then
@@ -241,6 +305,29 @@ function Types:IsValid<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraints
         return TypedValue >= 0
             and TypedValue <= Handles.MAX_LOCAL
             and TypedValue % 1 == 0
+    end
+
+    -- Every item as a property of the item type would be. Object items are
+    -- held to the bounds an Object property is, and like one, whether each
+    -- names anything is left to Objects/Shared.
+    if Type == "Table" then
+        const List = (Value :: any) :: {any}
+        const TableConstraints = (Constraints :: any) :: TableConstraints?
+        if not TableConstraints or not Types.IsItemType(TableConstraints.Of) then
+            return false
+        end
+
+        if not IsList(List) or #List < (TableConstraints.MinItems or 0) then
+            return false
+        end
+
+        for _, Item in List do
+            if not Types:IsValid(TableConstraints.Of, Item, TableConstraints.Item) then
+                return false
+            end
+        end
+
+        return true
     end
 
     if Constraints then
@@ -354,9 +441,58 @@ function Types:FixValue<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraint
         )
 
         return TypedValue
+    elseif Type == "Table" then
+        const List = (Value :: any) :: {any}
+        const TableConstraints = (Constraints :: any) :: TableConstraints
+        const Length = math.min(#List, TableConstraints.MaxItems or Types.MAX_TABLE_ITEMS)
+
+        const Fixed = table.create(Length)
+        local Same = Length == #List
+
+        for Index = 1, Length do
+            const Item = Types:FixValue(TableConstraints.Of, List[Index], TableConstraints.Item)
+            Fixed[Index] = Item
+            if Item ~= List[Index] then
+                Same = false
+            end
+        end
+
+        -- A frozen list nothing had to change is handed back as it is, so a
+        -- value read out of a property goes back in as the same table.
+        if Same and table.isfrozen(List) then
+            return List :: any
+        end
+
+        return table.freeze(Fixed) :: any
     end
 
     return Value
+end
+
+-- Whether two values of one type are the same value. Plain equality for every
+-- type but Table, whose values would otherwise compare by identity: two lists
+-- holding the same items read as a change, and a step of history holding one
+-- list never matched the property holding another.
+function Types:Equals(Type: PropertyType, Left: any, Right: any): boolean
+    if Left == Right then
+        return true
+    end
+
+    if Type ~= "Table" or type(Left) ~= "table" or type(Right) ~= "table" then
+        return false
+    end
+
+    if #Left ~= #Right then
+        return false
+    end
+
+    for Index = 1, #Left do
+        if Left[Index] ~= Right[Index] then
+            return false
+        end
+    end
+
+    return true
 end
 
 local ReverseIds;

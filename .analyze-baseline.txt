@@ -1,5 +1,5 @@
 src/Channels.luau	1
-src/Compressor.luau	13
+src/Compressor.luau	12
 src/Database/Server.luau	1
 src/History/Client.luau	1
 src/History/Server.luau	1
@@ -20,4 +20,4 @@ src/World.luau	2
 src/init.luau	11
 tests/Client.client.luau	2
 tests/Harness.luau	5
-tests/Server.server.luau	21
+tests/Server.server.luau	24

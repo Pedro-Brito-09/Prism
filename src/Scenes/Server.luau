@@ -25,6 +25,7 @@ const Network = require("./Network")
 const Handles = require("../Handles")
 const IdPool = require("../IdPool")
 const Logger = require("../Logger")
+const Try = require("../Try")
 const ObjectTypes = require("../Objects/Types")
 const Types = require("./Types")
 
@@ -286,12 +287,20 @@ const function __place(self: SceneInstance, Pack: buffer): {ObjectTypes.Object}?
     for _, Entry in Pending do
         for PropertyId, Saved in Entry.References do
             const Prop = Entry.Object.Properties[PropertyId]
-            const Target = Placed[Saved]
+            if not Prop then
+                continue
+            end
 
             -- Left at nothing when the pack did not carry what it pointed at,
-            -- which is what a property never written reads as.
-            if Prop and Target then
-                Prop:Set(Target.LocalId)
+            -- which is what a property never written reads as. A list loses
+            -- just that item.
+            const Remapped = ObjectShared.Remap(Prop, Saved, function(Item: number): number?
+                const Target = Placed[Item]
+                return if Target then Target.LocalId else nil
+            end)
+
+            if Remapped ~= nil then
+                Prop:Set(Remapped)
             end
         end
     end
@@ -323,7 +332,7 @@ const function __instance_serialize(self: SceneInstance): buffer
         return A.LocalId < B.LocalId
     end)
 
-    -- Each kept record as the bytes it was read from, untouched.
+    -- Each kept object as the tagged values it was read with, untouched.
     for Index, Entry in List do
         if Entry.__type == "DecompressedObject" then
             List[Index] = Entry.Source
@@ -634,6 +643,20 @@ const function __serialize(self: Scene): buffer
     return self.Data or Compressor:CompressScene(self.LastId, {})
 end
 
+const SAVE_ATTEMPTS = 5
+
+-- The buffer itself rather than buffer.tostring of it. A DataStore only takes
+-- a string that is valid UTF-8, and a pack is binary through and through: any
+-- byte past 127 that does not open a UTF-8 sequence makes the write fail.
+const function __save(self: Scene, Store: GlobalDataStore, Key: string): boolean
+    const Success = Try(SAVE_ATTEMPTS, Store.SetAsync, Store, Key, __serialize(self))
+    if not Success then
+        Logger:Warn(`Failed to save scene {self.Name} to key {Key}.`)
+    end
+
+    return Success
+end
+
 const function __get_instances(self: Scene): {any}
     const List = {}
     for _, Instance_ in self.Instances do
@@ -807,6 +830,7 @@ function Scenes.new(Config: SceneConfig): Scene?
     Scene.Open = __open
     Scene.Unload = __unload
     Scene.Serialize = __serialize
+    Scene.Save = __save
     Scene.GetInstances = __get_instances
     Scene.Destroy = __destroy
     Scene.Admit = __admit
@@ -845,6 +869,29 @@ function Scenes.fromBuffer(Config: SceneConfig, Data: buffer): Scene?
 
     Scene.Data = Data
     return Scene
+end
+
+-- Registers a scene around what Save wrote to a key. A key holding nothing is a
+-- level nobody has saved yet, and comes back as an empty scene; nil means the
+-- key could not be read, or holds something that is not a pack, and nothing
+-- was registered.
+function Scenes.fromDataStore(Config: SceneConfig, Store: GlobalDataStore, Key: string): Scene?
+    const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key)
+    if not Success then
+        Logger:Warn(`Failed to read scene {Config.Name} from key {Key}.`)
+        return nil
+    end
+
+    if Stored == nil then
+        return Scenes.new(Config)
+    end
+
+    if type(Stored) == "buffer" then
+        return Scenes.fromBuffer(Config, Stored)
+    end
+
+    Logger:Warn(`Key {Key} holds a {typeof(Stored)}, not a scene pack.`)
+    return nil
 end
 
 function Scenes:Get(Name: string): Scene?

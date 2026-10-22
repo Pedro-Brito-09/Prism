@@ -122,8 +122,8 @@ const function __getter(self: Object, Reference: Types.PropertyReference): any?
     -- Nothing is hidden by this: the raw id is still there on the property
     -- itself, through GetProperty, which is where everything Get and Set do
     -- not cover lives.
-    if Prop.Type == "Object" then
-        return Shared.ResolveReference(self.InstanceId, Value, Find)
+    if PropertyTypes.HoldsReferences(Prop) then
+        return Shared.ResolveValue(self.InstanceId, Prop, Value, Find)
     end
 
     return Value
@@ -148,7 +148,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     end
 
     if Changed then
-        const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
+        const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
         if Compressed then
             Audience.Fire(Network.PropertyChanged, self.Scene, ReachOf(self), self.RuntimeId, Prop.Parent, Compressed)
         end
@@ -872,7 +872,7 @@ const function Construct(
             -- copy its references will ever mean anything in. The object
             -- itself does not exist yet, and does not need to: a reference is
             -- read against the copy, not against whoever holds it.
-            if Prop.Type == "Object" then
+            if PropertyTypes.HoldsReferences(Prop) then
                 const Target, Why = Shared.Reference(Instance_.Id, Prop, Value, Find)
                 if Target == nil then
                     Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
@@ -1148,23 +1148,26 @@ function Objects:DuplicateGroup(List: {Object}, Target: any?): {Object}
         const Source = Sources[Index]
 
         for PropertyId, Prop in New.Properties do
-            if Prop.Type ~= "Object" then
+            if not PropertyTypes.HoldsReferences(Prop) then
                 continue
             end
 
             -- Read from the original, against the original's copy: that is
             -- where the id it was written with means what it meant. The
             -- duplicate holds the same id, but nothing says it names the same
-            -- object there.
+            -- object there. An id pointing outside the group keeps pointing
+            -- where it did.
             const Was = Source.Properties[PropertyId]
-            const Pointed = if Was then Shared.ResolveReference(Source.InstanceId, Was.Value, Find) else nil
-            if not Pointed then
-                continue
-            end
+            const Remapped = if Was
+                then Shared.Remap(Prop, Was.Value, function(Item: number): number?
+                    const Pointed = Shared.ResolveReference(Source.InstanceId, Item, Find)
+                    const Instead = if Pointed then Counterpart[Pointed] else nil
+                    return if Instead then Instead.LocalId else Item
+                end)
+                else nil
 
-            const Instead = Counterpart[Pointed]
-            if Instead then
-                Prop:Set(Instead.LocalId)
+            if Remapped ~= nil then
+                Prop:Set(Remapped)
             end
         end
     end
@@ -1510,12 +1513,18 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, Prop
 
     -- The payload is self describing, so this also confirms the client sent the
     -- type the property actually expects rather than trusting it to.
-    const Ok, Value, Type = pcall(function()
-        const Decoded, _, DecodedType = Compressor:DecompressValue(Compressed, 0)
-        return Decoded, DecodedType
+    const Ok, Value, Type, ItemType = pcall(function()
+        const Decoded, _, DecodedType, DecodedItemType = Compressor:DecompressValue(Compressed, 0)
+        return Decoded, DecodedType, DecodedItemType
     end)
 
     if not Ok or Type ~= Prop.Type then
+        return false
+    end
+
+    -- A list's items as well: Numbers sent to a list of references are all
+    -- numbers, and nothing after this could tell.
+    if Type == "Table" and ItemType and ItemType ~= Prop.Constraints.Of then
         return false
     end
 
@@ -1527,7 +1536,7 @@ Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, Prop
         return false
     end
 
-    if Prop.Value ~= Before then
+    if not PropertyTypes:Equals(Prop.Type, Prop.Value, Before) then
         for _, Callback in Edited do
             Callback(Plr, Obj, PropId, Before, Prop.Value)
         end

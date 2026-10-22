@@ -254,10 +254,17 @@ const function __place(self: SceneInstance, Pack: buffer): any
     for _, Entry in Pending do
         for PropertyId, Saved in Entry.References do
             const Prop = Entry.Object.Properties[PropertyId]
-            const Target = Placed[Saved]
+            if not Prop then
+                continue
+            end
 
-            if Prop and Target then
-                Prop:Set(Target.LocalId)
+            const Remapped = ObjectShared.Remap(Prop, Saved, function(Item: number): number?
+                const Target = Placed[Item]
+                return if Target then Target.LocalId else nil
+            end)
+
+            if Remapped ~= nil then
+                Prop:Set(Remapped)
             end
         end
     end
@@ -296,7 +303,7 @@ const function __instance_serialize(self: SceneInstance): buffer
         return A.LocalId < B.LocalId
     end)
 
-    -- Each kept record as the bytes it was read from, untouched.
+    -- Each kept object as the tagged values it was read with, untouched.
     for Index, Entry in List do
         if Entry.__type == "DecompressedObject" then
             List[Index] = Entry.Source

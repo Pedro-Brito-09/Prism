@@ -117,8 +117,9 @@ type PlannedCreate = {
     Properties: {[number]: any},
 
     -- By position in this plan's own create list, not by the operation index
-    -- the builder wrote.
-    References: {[number]: number}?,
+    -- the builder wrote. A list for a Table of references, zero for an item
+    -- keeping the id its value gives it.
+    References: {[number]: number | {number}}?,
 }
 
 type LocalPlan = {
@@ -137,7 +138,7 @@ const function Plan(Transaction: Transaction): LocalPlan?
     const Doomed: {[number]: true} = {}
     const Withdrawn: {[number]: true} = {}
     const CreateAt: {[number]: number} = {}
-    const Pending: {{At: number, References: {[number]: number}}} = {}
+    const Pending: {{At: number, References: {[number]: number | {number}}}} = {}
 
     for Index, Operation in Transaction.Operations do
         const Op = Operation :: any
@@ -223,13 +224,41 @@ const function Plan(Transaction: Transaction): LocalPlan?
     -- A reference names the operation that makes its target, because the id it
     -- will hold is minted as the creates run. Answered here, against the whole
     -- list, since the create it names may be further down it.
+    const function Locate(Names: number): number?
+        const At = CreateAt[Names]
+        if not At then
+            Logger:Warn(`A local transaction has a reference naming operation {Names}, which is not a create in it.`)
+        end
+
+        return At
+    end
+
     for _, Entry in Pending do
-        const Resolved: {[number]: number} = {}
+        const Resolved: {[number]: number | {number}} = {}
 
         for PropertyId, Names in Entry.References do
-            const At = CreateAt[Names]
+            if type(Names) == "table" then
+                const List = table.create(#Names)
+                for Index, Operation in Names do
+                    if Operation == 0 then
+                        List[Index] = 0
+                        continue
+                    end
+
+                    const At = Locate(Operation)
+                    if not At then
+                        return nil
+                    end
+
+                    List[Index] = At
+                end
+
+                Resolved[PropertyId] = List
+                continue
+            end
+
+            const At = Locate(Names :: number)
             if not At then
-                Logger:Warn(`A local transaction has a reference naming operation {Names}, which is not a create in it.`)
                 return nil
             end
 
@@ -288,8 +317,29 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
             const Obj = Created[Index]
             for PropertyId, Names in Create.References do
                 const Prop = Obj.Properties[PropertyId]
+                if not Prop then
+                    continue
+                end
+
+                -- Item by item, as on the server: the made object's id where an
+                -- entry names a create, the held id where it does not.
+                if type(Names) == "table" then
+                    const Held = if type(Prop.Value) == "table" then Prop.Value else {}
+                    const List = table.create(#Names)
+
+                    for Item, Entry in Names do
+                        const Points = if Entry ~= 0 then Created[Entry] else nil
+                        List[Item] = if Points then Points.LocalId
+                            elseif Entry == 0 then Held[Item] or ObjectShared.NO_TARGET
+                            else ObjectShared.NO_TARGET
+                    end
+
+                    Prop:Set(table.freeze(List))
+                    continue
+                end
+
                 const Points = Created[Names]
-                if Prop and Points then
+                if Points then
                     Prop:Set(Points.LocalId)
                 end
             end

@@ -192,7 +192,38 @@ function Shared.factory(
 
             for PropertyId, Value in Operation.Properties do
                 const Prop = Source:GetProperty(PropertyId)
-                if not Prop or Prop.Type ~= "Object" then
+                if not Prop or not PropertyTypes.HoldsReferences(Prop) then
+                    continue
+                end
+
+                -- A list: one entry per item, naming the create for an item
+                -- pointing into the group and zero for one that keeps its id.
+                -- The value goes along with zero where the create fills in, so
+                -- the items pointing outside the group still have something to
+                -- say what they are.
+                if Prop.Type == "Table" then
+                    const Names = table.create(#Value)
+                    const Kept = table.create(#Value)
+                    local Any = false
+
+                    for Index, Item in Value do
+                        const Pointed = Objects:Resolve(Source.InstanceId, Item)
+                        const Instead = if Pointed then MadeBy[Pointed] else nil
+
+                        Names[Index] = Instead or 0
+                        Kept[Index] = if Instead then ObjectShared.NO_TARGET else Item
+                        Any = Any or Instead ~= nil
+                    end
+
+                    if Any then
+                        if not Operation.References then
+                            Operation.References = {}
+                        end
+
+                        (Operation.References :: any)[PropertyId] = Names
+                        Operation.Properties[PropertyId] = table.freeze(Kept)
+                    end
+
                     continue
                 end
 
@@ -278,7 +309,20 @@ function Shared.factory(
             const Operation = self.Operations[Entry.Index] :: Types.CreateOperation
 
             for PropertyId, Saved in Entry.References do
-                const Names = Placed[Saved]
+                -- A list keeps only the items whose target the pack carried,
+                -- each naming the create that makes it.
+                local Names: any = nil
+                if type(Saved) == "table" then
+                    Names = {}
+                    for _, Item in Saved do
+                        if Placed[Item] then
+                            table.insert(Names, Placed[Item])
+                        end
+                    end
+                else
+                    Names = Placed[Saved]
+                end
+
                 if not Names then
                     continue
                 end
@@ -321,7 +365,7 @@ function Shared.factory(
         -- thing Object:Set takes, and so pointing at an object in another copy
         -- is refused where the objects are still both in hand to be named.
         local Held = Value
-        if Prop.Type == "Object" then
+        if PropertyTypes.HoldsReferences(Prop) then
             const Target, Why = Objects.Reference(Obj.InstanceId, Prop, Value)
             if Target == nil then
                 Reject(self, `{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)

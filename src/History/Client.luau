@@ -25,6 +25,7 @@ const Transactions = require("../Transactions/Client")
 const Network = require("./Network")
 const Listeners = require("../Listeners")
 const Logger = require("../Logger")
+const PropertyTypes = require("../Properties/Types")
 const Types = require("../Objects/Types")
 
 const History = {}
@@ -348,7 +349,7 @@ const function ApplyLocal(Step: Step, Forward: boolean): boolean
             const From, To = Ends(Entry, Forward)
 
             -- Changed since by something other than this step: left alone.
-            if Prop and Prop.Value == From then
+            if Prop and PropertyTypes:Equals(Prop.Type, Prop.Value, From) then
                 Obj:Set(Entry.Property :: number, if To == nil then Prop.DefaultValue else To)
             end
         elseif Present(Entry, Forward) then

@@ -137,7 +137,7 @@ Save on the server when the player asks to.
 ```lua
 -- server
 room:Commit()
-DataStore:SetAsync("Level 1", buffer.tostring(Level:Serialize()))
+Level:Save(DataStore, "Level 1")
 ```
 
 `roomCopyId` is the id of the copy the server loaded. A client hears of a copy
@@ -687,16 +687,25 @@ holds them in between.
 
 ### Saving
 
-`instance:Commit()` writes a copy back into its scene; `Scene:Serialize()` hands
-you the committed pack to store wherever you like.
+`instance:Commit()` writes a copy back into its scene; `Scene:Save(store, key)`
+writes the committed pack to a DataStore key, and `Scenes.fromDataStore` reads
+it back.
 
 ```lua
 -- server
 room:Commit()
-DataStore:SetAsync(key, buffer.tostring(Rooms:Serialize()))
+Rooms:Save(DataStore, key)                               -- false if every retry failed
 
-Prism.Scenes.fromBuffer({Name = "Rooms2"}, pack)   -- registered, nothing live
+Prism.Scenes.fromDataStore({Name = "Rooms"}, DataStore, key)   -- registered, nothing live
 ```
+
+A key that holds nothing yet comes back as an empty scene; `nil` means the key
+couldn't be read or doesn't hold a pack.
+
+`Scene:Serialize()` hands you the pack itself, to store wherever you like, and
+`Scenes.fromBuffer(config, pack)` reads one. Store it as the **buffer**, never
+`buffer.tostring` of it: a DataStore only takes strings that are valid UTF-8,
+and a pack's bytes are not, so that write fails.
 
 Committing is always explicit. Unloading never writes back on its own — with
 more than one copy live it would have to pick one, and it cannot.
@@ -1265,9 +1274,21 @@ push. The server re-checks every request, whatever the client thinks.
 ## Database
 
 Sharded metadata storage. Records live in `{Key}:1..N`; ids come from a
-monotonic counter, so when the tail shard nears the 4 MB value limit its
-boundary freezes and a new tail opens. Records never move between shards, and
-edits to different shards do not contend with each other.
+monotonic counter, so when the tail shard reaches its limit its boundary
+freezes and a new tail opens. Records never move between shards, and edits to
+different shards do not contend with each other.
+
+A shard is stored as the same packed format as a scene (see
+[Storage format](#scene-packs)). On 20,000 typical level records (title,
+creator, plays, likes, date, public flag, thumbnail) that came to 14 bytes a
+record, down from 61. MemoryStore pages are packed the same way, so a 31 KB
+page holds about 1,300 records.
+
+The limit (`ShardLimit`, 1 MB by default) is measured **before** compression,
+because it is a CPU budget rather than a storage one: every create decodes and
+re-encodes the whole tail shard inside an `UpdateAsync` transform, which cannot
+yield. 1 MB is about 30,000 records and about a second per create. What a shard
+actually stores is a quarter to a third of that.
 
 ```lua
 -- server
@@ -1431,6 +1452,40 @@ which makes them far more likely to fit the 4-byte form.
 
 Ids, lengths and counts are LEB128 varints: one byte below 128, two below 16384.
 
+### Scene packs
+
+A scene's pack doesn't write its objects one record at a time. It groups them
+by type and writes each type's properties once, as columns. Each column carries
+a default: the value it holds most often **in that pack**. Each object then
+spends one bit per column saying whether it holds something else, and writes
+only those values.
+
+The default belongs to the pack, not the registry. Changing a property's
+`DefaultValue` later changes nothing about a level already saved: every object
+reads back holding exactly what it was saved with, defaults included.
+
+Each column is written whichever of these ways comes out smallest:
+
+- **raw**: each value tagged, as above. Any column can fall back to it, and it
+  keeps a pack readable with no registry.
+- **bool**: nothing beyond the bit, which is the value.
+- **palette**: the column's distinct values once, then an index per object.
+  Materials, enums, mesh ids, colours.
+- **grid**: a Vector as three small integers on a step such as half a stud.
+  A Vector off the grid, `-0` included, is written as its twelve bytes instead.
+  A value read back from the grid is always the same float, bit for bit.
+
+Everything is written column by column, bitmaps and values alike, so similar
+bytes sit together. The pack is then compressed with zstd, at level 19 for
+scenes and 9 for database shards, when that makes it smaller. A reader checks
+how far a pack claims to unpack before unpacking it, and refuses anything past
+64MB, because a client can push a pack.
+
+Measured on a real building game's level of 20,287 blocks and 14,631 block
+attributes (34,918 objects): 4.53MB written as one record per object, 154KB
+packed in rows with zstd at level 9. Column-by-column order plus level 19
+then took a second mapping of the same level from 89KB to 76KB.
+
 Property ids are **never recycled**, because they are written into saved data —
 reusing one for a different property would silently reinterpret every record
 still carrying it. Object registry ids are not recycled either, for the same
@@ -1447,7 +1502,8 @@ cannot use and writes it back unchanged.
 
 - **An object of a type that is not registered** is not built — nothing finds,
   draws or replicates it — but the copy keeps it (`copy.Unknown`), and
-  `Serialize` and `Commit` put it back in its place by local id, byte for byte.
+  `Serialize` and `Commit` put it back in its place by local id, every value
+  exactly as it was read.
   Its local id stays spent, so a new object never takes it.
 - **A value for a property the object's type no longer lists**, or for a
   property id nobody registered, is not the object's: `Get` does not see it. It

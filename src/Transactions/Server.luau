@@ -36,6 +36,7 @@ const Properties = require("../Properties/Server")
 const ObjectTypes = require("../Objects/Types")
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
+const ObjectShared = require("../Objects/Shared")
 const Scenes = require("../Scenes/Server")
 const Audience = require("../Scenes/Audience")
 const Network = require("./Network")
@@ -99,8 +100,9 @@ type PlannedCreate = {
     -- Object properties pointing at something else this transaction creates,
     -- by the position of that object in the plan's own create list rather than
     -- by the operation index the packet named. Resolved to ids once the creates
-    -- have run and the copy has minted them.
-    References: {[PropertyTypes.PropertyIdentifier]: number}?,
+    -- have run and the copy has minted them. A Table of references holds a list,
+    -- zero for an item that keeps the id its value gives it.
+    References: {[PropertyTypes.PropertyIdentifier]: number | {number}}?,
 }
 
 type PlannedSet = {
@@ -124,8 +126,9 @@ type PendingReference = {
     Property: PropertyTypes.PropertyIdentifier,
 
     -- The operation the author named, and the copy the create carrying this
-    -- reference is going into, as the packet wrote it.
-    Operation: number,
+    -- reference is going into, as the packet wrote it. A list for a Table of
+    -- references, zero for an item naming no operation.
+    Operation: number | {number},
     Instance: number,
 }
 
@@ -286,8 +289,11 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                         return Refuse(Plr, `property {PropertyId} is not registered.`)
                     end
 
-                    if PropertyRegistry.Type ~= "Object" then
-                        return Refuse(Plr, `{PropertyRegistry.Name} is a {PropertyRegistry.Type}, which cannot hold a reference.`)
+                    -- A list of operations for a list of references, one for
+                    -- one, and never the other way round.
+                    const IsList = type(Names) == "table"
+                    if not PropertyTypes.HoldsReferences(PropertyRegistry) or IsList ~= (PropertyRegistry.Type == "Table") then
+                        return Refuse(Plr, `{PropertyRegistry.Name} is a {PropertyRegistry.Type}, which cannot hold {if IsList then "a list of references" else "a reference"}.`)
                     end
 
                     -- A reference is a write of that property, so it asks for
@@ -334,6 +340,12 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 return Refuse(Plr, `{Prop.Name} is a {Prop.Type} and the operation carried a {tostring(Operation.Type)}.`)
             end
 
+            -- And a list's items, which IsValid cannot tell apart where they
+            -- are all numbers. An empty list has no item type to disagree.
+            if Prop.Type == "Table" and Operation.ItemType and Operation.ItemType ~= Prop.Constraints.Of then
+                return Refuse(Plr, `{Prop.Name} holds {Prop.Constraints.Of} and the operation carried {Operation.ItemType}.`)
+            end
+
             if not PropertyTypes:IsValid(Prop.Type, Operation.Value, Prop.Constraints) then
                 return Refuse(Plr, `{Prop.Name} cannot hold {tostring(Operation.Value)}.`)
             end
@@ -344,7 +356,7 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             -- the object being written. Refused here, where the world has not
             -- moved, rather than dropped inside the apply.
             local Value = Operation.Value
-            if Prop.Type == "Object" then
+            if PropertyTypes.HoldsReferences(Prop) then
                 const Reference, Why = Objects.Reference(Obj.InstanceId, Prop, Value)
                 if Reference == nil then
                     return Refuse(Plr, `{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)
@@ -460,19 +472,53 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
     end
 
     -- Now that every operation has been read, the references can be answered.
-    for _, Reference in Pending do
-        const Names = CreateAt[Reference.Operation]
+    -- Where in Creates the operation a reference names ended up, or why it
+    -- cannot be pointed at.
+    const function Locate(Operation: number, Instance: number): (number?, string?)
+        const Names = CreateAt[Operation]
         if not Names then
-            return Refuse(Plr, `a reference names operation {Reference.Operation}, which is not a create in this transaction.`)
+            return nil, `a reference names operation {Operation}, which is not a create in this transaction.`
         end
 
         -- Both creates have to land in the same copy, because a local id means
         -- nothing outside one. Compared as the packet wrote them: two creates
         -- of one group carry the same copy, and a caller mixing "this copy" and
         -- "wherever creates go" is told so rather than guessed at.
-        const Other = Operations[Reference.Operation] :: Types.CreateOperation
-        if Other.Instance ~= Reference.Instance then
-            return Refuse(Plr, "a reference names a create going into another copy.")
+        const Other = Operations[Operation] :: Types.CreateOperation
+        if Other.Instance ~= Instance then
+            return nil, "a reference names a create going into another copy."
+        end
+
+        return Names
+    end
+
+    for _, Reference in Pending do
+        local Names: number | {number}
+
+        if type(Reference.Operation) == "table" then
+            const Resolved = table.create(#Reference.Operation)
+            for Index, Operation in Reference.Operation do
+                if Operation == 0 then
+                    Resolved[Index] = 0
+                    continue
+                end
+
+                const At, Why = Locate(Operation, Reference.Instance)
+                if not At then
+                    return Refuse(Plr, Why :: string)
+                end
+
+                Resolved[Index] = At
+            end
+
+            Names = Resolved
+        else
+            const At, Why = Locate(Reference.Operation :: number, Reference.Instance)
+            if not At then
+                return Refuse(Plr, Why :: string)
+            end
+
+            Names = At
         end
 
         const Create = Creates[Reference.Create]
@@ -597,9 +643,28 @@ function Transactions.Apply(
             const Obj = Created[Index]
             for PropertyId, Names in Create.References do
                 const Prop = Obj.Properties[PropertyId]
-                const Points = Created[Names]
-                if not Prop or not Points then
+                if not Prop then
                     continue
+                end
+
+                -- A list is put together item by item: the object a create made
+                -- where an entry names one, and the id the value already held
+                -- where it does not.
+                local Points: any
+                if type(Names) == "table" then
+                    const Held = if type(Prop.Value) == "table" then Prop.Value else {}
+                    Points = table.create(#Names)
+
+                    for Item, Entry in Names do
+                        Points[Item] = if Entry == 0
+                            then Held[Item] or ObjectShared.NO_TARGET
+                            else Created[Entry] or ObjectShared.NO_TARGET
+                    end
+                else
+                    Points = Created[Names]
+                    if not Points then
+                        continue
+                    end
                 end
 
                 -- Through the same check a set makes, against the objects now
@@ -608,7 +673,7 @@ function Transactions.Apply(
                 -- the rollback below rather than leaving half a wiring.
                 const Target, Why = Objects.Reference(Obj.InstanceId, Prop, Points)
                 if Target == nil then
-                    error(`{Obj.Name}.{Prop.Name} cannot point at {Points.Name}: {Why}.`)
+                    error(`{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)
                 end
 
                 Prop:Set(Target)
@@ -634,7 +699,7 @@ function Transactions.Apply(
                 continue
             end
 
-            const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value)
+            const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
             if not Compressed then
                 continue
             end

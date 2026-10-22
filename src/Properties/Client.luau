@@ -69,8 +69,22 @@ const function Placeholder(Name: string): any
 end
 
 const function Register(Payload: any)
-    const Constraints = Payload.Constraints
-    if Payload.Type == "CustomEnum" and Constraints and type(Constraints.CustomEnum) == "string" then
+    -- Where the enum's name sits: on the constraints of a CustomEnum, on the
+    -- item constraints of a Table of them.
+    local Constraints = Payload.Constraints
+    if Payload.Type == "Table" and Constraints then
+        Constraints = if Constraints.Of == "CustomEnum" then Constraints.Item else nil
+    elseif Payload.Type ~= "CustomEnum" then
+        Constraints = nil
+    end
+
+    -- Frozen on the server, but a remote hands over a copy, and every property
+    -- built from this registry starts out holding this table.
+    if Payload.Type == "Table" and type(Payload.DefaultValue) == "table" and not table.isfrozen(Payload.DefaultValue) then
+        table.freeze(Payload.DefaultValue)
+    end
+
+    if Constraints and type(Constraints.CustomEnum) == "string" then
         const Name = Constraints.CustomEnum
         const Resolved = CustomEnum:GetEnum(Name)
         if not Resolved then

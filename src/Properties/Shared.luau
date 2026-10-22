@@ -26,7 +26,9 @@ const function __setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): (boole
         return false, false
     end
 
-    if Val == self.Value then
+    -- By value, not identity: a Table set to an equal list is no change, and
+    -- keeps the list it already held.
+    if Types:Equals(self.Type :: any, Val, self.Value) then
         return true, false
     end
 
@@ -48,7 +50,7 @@ const function __default_setter<T>(self: Property<T>, Value: Types.ValueFor<T>?)
         return false, false
     end
 
-    if Val == self.DefaultValue then
+    if Types:Equals(self.Type :: any, Val, self.DefaultValue) then
         return true, false
     end
 

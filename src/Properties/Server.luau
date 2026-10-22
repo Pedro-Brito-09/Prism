@@ -25,14 +25,29 @@ const Registered: {[PropertyIdentifier]: PropertyRegistry<any>} = {}
 -- no client ever received it. Only the enum's name crosses the wire; the client
 -- resolves it against its own registry, which is why custom enums have to be
 -- registered from shared code rather than server-only code.
+--
+-- A Table of CustomEnum carries the same enum one level down, in its item
+-- constraints, and crosses the same way.
 const function ToRegistryPayload(Registry: PropertyRegistry<any>): any
     const Constraints = (Registry :: any).Constraints
-    if Registry.Type ~= "CustomEnum" or not Constraints then
+    if not Constraints then
         return Registry
     end
 
-    const Copy = table.clone(Constraints)
-    Copy.CustomEnum = if Constraints.CustomEnum then Constraints.CustomEnum.Name else nil
+    local Copy
+
+    if Registry.Type == "CustomEnum" then
+        Copy = table.clone(Constraints)
+        Copy.CustomEnum = if Constraints.CustomEnum then Constraints.CustomEnum.Name else nil
+    elseif Registry.Type == "Table" and Constraints.Of == "CustomEnum" and Constraints.Item then
+        const Item: any = table.clone(Constraints.Item)
+        Item.CustomEnum = if Item.CustomEnum then Item.CustomEnum.Name else nil
+
+        Copy = table.clone(Constraints)
+        Copy.Item = Item
+    else
+        return Registry
+    end
 
     return {
         __type = "PropertyRegistry",
@@ -63,27 +78,65 @@ function Properties.Unretain(Identifier: PropertyIdentifier)
     Holders[Identifier] = if Count > 0 then Count else nil
 end
 
+-- Fills in what the constraints derive, in place. A Table's item constraints
+-- are a property's constraints one level down, so they get the same treatment.
+const function Prepare(Type: any, Constraints: any)
+    if Type == "Number" and Constraints.Precision then
+        local Scale = 1
+        while math.abs(Constraints.Precision * Scale - math.round(Constraints.Precision * Scale)) > 1e-9 do
+            Scale *= 10
+        end
+
+        Constraints.Scale = Scale
+    end
+
+    if Type == "Text" and Constraints.MaxLength then
+        Constraints.MaxLength = math.min(Constraints.MaxLength, MAX_TEXT_LENGTH)
+    end
+
+    if Type == "Table" then
+        Constraints.MaxItems = math.min(Constraints.MaxItems or Types.MAX_TABLE_ITEMS, Types.MAX_TABLE_ITEMS)
+
+        if Constraints.Item then
+            Prepare(Constraints.Of, Constraints.Item)
+        end
+    end
+end
+
 function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
+    const Constraints = Config.Constraints :: any
+    local Default: any = Config.DefaultValue
+
+    -- Settled before an id is claimed, because ids are never handed out twice
+    -- and a refused registration would burn one.
+    if Config.Type == "Table" then
+        if not Constraints or not Types.IsItemType(Constraints.Of) then
+            Logger:Warn(`Property {Config.Name} is a Table, which needs Constraints.Of naming the type of its items -- any property type but Table.`)
+            return
+        end
+
+        if Constraints.Item ~= nil and type(Constraints.Item) ~= "table" then
+            Logger:Warn(`Property {Config.Name} has Constraints.Item of type {type(Constraints.Item)}, not a table.`)
+            return
+        end
+
+        Prepare(Config.Type, Constraints)
+
+        -- Fixed and frozen like any value it will hold, because every property
+        -- built from the registry starts out holding this very table.
+        Default = Types:FixValue("Table", Default or {}, Constraints)
+        if Default == nil then
+            Logger:Warn(`Property {Config.Name} has a DefaultValue that is not a list its constraints accept.`)
+            return
+        end
+    elseif Constraints then
+        Prepare(Config.Type, Constraints)
+    end
+
     const Identifier = Ids:Claim()
     if not Identifier then
         Logger:Warn("The property id pool is exhausted.")
         return
-    end
-
-    const Constraints = Config.Constraints
-    if Constraints then
-        if Config.Type == "Number" and Constraints.Precision then
-            local Scale = 1
-            while math.abs(Constraints.Precision * Scale - math.round(Constraints.Precision * Scale)) > 1e-9 do
-                Scale *= 10
-            end
-
-            Constraints.Scale = Scale
-        end
-
-        if Config.Type == "Text" and Constraints.MaxLength then
-            Constraints.MaxLength = math.min(Constraints.MaxLength, MAX_TEXT_LENGTH)
-        end
     end
 
     const Prop = {}
@@ -92,7 +145,7 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     Prop.Name = Config.Name
     Prop.Type = Config.Type
     Prop.Constraints = Constraints
-    Prop.DefaultValue = Config.DefaultValue
+    Prop.DefaultValue = Default
 
     -- On the registry, which already replicates, so a client builds the same
     -- panel from the same metadata without being told anything extra.

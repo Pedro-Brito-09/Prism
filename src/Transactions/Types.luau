@@ -54,7 +54,12 @@ export type CreateOperation = {
     -- This is what lets a group of objects be duplicated together with the
     -- references between them following the copies, and it is also the only way
     -- to create two objects and wire them to each other in one transaction.
-    References: {[PropertyTypes.PropertyIdentifier]: number}?,
+    --
+    -- A Table of references gets a list instead, one entry per item: the create
+    -- operation making that item's target, or zero for an item that keeps what
+    -- Properties gives it -- a target outside the group, which already has an
+    -- id. The value in Properties holds zero where an entry names a create.
+    References: {[PropertyTypes.PropertyIdentifier]: number | {number}}?,
 }
 
 export type SetOperation = {
@@ -71,6 +76,11 @@ export type SetOperation = {
     -- Nil where this build has no name for the type the author used, which is
     -- itself a mismatch and refused as one.
     Type: PropertyTypes.PropertyType?,
+
+    -- For a Table, the type its items were written as, nil for an empty list.
+    -- Compared against Of for the same reason: a Number list sent to a list of
+    -- references is all numbers, and IsValid cannot tell.
+    ItemType: PropertyTypes.PropertyType?,
 }
 
 export type DestroyOperation = {
