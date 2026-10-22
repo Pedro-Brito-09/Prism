@@ -621,6 +621,37 @@ Unloading a copy destroys its folder and everything in it. A default scene
 folder goes with the last of its copies; a parent you supplied is yours and is
 left alone.
 
+### How fast a load goes
+
+A load builds objects for at most 1/120 of a second each frame, then waits for
+the next, so the server keeps running while a large level loads. That makes
+the load take about three times as long as the building does.
+
+`Budget` changes that per load, in seconds a frame. A game that loads behind a
+loading screen can afford more, and `math.huge` builds everything without
+waiting at all, which stalls the server for the whole build. Measured on a
+real 34,918 object level:
+
+| Budget | Load takes | Frames | Longest frame |
+|---|---|---|---|
+| 1/120 (default) | 13.7 s | 791 | 0.29 s |
+| 1/30 | 5.2 s | 129 | 0.33 s |
+| `math.huge` | 4.1 s | 1 | 4.1 s |
+
+The longest frame is never shorter than reading the pack, which happens in one
+go before any building starts: about a third of a second for that level.
+
+```lua
+-- server or client
+Level:Load(workspace, {Budget = 1 / 30})          -- faster, choppier
+Level:Load(workspace, {Budget = math.huge})       -- one stall, as short as it gets
+Draft:Open({Budget = 1 / 30})                     -- server, an opened copy
+```
+
+A budget that isn't a number above zero warns and falls back to 1/120. The
+budget covers building the objects; telling connected players about them
+afterwards goes out in chunks of 50, a frame apart, whatever the budget.
+
 ### Placing a pack into a copy
 
 Loading reads a pack as a whole new copy, every object under the id it was saved
@@ -1407,8 +1438,8 @@ The sections above explain each one.
 | `Scenes` | `.new(config)`, `.fromBuffer(config, pack)`, `:Get(name)`, `:GetById(id)`, `:GetRegistered()` | S C |
 | | `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
 | | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:GetInstances(sceneId)`, `:GetInstanceScene(copyId)`, `:GetObjects(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
-| a scene | `:Load(parent?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
-| | `:Open()`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
+| a scene | `:Load(parent?, options?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
+| | `:Open(options?)`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
 | | `:Push(name)` → `ok, sceneId, reason` | C |
 | a copy | `:Create(type, values?)`, `:Place(pack)`, `:Find(localId)`, `:GetObjects()`, `:Serialize()`, `:Commit()`, `:Unload()`, `:Suspend()`, `:Revive()`, `:Dispose()` | S C |
 | `Transactions` | `.new()`, then `:Create`, `:Duplicate`, `:DuplicateGroup`, `:Place`, `:Set`, `:Destroy`, `:Lock`, `:Unlock`, `:Load`, `:Unload`, `:Commit()` | S C |
@@ -1487,11 +1518,10 @@ in columns, and 163KB as stored after zstd. Positions are most of what is
 left; the level's blocks sit on a grid, which is why they cost as little as
 they do.
 
-Reading that pack back takes about a third of a second. Loading it takes far
+Reading that pack back takes about a third of a second. Loading it takes
 longer, and not because of the pack: building 34,918 objects and 20,287 parts
-cost about 5 to 6 seconds of server time, and a load spends at most 1/120 of a
-second of each frame on it so the server keeps running meanwhile, which puts
-the whole load at 12 to 15 seconds.
+takes about 4 seconds, which a load spreads over frames so the server keeps
+running. See [How fast a load goes](#how-fast-a-load-goes).
 
 Property ids are **never recycled**, because they are written into saved data —
 reusing one for a different property would silently reinterpret every record

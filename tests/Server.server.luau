@@ -3278,6 +3278,50 @@ T:Test("a large load does not hold the server for its whole length", function()
     Scene:Destroy()
 end)
 
+-- How many objects the copy a load is building holds the moment the load first
+-- hands control back. The announcing after the read yields too, so the load
+-- returning would not say whether the reading did.
+const function BuiltBeforeFirstYield(Scene: any, Options: any): (number, () -> boolean)
+    local Returned = false
+    task.spawn(function()
+        Scene:Load(nil, Options)
+        Returned = true
+    end)
+
+    local Built = 0
+    for _, Copy in Scene:GetInstances() do
+        Built += #Copy:GetObjects()
+    end
+
+    return Built, function()
+        return Returned
+    end
+end
+
+T:Test("a load given a budget of math.huge builds everything without waiting", function()
+    const Scene = CratePack("LargeLoadWhole", 4000)
+
+    const Built, Done = BuiltBeforeFirstYield(Scene, {Budget = math.huge})
+    T:Eq(Built, 4000, "every object before the first yield")
+    T:Eventually(Done, 15, "the load returned")
+
+    Scene:Destroy()
+end)
+
+T:Test("a load given a budget it cannot use reads in frames as usual", function()
+    const Scene = CratePack("LargeLoadBadBudget", 4000)
+
+    -- Zero would wait a frame for every object; it is refused for the default.
+    const Built, Done = BuiltBeforeFirstYield(Scene, {Budget = 0})
+    T:Ok(Built > 1 and Built < 4000, `{Built} objects in the first frame, not one and not all`)
+    T:Eventually(Done, 15, "the load still finished")
+
+    const Copy = Scene:GetInstances()[1]
+    T:Eq(Copy and #Copy:GetObjects(), 4000, "with every object")
+
+    Scene:Destroy()
+end)
+
 T:Test("a copy set aside while it is read comes back whole", function()
     const Scene = CratePack("LargeLoadAside", 3000)
 

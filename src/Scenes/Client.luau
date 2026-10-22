@@ -37,6 +37,7 @@ const Types = require("./Types")
 export type SceneIdentifier = Types.SceneIdentifier
 export type SceneRegistry = Types.SceneRegistry
 export type SceneConfig = Types.SceneConfig
+export type LoadOptions = Types.LoadOptions
 export type SceneInstance = Types.SceneInstance
 export type LocalScene = Types.LocalScene
 export type SceneInstanceId = number
@@ -450,12 +451,27 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     return Instance_ :: any
 end
 
--- How long reading a local pack may run in one frame, as on the server. A
--- client that loaded a five thousand object sandbox in one go froze for half a
--- second.
+-- How long reading a local pack may run in one frame unless the load says
+-- otherwise, as on the server. A client that loaded a five thousand object
+-- sandbox in one go froze for half a second.
 const READ_BUDGET = 1 / 120
 
--- Whole, or a frame's worth at a time. A transaction reads whole: a local
+-- The budget a load asked for, or the default; see the server's.
+const function BudgetOf(Options: Types.LoadOptions?): number
+    const Budget = Options and Options.Budget
+    if Budget == nil then
+        return READ_BUDGET
+    end
+
+    if type(Budget) ~= "number" or Budget ~= Budget or Budget <= 0 then
+        Logger:Warn(`A load's Budget is seconds a frame, above zero; got {tostring(Budget)}. Using {READ_BUDGET}.`)
+        return READ_BUDGET
+    end
+
+    return Budget
+end
+
+-- A frame's worth at a time, or whole. A transaction reads whole: a local
 -- commit applies on the spot and never yields, so a load inside one cannot
 -- either. Anything else reads in frames, and stops if the copy is taken away
 -- while it waits.
@@ -484,7 +500,7 @@ FinishReading = function(Instance_: any)
     end
 end
 
-const function Read(self: any, Parent: Instance?, InFrames: boolean): any
+const function Read(self: any, Parent: Instance?, Budget: number): any
     const Instance_ = NewInstance(self, Parent)
 
     const Data = self.Data
@@ -513,7 +529,7 @@ const function Read(self: any, Parent: Instance?, InFrames: boolean): any
     local Since = os.clock()
 
     while Reading.Next <= #Reading.Objects do
-        if InFrames and os.clock() - Since > READ_BUDGET then
+        if os.clock() - Since > Budget then
             task.wait()
             Since = os.clock()
 
@@ -541,13 +557,13 @@ const function Read(self: any, Parent: Instance?, InFrames: boolean): any
     return Instance_
 end
 
-const function __load(self: any, Parent: Instance?): any
-    return Read(self, Parent, true)
+const function __load(self: any, Parent: Instance?, Options: Types.LoadOptions?): any
+    return Read(self, Parent, BudgetOf(Options))
 end
 
 -- For a local transaction, which must not yield.
 const function __load_whole(self: any, Parent: Instance?): any
-    return Read(self, Parent, false)
+    return Read(self, Parent, math.huge)
 end
 
 const function __unload(self: any)

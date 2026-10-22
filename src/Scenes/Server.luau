@@ -31,6 +31,7 @@ const Types = require("./Types")
 
 export type SceneIdentifier = Types.SceneIdentifier
 export type SceneConfig = Types.SceneConfig
+export type LoadOptions = Types.LoadOptions
 export type SceneRegistry = Types.SceneRegistry
 export type SceneInstance = Types.SceneInstance
 export type Scene = Types.ServerScene
@@ -515,10 +516,27 @@ end
 -- Scenes
 --=============================================================================
 
--- How long reading a pack may run in one frame before it waits for the next.
--- Building every object at once held the server for over half a second on a
--- five thousand object level, every player's frame with it.
+-- How long reading a pack may run in one frame before it waits for the next,
+-- unless the load says otherwise. Building every object at once held the server
+-- for over half a second on a five thousand object level, every player's frame
+-- with it.
 const READ_BUDGET = 1 / 120
+
+-- The budget a load asked for, or the default. A wrong one is said rather than
+-- obeyed: zero or less would wait a frame for every object.
+const function BudgetOf(Options: Types.LoadOptions?): number
+    const Budget = Options and Options.Budget
+    if Budget == nil then
+        return READ_BUDGET
+    end
+
+    if type(Budget) ~= "number" or Budget ~= Budget or Budget <= 0 then
+        Logger:Warn(`A load's Budget is seconds a frame, above zero; got {tostring(Budget)}. Using {READ_BUDGET}.`)
+        return READ_BUDGET
+    end
+
+    return Budget
+end
 
 -- Load and Open are one reading of the pack, and differ only in whether the
 -- server builds the parts.
@@ -558,7 +576,7 @@ end
 
 -- Load and Open are one reading of the pack, and differ only in whether the
 -- server builds the parts.
-const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
+const function Read(self: Scene, Parent: Instance?, Opened: boolean, Budget: number): any
     const Instance_ = NewInstance(self, Parent, Opened) :: any
 
     const Data = self.Data
@@ -593,7 +611,7 @@ const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
         -- running. Set aside meanwhile, the rest was read as it went; unloaded,
         -- nothing more goes into it. Either way what was read is announced below
         -- only if it is still there.
-        if os.clock() - Since > READ_BUDGET then
+        if os.clock() - Since > Budget then
             task.wait()
             Since = os.clock()
 
@@ -620,12 +638,12 @@ const function Read(self: Scene, Parent: Instance?, Opened: boolean): any
     return Instance_
 end
 
-const function __load(self: Scene, Parent: Instance?): any
-    return Read(self, Parent, false)
+const function __load(self: Scene, Parent: Instance?, Options: Types.LoadOptions?): any
+    return Read(self, Parent, false, BudgetOf(Options))
 end
 
-const function __open(self: Scene): any
-    return Read(self, nil, true)
+const function __open(self: Scene, Options: Types.LoadOptions?): any
+    return Read(self, nil, true, BudgetOf(Options))
 end
 
 -- Every copy at once. Nothing is written back: with more than one copy live,
