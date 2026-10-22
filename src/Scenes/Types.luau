@@ -31,6 +31,17 @@ export type SceneRegistry = {
     Name: string,
 }
 
+-- How a pack is read into a new copy.
+export type LoadOptions = {
+    -- Seconds of each frame the read may spend building objects before it
+    -- waits for the next frame. 1/120 unless given: the server keeps running
+    -- while a large level loads, and the load takes about twice as long as the
+    -- building does. A game that can afford a stall -- a level loading behind a
+    -- loading screen -- can give more, and math.huge builds everything without
+    -- waiting at all.
+    Budget: number?,
+}
+
 -- One live copy of a scene. Load makes them and every one is equal: there is no
 -- canonical copy, because a scene is the document and a copy is a reading of
 -- it. Objects live here rather than on the scene, which is also the only place
@@ -142,7 +153,7 @@ export type Scene = {
     -- A new live copy. Called twice, it gives two, and they are equals -- which
     -- is what makes one saved room able to stand in the world five times. Nil
     -- only where the scene's pack could not be read.
-    Load: (self: Scene, Parent: Instance?) -> SceneInstance?,
+    Load: (self: Scene, Parent: Instance?, Options: LoadOptions?) -> SceneInstance?,
 
     -- Every copy at once. A single copy unloads itself.
     Unload: (self: Scene) -> (),
@@ -184,7 +195,7 @@ export type ServerScene = Scene & {
     -- admitted client draws it, and nobody else is told it exists: Roblox has
     -- no per-player workspace, so a part in the world is a part for everybody,
     -- and this is the only way to keep a scene out of sight.
-    Open: (self: ServerScene) -> SceneInstance?,
+    Open: (self: ServerScene, Options: LoadOptions?) -> SceneInstance?,
 
     Admit: (self: ServerScene, Who: Player | number) -> (),
     Evict: (self: ServerScene, Who: Player | number) -> (),

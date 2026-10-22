@@ -621,6 +621,37 @@ Unloading a copy destroys its folder and everything in it. A default scene
 folder goes with the last of its copies; a parent you supplied is yours and is
 left alone.
 
+### How fast a load goes
+
+A load builds objects for at most 1/120 of a second each frame, then waits for
+the next, so the server keeps running while a large level loads. That makes
+the load take about three times as long as the building does.
+
+`Budget` changes that per load, in seconds a frame. A game that loads behind a
+loading screen can afford more, and `math.huge` builds everything without
+waiting at all, which stalls the server for the whole build. Measured on a
+real 34,918 object level:
+
+| Budget | Load takes | Frames | Longest frame |
+|---|---|---|---|
+| 1/120 (default) | 13.7 s | 791 | 0.29 s |
+| 1/30 | 5.2 s | 129 | 0.33 s |
+| `math.huge` | 4.1 s | 1 | 4.1 s |
+
+The longest frame is never shorter than reading the pack, which happens in one
+go before any building starts: about a third of a second for that level.
+
+```lua
+-- server or client
+Level:Load(workspace, {Budget = 1 / 30})          -- faster, choppier
+Level:Load(workspace, {Budget = math.huge})       -- one stall, as short as it gets
+Draft:Open({Budget = 1 / 30})                     -- server, an opened copy
+```
+
+A budget that isn't a number above zero warns and falls back to 1/120. The
+budget covers building the objects; telling connected players about them
+afterwards goes out in chunks of 50, a frame apart, whatever the budget.
+
 ### Placing a pack into a copy
 
 Loading reads a pack as a whole new copy, every object under the id it was saved
@@ -1407,8 +1438,8 @@ The sections above explain each one.
 | `Scenes` | `.new(config)`, `.fromBuffer(config, pack)`, `:Get(name)`, `:GetById(id)`, `:GetRegistered()` | S C |
 | | `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
 | | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:GetInstances(sceneId)`, `:GetInstanceScene(copyId)`, `:GetObjects(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
-| a scene | `:Load(parent?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
-| | `:Open()`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
+| a scene | `:Load(parent?, options?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
+| | `:Open(options?)`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
 | | `:Push(name)` → `ok, sceneId, reason` | C |
 | a copy | `:Create(type, values?)`, `:Place(pack)`, `:Find(localId)`, `:GetObjects()`, `:Serialize()`, `:Commit()`, `:Unload()`, `:Suspend()`, `:Revive()`, `:Dispose()` | S C |
 | `Transactions` | `.new()`, then `:Create`, `:Duplicate`, `:DuplicateGroup`, `:Place`, `:Set`, `:Destroy`, `:Lock`, `:Unlock`, `:Load`, `:Unload`, `:Commit()` | S C |
@@ -1474,6 +1505,12 @@ Each column is written whichever of these ways comes out smallest:
 - **grid**: a Vector as three small integers on a step such as half a stud.
   A Vector off the grid, `-0` included, is written as its twelve bytes instead.
   A value read back from the grid is always the same float, bit for bit.
+- **delta**: the grid again, but each Vector as how far it moved from the one
+  before it, every X step first, then every Y, then every Z. Blocks are placed
+  near the last one, so the steps are smaller than the positions.
+- **relative**: a reference as how far its target is from the object holding
+  it. Something made right after the thing it points at -- an attribute after
+  its block, a button after its door -- is one step back, every time.
 
 Everything is written column by column, bitmaps and values alike, so similar
 bytes sit together. The pack is then compressed with zstd, at level 19 for
@@ -1482,9 +1519,15 @@ how far a pack claims to unpack before unpacking it, and refuses anything past
 64MB, because a client can push a pack.
 
 Measured on a real building game's level of 20,287 blocks and 14,631 block
-attributes (34,918 objects): 4.53MB written as one record per object, 154KB
-packed in rows with zstd at level 9. Column-by-column order plus level 19
-then took a second mapping of the same level from 89KB to 76KB.
+attributes (34,918 objects): 4.22MB written as one record per object, 353KB
+in columns, and 129KB as stored after zstd. Writing references relative to
+their object took 33KB off that, and position steps a little more. Positions
+are most of what is left.
+
+Reading that pack back takes about a third of a second. Loading it takes
+longer, and not because of the pack: building 34,918 objects and 20,287 parts
+takes about 4 seconds, which a load spreads over frames so the server keeps
+running. See [How fast a load goes](#how-fast-a-load-goes).
 
 Property ids are **never recycled**, because they are written into saved data —
 reusing one for a different property would silently reinterpret every record

@@ -3067,6 +3067,50 @@ T:Test("a reference survives a commit and a reload", function()
     Scene:Destroy()
 end)
 
+T:Test("many references to nearby objects survive a save and cost almost nothing", function()
+    const Scene = Scenes.new({Name = "RefMany"})
+    const Copy = Scene:Load() :: any
+
+    -- Each button made right after its door, the way an editor makes an
+    -- attribute right after its block; and one pointing far back, and one at
+    -- nothing, so the column holds more than one kind of distance.
+    const Pairs = {}
+    for Index = 1, 1000 do
+        const Door = Copy:Create(DoorId)
+        const Button = Copy:Create(ButtonId)
+        Button:Set(TargetId, Door)
+        Pairs[Index] = {Door = Door.LocalId, Button = Button.LocalId}
+    end
+
+    const Far = Copy:Create(ButtonId)
+    Far:Set(TargetId, Copy:Find(Pairs[1].Door))
+    const Nowhere = Copy:Create(ButtonId)
+
+    Copy:Commit()
+
+    -- Written as the target's id, a thousand references to a thousand
+    -- different doors would not fit in this.
+    const Size = buffer.len(Scene:Serialize())
+    T:Ok(Size < 1000, `{Size} bytes for 2002 objects and 1001 references`)
+
+    Copy:Unload()
+    const Reloaded = Scene:Load() :: any
+
+    local Wrong = 0
+    for _, Pair in Pairs do
+        const Button = Reloaded:Find(Pair.Button)
+        if not Button or Button:GetProperty(TargetId).Value ~= Pair.Door then
+            Wrong += 1
+        end
+    end
+
+    T:Eq(Wrong, 0, "every button still points at its own door")
+    T:Eq(Reloaded:Find(Far.LocalId):GetProperty(TargetId).Value, Pairs[1].Door, "the one pointing far back too")
+    T:Eq(Reloaded:Find(Nowhere.LocalId):GetProperty(TargetId).Value, 0, "and the one pointing at nothing")
+
+    Scene:Destroy()
+end)
+
 T:Test("a link on a reference is refused at registration", function()
     -- An Object is a number as far as Luau is concerned, so the type check
     -- would pass and the part would be driven with an id meaning nothing
@@ -3274,6 +3318,50 @@ T:Test("a large load does not hold the server for its whole length", function()
     if Copy then
         T:Eq(#Copy:GetObjects(), 4000, "every object was read")
     end
+
+    Scene:Destroy()
+end)
+
+-- How many objects the copy a load is building holds the moment the load first
+-- hands control back. The announcing after the read yields too, so the load
+-- returning would not say whether the reading did.
+const function BuiltBeforeFirstYield(Scene: any, Options: any): (number, () -> boolean)
+    local Returned = false
+    task.spawn(function()
+        Scene:Load(nil, Options)
+        Returned = true
+    end)
+
+    local Built = 0
+    for _, Copy in Scene:GetInstances() do
+        Built += #Copy:GetObjects()
+    end
+
+    return Built, function()
+        return Returned
+    end
+end
+
+T:Test("a load given a budget of math.huge builds everything without waiting", function()
+    const Scene = CratePack("LargeLoadWhole", 4000)
+
+    const Built, Done = BuiltBeforeFirstYield(Scene, {Budget = math.huge})
+    T:Eq(Built, 4000, "every object before the first yield")
+    T:Eventually(Done, 15, "the load returned")
+
+    Scene:Destroy()
+end)
+
+T:Test("a load given a budget it cannot use reads in frames as usual", function()
+    const Scene = CratePack("LargeLoadBadBudget", 4000)
+
+    -- Zero would wait a frame for every object; it is refused for the default.
+    const Built, Done = BuiltBeforeFirstYield(Scene, {Budget = 0})
+    T:Ok(Built > 1 and Built < 4000, `{Built} objects in the first frame, not one and not all`)
+    T:Eventually(Done, 15, "the load still finished")
+
+    const Copy = Scene:GetInstances()[1]
+    T:Eq(Copy and #Copy:GetObjects(), 4000, "with every object")
 
     Scene:Destroy()
 end)
