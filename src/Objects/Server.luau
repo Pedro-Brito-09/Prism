@@ -712,19 +712,10 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
     -- hand back a part that only looks like the one that left.
     local Inst: Instance? = Obj.Instance
 
-    if Inst then
-        Inst.Parent = Instance_.Folder
-    elseif Ref.Instance and not Instance_.Opened then
+    if not Inst and Ref.Instance and not Instance_.Opened then
         const Clone = Ref.Instance:Clone()
         Clone:SetAttribute(Shared.RuntimeAttribute, Obj.RuntimeId)
         CollectionService:AddTag(Clone, Shared.ObjectTag)
-
-        -- Into the copy holding it, and nowhere else. Which copy rather than
-        -- which scene, because two copies of one room have to be able to sit
-        -- in two places -- and where that is, is the copy's folder's business
-        -- rather than this object's.
-        Clone.Parent = Instance_.Folder
-
         Inst = Clone
     end
 
@@ -733,6 +724,21 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
     -- Wired after the values are in place, so a link starts at the object's own
     -- value rather than at the registry default and then being corrected.
     Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties)
+
+    -- Into the copy holding it, and nowhere else. Which copy rather than which
+    -- scene, because two copies of one room have to be able to sit in two
+    -- places -- and where that is, is the copy's folder's business rather than
+    -- this object's.
+    --
+    -- Parented last, once the links have written the object's values onto it,
+    -- for the reason the stamp and the tag go on first: the part enters the
+    -- world, and replicates, already holding them. Parented first, every value
+    -- was a change to a part in the world -- dearer to make, and sent to every
+    -- client as an update to a part it had just been handed. A level of 20,000
+    -- parts spent a fifth of its load on the parenting alone.
+    if Inst then
+        Inst.Parent = Instance_.Folder
+    end
 
     Obj.Get = __getter
     Obj.Set = __setter

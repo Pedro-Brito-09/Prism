@@ -725,20 +725,12 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Live: any, Restored: boolean
     -- part that left.
     local Inst: Instance? = Obj.Instance
 
-    if Inst then
-        Inst.Parent = Live.Folder
-    else
+    if not Inst then
         const Template = TemplateOf(Ref)
         if Template then
             const Clone = Template:Clone()
             Clone:SetAttribute(Shared.RuntimeAttribute, Obj.RuntimeId)
             CollectionService:AddTag(Clone, Shared.ObjectTag)
-
-            -- Into the copy holding it, exactly as on the server: two copies of
-            -- one room have to be able to sit in two places, and the copy's
-            -- folder is what moves them.
-            Clone.Parent = Live.Folder
-
             Inst = Clone
         end
     end
@@ -748,6 +740,14 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Live: any, Restored: boolean
     -- Wired after the values are in place, so a link starts at the object's own
     -- value rather than at the registry default and then being corrected.
     Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties)
+
+    -- Into the copy holding it, exactly as on the server: two copies of one
+    -- room have to be able to sit in two places, and the copy's folder is what
+    -- moves them. Last, as on the server, so the part enters the world already
+    -- holding its values rather than taking each one as a change.
+    if Inst then
+        Inst.Parent = Live.Folder
+    end
     Obj.Set = __local_setter
     Obj.Destroy = __local_destroy
 
@@ -1316,10 +1316,10 @@ const function AddObject(
     if Into then
         const Template = TemplateOf(Registry)
         if Template then
+            -- Parented below, once its links have written the object's values.
             const Clone = Template:Clone()
             Clone:SetAttribute(Shared.RuntimeAttribute, RuntimeId)
             CollectionService:AddTag(Clone, Shared.ObjectTag)
-            Clone.Parent = Into
             Resolved = Clone
         end
     else
@@ -1367,6 +1367,10 @@ const function AddObject(
     if Into then
         Obj.Drawn = true
         Obj.Links = Shared.BuildLinks(Resolved, Registry.Links, Obj.Properties)
+
+        if Resolved then
+            Resolved.Parent = Into
+        end
     else
         WireServerPart(Obj)
     end

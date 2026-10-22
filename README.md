@@ -1482,9 +1482,16 @@ how far a pack claims to unpack before unpacking it, and refuses anything past
 64MB, because a client can push a pack.
 
 Measured on a real building game's level of 20,287 blocks and 14,631 block
-attributes (34,918 objects): 4.53MB written as one record per object, 154KB
-packed in rows with zstd at level 9. Column-by-column order plus level 19
-then took a second mapping of the same level from 89KB to 76KB.
+attributes (34,918 objects): 4.22MB written as one record per object, 416KB
+in columns, and 163KB as stored after zstd. Positions are most of what is
+left; the level's blocks sit on a grid, which is why they cost as little as
+they do.
+
+Reading that pack back takes about a third of a second. Loading it takes far
+longer, and not because of the pack: building 34,918 objects and 20,287 parts
+cost about 5 to 6 seconds of server time, and a load spends at most 1/120 of a
+second of each frame on it so the server keeps running meanwhile, which puts
+the whole load at 12 to 15 seconds.
 
 Property ids are **never recycled**, because they are written into saved data —
 reusing one for a different property would silently reinterpret every record
