@@ -678,26 +678,33 @@ so `math.huge` sends them all in the same stall that built them.
 
 ### What a loaded level costs
 
-Measured on 2026-10-22 on the same 34,918-object level (20,287 blocks with
-parts, 14,631 attributes, 495,279 properties: 14.2 an object), loaded with the
-default budget on a Studio server with three players.
+Measured on 2026-10-22 and 2026-10-23 on the same 34,918-object level (20,287
+blocks with parts, 14,631 attributes, 495,279 properties: 14.2 an object),
+loaded with the default budget on a Studio server with up to three players.
 
 **Memory.** Lua heap, read with `gcinfo()` after allocating garbage until the
 collector had run, since an idle VM barely collects:
 
 | | Server | Each client |
 |---|---|---|
-| Prism required, nothing loaded | 4.4 MB | 7.4-8.1 MB |
-| Level loaded | 535 MB | 576-590 MB |
-| Per object | about 15.2 KB | about 16.5 KB |
-| Per property | about 1.1 KB | about 1.2 KB |
+| Prism required, nothing loaded | 3.4-4.4 MB | 7.4-8.1 MB |
+| Level loaded | 320 MB | 342 MB |
+| Per object | about 9.1 KB | about 9.6 KB |
+| Per property | about 640 bytes | about 690 bytes |
 | After unloading | 4.4 MB | 26-32 MB |
 
-Nearly all of it is properties. Each one is a table of its own holding four
-closures (`Set`, `Destroy`, `OnChange`, `SetDefault`) and a `Listeners`
-table, and each object adds six closures and three tables more. The parts
+Most of it is properties. A property holds only its `Value` and its
+`DefaultValue`, and reads everything else -- its name, type, constraints and
+methods -- through a table shared by every property of its registry. It used
+to hold eleven fields of its own, and the level took 535 MB on the server and
+576-590 MB on a client: 1.1 KB a property. A property an instance link drives
+also carries a `Listeners` table and the link's two functions. The parts
 themselves are engine memory, not Lua heap: about 8 MB on a client by the
 `Instances` memory tag.
+
+Reading a shared field goes through `__index`: about 23 ns instead of 5,
+which loading the level does not notice -- 3.8-4.1 s with `math.huge`
+against 4.1-4.2 s before, timed side by side.
 
 Building or loading the level allocates far more than it keeps: the server's
 heap read 451 MB of garbage straight after the level was built, and fell to

@@ -80,19 +80,8 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-- [ ] **Properties that cost less memory.** A loaded 34,918-object level
-      holds 535 MB of Lua heap on the server and about 580 MB on each client:
-      1.1 KB for each of its 495,279 properties (README, "What a loaded level
-      costs"). Each property is a table carrying four closures and a
-      `Listeners` table of its own, and each object six closures and three
-      tables more. Methods shared through a metatable, and a `Listeners`
-      table made only when something listens, are the obvious candidates.
-      Measure the same level before and after. *Ask* whether a property
-      table's shape may change: games that read `Prop.Value` or keep a
-      property table would see it.
-
-- [ ] **What a client keeps after an unload.** After the level above is
-      unloaded, a client keeps about 20 MB of Lua heap and the level's 8 MB of
+- [ ] **What a client keeps after an unload.** After the real 34,918-object
+      level is unloaded, a client keeps about 20 MB of Lua heap and the level's 8 MB of
       instances, even on a client that only watched the load and edited
       nothing. It stays the same after a second load and unload, so it does
       not grow, but something still holds the parts. The server gives
@@ -118,6 +107,32 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **Properties that cost less memory.** A property held eleven fields,
+      nine of them the same for every property of its registry. They are read
+      through a metatable shared per registry now, so a property holds its
+      `Value` and its `DefaultValue` and nothing else until something listens.
+      Every field reads as before; what changed is that the shared ones are
+      not there to iterate, clone or send. Decided: the default stays on the
+      property, because a registry's default changing must not reach a
+      property that already exists. An instance link reads its registry's
+      fields the same way instead of copying them for every object.
+
+      The plan said the methods were closures and `Listeners` was made for
+      every property. Neither was so: the methods were shared functions, four
+      table slots each, and `Listeners` was already made on the first
+      `OnChange`. The level has one on every linked property because its link
+      listens.
+
+      On the real level: 535 MB to 320 MB on the server and 576-590 MB to
+      342 MB on a client, from 1.1 KB a property to about 640 bytes. Loading
+      it takes the same time, 3.8-4.1 s against 4.1-4.2 s with `math.huge`
+      timed side by side; a shared field reads in about 23 ns instead of 5.
+      Objects were left as they are: their methods are swapped as an object
+      is destroyed or made local, and the most they could give back is about
+      18 MB.
+
+      Suites, one player: pure 624, server 247, client 73.
 
 - [x] **A load tells players about its objects inside its budget.** The
       announce after a load used to wait a frame after every 50 objects

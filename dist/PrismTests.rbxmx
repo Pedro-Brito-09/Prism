@@ -10018,6 +10018,21 @@ const function ValidateLinks(
     return if #Valid > 0 then Valid else nil
 end
 
+-- A link reads its registry's fields through this rather than carrying a copy
+-- of them: the copy was a table of five fields for every linked property of
+-- every object, and only Disconnect is the link's own.
+const LinkShapes: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
+
+const function LinkShapeOf(Registry: Types.InstanceLinkRegistry): any
+    local Shape = LinkShapes[Registry]
+    if not Shape then
+        Shape = {__index = Registry}
+        LinkShapes[Registry] = Shape
+    end
+
+    return Shape
+end
+
 -- Wiring only. ValidateLinks has already rejected anything that cannot work and
 -- every clone shares the template's shape, so this no longer warns about link
 -- shape -- it would repeat the same message once per object. The pcall stays
@@ -10035,7 +10050,7 @@ const function BuildLinks(
     local Count = 0
 
     for _, Registry in Links do
-        const Link: Types.InstanceLink = table.clone(Registry) :: any
+        const Link: Types.InstanceLink = setmetatable({}, LinkShapeOf(Registry)) :: any
         const Prop = Props[Link.Property]
         if not Prop then
             continue
@@ -12084,6 +12099,42 @@ const function __destroy<T>(self: Property<T>)
     self.Listeners = nil
 end
 
+-- What every property of one registry has in common, read through __index:
+-- its identity, its constraints and the four methods. These were fields on
+-- every property, eleven keys a table, and a real 34,918-object level holds
+-- 495,279 properties -- 535 MB of Lua heap on the server, nearly all of it
+-- property tables. Constraints is the registry's own table, which the client
+-- fills in place when a custom enum it names is registered, so sharing it
+-- shares that too.
+--
+-- Keyed by the registry table, weakly: a client replaces its registries
+-- wholesale when they are replayed, and a type unregistered and registered
+-- again under the same id is a different registry.
+const Shapes: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
+
+const function ShapeOf(Ref: PropertyRegistry<any>): any
+    local Shape = Shapes[Ref]
+    if not Shape then
+        Shape = {
+            __index = {
+                __type = "Property",
+                Parent = Ref.Id,
+                Name = Ref.Name,
+                Type = Ref.Type,
+                Constraints = Ref.Constraints,
+                Set = __setter,
+                SetDefault = __default_setter,
+                OnChange = __on_change,
+                Destroy = __destroy,
+            },
+        }
+
+        Shapes[Ref] = Shape
+    end
+
+    return Shape
+end
+
 --=============================================================================
 -- Display
 --=============================================================================
@@ -12203,20 +12254,14 @@ function Shared.new(
         Logger:Error("Invalid property reference. The registry it points at is not registered.")
     end
 
-    const Prop = {}
-    Prop.__type = "Property"
-    Prop.Parent = Ref.Id
-    Prop.Name = Ref.Name
-    Prop.Type = Ref.Type
-    Prop.Constraints = Ref.Constraints
-    Prop.DefaultValue = Ref.DefaultValue
-    Prop.Value = Ref.DefaultValue
-
-    Prop.Set = __setter
-    Prop.SetDefault = __default_setter
-    Prop.OnChange = __on_change
-    Prop.Destroy = __destroy
-    return Prop :: any
+    -- Only what can differ between two properties of one registry lives on the
+    -- property. The default stays too: it is the registry's at the moment the
+    -- property was made, and a registry's default changing afterwards must not
+    -- reach a property that already exists.
+    return setmetatable({
+        DefaultValue = Ref.DefaultValue,
+        Value = Ref.DefaultValue,
+    }, ShapeOf(Ref)) :: any
 end
 
 return Shared
@@ -12397,6 +12442,9 @@ export type Section = {
     Properties: {PropertyRegistry<any>},
 }
 
+-- Value, DefaultValue and Listeners are the property's own. Everything else is
+-- read through a metatable shared by every property of the same registry, so it
+-- reads the same but is not there to iterate, clone or send over a remote.
 export type Property<T = PropertyType> = {
     Parent: PropertyIdentifier,
     Name: string,
@@ -18831,6 +18879,36 @@ T:Test("instances start at the registry default", function()
     T:Eq(Prop.Value, "Untitled", "value")
     T:Eq(Prop.DefaultValue, "Untitled", "default")
     T:Eq(Prop.Parent, TitleId, "parent")
+end)
+
+T:Test("properties of one registry share everything but their values", function()
+    const First = Properties.new(HealthId)
+    const Second = Properties.new(HealthId)
+    const Registry = Properties:GetRegistry(HealthId) :: any
+
+    First:Set(10)
+    Second:SetDefault(20)
+
+    T:Eq(First.Value, 10, "a value is the property's own")
+    T:Eq(Second.Value, 100, "and the other keeps its own")
+    T:Eq(Second.DefaultValue, 20, "as is a default set on it")
+    T:Eq(First.DefaultValue, 100, "which the first does not see")
+
+    for _, Prop in {First, Second} do
+        T:Eq(Prop.__type, "Property", "still reads as a property")
+        T:Eq(Prop.Name, Registry.Name, "named")
+        T:Eq(Prop.Type, "Number", "typed")
+        T:Eq(Prop.Constraints, Registry.Constraints, "with the registry's constraints")
+    end
+
+    -- Eleven fields on every property was most of what a loaded level kept in
+    -- memory. Only what differs between two of them is theirs to hold.
+    local Own = 0
+    for _ in First do
+        Own += 1
+    end
+
+    T:Eq(Own, 2, "holding nothing but a value and a default")
 end)
 
 T:Test("Set reports accepted and changed separately", function()
