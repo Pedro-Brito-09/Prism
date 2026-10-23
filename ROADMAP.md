@@ -85,11 +85,17 @@ produced it, with anything that is a decision marked *Ask*.
       goes out 50 per packet with a frame between packets (`ANNOUNCE_CHUNK` in
       `src/Objects/Server.luau`), so a 34,918-object level is about 700 frames,
       roughly 12 seconds at 60 fps, before the last object reaches a client.
-      Never measured: every load timing so far ran with no player connected.
-      Measure it first, with one player and with three. *Ask* whether the
-      announce should follow the load's budget, send larger chunks, or stay as
-      it is; the chunking exists because one packet per object flooded the
-      remote queue.
+
+      Measured on 2026-10-22 on the real 34,918-object level, loaded with a
+      budget of `math.huge` so building is one stall and everything after it
+      is the announce. With one player: about 4.5 s of building, then 698
+      frames over which the client received every object in 11.8 s, the last
+      30 ms after the server sent it. With three: the same 698 frames, and
+      each client received every object in 11.7 s, all three within 25 ms of
+      each other. The cost is the frame per chunk, not bandwidth, and it does
+      not grow with players. *Ask* whether the announce should follow the
+      load's budget, send larger chunks, or stay as it is; the chunking exists
+      because one packet per object flooded the remote queue.
 
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
