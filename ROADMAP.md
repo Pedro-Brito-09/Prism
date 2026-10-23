@@ -80,23 +80,6 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-- [ ] **Telling players about a large load.** A load's `Budget` covers
-      building the objects. Announcing them to connected players afterwards
-      goes out 50 per packet with a frame between packets (`ANNOUNCE_CHUNK` in
-      `src/Objects/Server.luau`), so a 34,918-object level is about 700 frames,
-      roughly 12 seconds at 60 fps, before the last object reaches a client.
-
-      Measured on 2026-10-22 on the real 34,918-object level, loaded with a
-      budget of `math.huge` so building is one stall and everything after it
-      is the announce. With one player: about 4.5 s of building, then 698
-      frames over which the client received every object in 11.8 s, the last
-      30 ms after the server sent it. With three: the same 698 frames, and
-      each client received every object in 11.7 s, all three within 25 ms of
-      each other. The cost is the frame per chunk, not bandwidth, and it does
-      not grow with players. *Ask* whether the announce should follow the
-      load's budget, send larger chunks, or stay as it is; the chunking exists
-      because one packet per object flooded the remote queue.
-
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
 safety -- the tests use `Scene:Load()` without checking the `SceneInstance?` it
@@ -116,6 +99,36 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **A load tells players about its objects inside its budget.** The
+      announce after a load used to wait a frame after every 50 objects
+      whatever the budget: 698 frames, about 11.8 s, on the real
+      34,918-object level, with one player or three. Measured first, and the
+      waits were the whole cost, not bandwidth. Decided: the announce follows
+      the load's `Budget`, sending chunks back to back until the frame's budget
+      runs out, so `math.huge` sends everything in the stall that built it.
+      Chunks stay 50 objects. Every other announce -- placing, transactions,
+      a copy coming back, a joining player's replay -- still waits a frame per
+      chunk.
+
+      On the real level, from the load starting to the last client holding
+      every object:
+
+      | Budget | Players | Before | After | Server frames | Longest frame |
+      |---|---|---|---|---|---|
+      | 1/120 (default) | 1 | about 25 s | 11.7 s | 601 | 0.36 s |
+      | 1/120 (default) | 3 | -- | 11.0-11.2 s | 585 | 0.28 s |
+      | `math.huge` | 1 | 16.3 s | 7.6 s | 0 | 4.9 s |
+      | `math.huge` | 3 | 15.4 s | 7.1-7.4 s | 0 | 4.7 s |
+
+      "About 25 s" adds the 13.7 s default load measured with no player to
+      the 11.8 s announce; the default was not timed with players before. What
+      is left after the server finishes is the client building 34,918 objects
+      that arrive together, about 2.7 s. A new server test fails against the
+      old announce: a `math.huge` load with a player connected returns without
+      yielding once.
+
+      Suites, one player: server 246, client 73.
 
 - [x] **Lists of references written relative to their row.** A seventh
       column encoding, `COLUMN_RELATIVE_LIST`: a `Table` of `Object` as a

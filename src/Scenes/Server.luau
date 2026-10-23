@@ -634,7 +634,7 @@ const function Read(self: Scene, Parent: Instance?, Opened: boolean, Budget: num
         Instance_.Reading = nil
     end
 
-    Objects.AnnounceAll(Restored)
+    Objects.AnnounceAll(Restored, Budget)
     return Instance_
 end
 
