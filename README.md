@@ -174,6 +174,7 @@ local Health = Prism.Properties:Register({
 | `Enum` | an `EnumItem` | `Enum` (required: which enum), `Whitelist`, `Blacklist` (items or names) |
 | `CustomEnum` | an option of a custom enum | `CustomEnum` (required), `Whitelist`, `Blacklist` (options or option ids) |
 | `Object` | another object | `Types` (object type ids or names) |
+| `Table` | a list of values of one other type | `Of` (required: the item type, any but `Table`), `Item` (that type's constraints, applied to every item), `MinItems` (rejects), `MaxItems` (truncates; at most 4096, which is also the default) |
 
 A `Color` is held and saved at 8 bits per channel, the 0–255 its constraints
 are written in: each channel is scaled to 0–255, rounded to the nearest and
@@ -188,6 +189,28 @@ and one outside a clamping constraint is brought into range.
 `Object` is a reference to another object — a button's door, a path node's next
 node. It's stored as a local id, so it's saved and duplicated like one; see
 [References](#references) for what that buys you and what it rules out.
+
+A `Table` is a list, every item one type and held to that type's constraints:
+
+```lua
+-- server
+local Doors = Prism.Properties:Register({
+    Name = "Doors",
+    Type = "Table",
+    DefaultValue = {},
+    Constraints = {Of = "Object", MaxItems = 8},
+})
+
+lever:Set(Doors, {doorA, doorB})
+lever:Get(Doors)    -- the objects it names, in order
+```
+
+A list is handed back frozen, and two lists holding the same items are the
+same value, so setting an equal list is no change. A `Table` of `Object` reads
+as the objects its items name; an item whose target isn't there is left out of
+what `Get` returns but kept in the list, as a single reference keeps its id. A
+`Table` cannot drive an instance member, so a `Links` entry naming one is
+dropped at registration.
 
 A custom enum is a named list of options with ids that are saved in place of the
 values, so the values can be anything. Register it **on both sides** under the
@@ -737,6 +760,11 @@ couldn't be read or doesn't hold a pack.
 `Scenes.fromBuffer(config, pack)` reads one. Store it as the **buffer**, never
 `buffer.tostring` of it: a DataStore only takes strings that are valid UTF-8,
 and a pack's bytes are not, so that write fails.
+
+A DataStore counts a buffer at its base64 size, so one key holds a pack of
+about **3 MiB**, not 4 MB: measured, 3,145,312 bytes stored and anything a few
+hundred bytes past that was refused. A real 35,000 object level packs to
+about 130 KB.
 
 Committing is always explicit. Unloading never writes back on its own — with
 more than one copy live it would have to pick one, and it cannot.
@@ -1319,7 +1347,9 @@ The limit (`ShardLimit`, 1 MB by default) is measured **before** compression,
 because it is a CPU budget rather than a storage one: every create decodes and
 re-encodes the whole tail shard inside an `UpdateAsync` transform, which cannot
 yield. 1 MB is about 30,000 records and about a second per create. What a shard
-actually stores is a quarter to a third of that.
+actually stores is a quarter to a third of that. Keep `ShardLimit` under 3 MB:
+a DataStore counts a stored buffer at its base64 size, so no key holds much more
+than 3 MiB of one.
 
 ```lua
 -- server
@@ -1436,10 +1466,10 @@ The sections above explain each one.
 | | `.Suspend(object)`, `.Revive(object)`, `.Dispose(object)`, `.Retire(...)` | S C |
 | an object | `:Set(property, value, clientSided?)`, `:Get(property)`, `:GetProperty(property)`, `:OnChange(property, fn)`, `:Destroy()` | S C |
 | `Scenes` | `.new(config)`, `.fromBuffer(config, pack)`, `:Get(name)`, `:GetById(id)`, `:GetRegistered()` | S C |
-| | `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
+| | `.fromDataStore(config, store, key)`, `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
 | | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:GetInstances(sceneId)`, `:GetInstanceScene(copyId)`, `:GetObjects(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
 | a scene | `:Load(parent?, options?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
-| | `:Open(options?)`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
+| | `:Save(store, key)`, `:Open(options?)`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
 | | `:Push(name)` → `ok, sceneId, reason` | C |
 | a copy | `:Create(type, values?)`, `:Place(pack)`, `:Find(localId)`, `:GetObjects()`, `:Serialize()`, `:Commit()`, `:Unload()`, `:Suspend()`, `:Revive()`, `:Dispose()` | S C |
 | `Transactions` | `.new()`, then `:Create`, `:Duplicate`, `:DuplicateGroup`, `:Place`, `:Set`, `:Destroy`, `:Lock`, `:Unlock`, `:Load`, `:Unload`, `:Commit()` | S C |

@@ -75,7 +75,10 @@ const ATTEMPTS = 5
 --
 -- What is stored is a fraction of this -- a 20,000 record shard packed to
 -- 280KB -- and never more, since a pack keeps the uncompressed body whenever
--- zstd would make it bigger, so the 4MB a DataStore value holds is never near.
+-- zstd would make it bigger. A DataStore counts a buffer at its base64 size,
+-- which puts the most one key holds at about 3MiB rather than 4MB (3,145,312
+-- bytes stored, a few hundred more refused), so this stays well inside it; a
+-- ShardLimit raised past 3MB would not.
 const DEFAULT_SHARD_LIMIT = 1024 * 1024
 
 -- MemoryStore caps a value at 32KB and base64 inflates by a third, so a page

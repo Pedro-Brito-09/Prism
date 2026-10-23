@@ -80,6 +80,28 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
+- [ ] **Lists of references written relative to their row.** A pack writes a
+      single `Object` reference as its distance from the row's own local id
+      (`COLUMN_RELATIVE` in `src/Compressor.luau`), which took the
+      attribute-to-block references on a real level from 33 KB to almost
+      nothing. A `Table` of `Object` is still written as tagged values holding
+      whole ids, because `TargetOf` only accepts a lone reference. Wiring
+      blocks keep their inputs in such lists. Done when a `Table` of `Object`
+      column can be written with each item relative to the row, round trips in
+      a test, and the size on a level that uses them is measured before and
+      after.
+
+- [ ] **Telling players about a large load.** A load's `Budget` covers
+      building the objects. Announcing them to connected players afterwards
+      goes out 50 per packet with a frame between packets (`ANNOUNCE_CHUNK` in
+      `src/Objects/Server.luau`), so a 34,918-object level is about 700 frames,
+      roughly 12 seconds at 60 fps, before the last object reaches a client.
+      Never measured: every load timing so far ran with no player connected.
+      Measure it first, with one player and with three. *Ask* whether the
+      announce should follow the load's budget, send larger chunks, or stay as
+      it is; the chunking exists because one packet per object flooded the
+      remote queue.
+
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
 safety -- the tests use `Scene:Load()` without checking the `SceneInstance?` it
@@ -99,6 +121,87 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **A load chooses its frame budget, and a part enters the world
+      finished.** `Scene:Load(parent, {Budget = seconds})`, and `Open({...})`
+      on the server, set how long the read may build objects each frame. 1/120
+      s stays the default; `math.huge` builds everything without waiting. A
+      budget that is not a number above zero warns and falls back rather than
+      waiting a frame per object. The client's `LoadWhole` is now the same read
+      with a budget of `math.huge`. On a real 34,918-object level: 13.7 s at
+      the default over 791 frames, 5.2 s at 1/30 over 129, and 4.1 s as one
+      stall. Reading the pack (about 0.3 s) happens before the budgeted
+      building and is not split.
+
+      A part is now parented after its links have written the object's values,
+      on the server and on both client paths, where it used to be parented
+      first and then take each value as a change. Server load time did not move
+      measurably (11.9 to 14.6 s across runs either way); the point is that a
+      client receives each part once, already holding its values. That was not
+      measured: the playtests had no players connected.
+
+      The client suite's wait for the server's live fixtures went from 15 s to
+      90 s. They are made after the server's own suite, which outgrew 15 s once
+      the load tests started building tens of thousands of objects.
+
+- [x] **Packs that fit, and saving them to a DataStore.** A real building
+      game's level -- 20,287 blocks and 14,631 block attributes, 34,918
+      objects -- came to 4.53 MB as one record per object, every property of
+      every object written, defaults included: past the DataStore limit. It is
+      129 KB now.
+
+      Scene packs and database shards share one format. Rows are grouped
+      (objects by type, records by the properties they carry, in order, since
+      callers read a record's properties by position) and each property is a
+      column. A column carries **the pack's own default** -- the value it holds
+      most often in that pack -- and a bitmap of the rows that differ, and
+      writes only those. Decided: the default belongs to the pack, never the
+      registry, so changing a property's `DefaultValue` later changes nothing
+      already saved. Each column picks whichever encoding is smallest: tagged
+      values, a bit, a palette, grid integers, steps from the previous Vector
+      one axis at a time, or a reference as its distance from the row's own id.
+      Everything is laid out column by column and compressed with zstd (level
+      19 for scenes, 9 for shards), and a reader checks the unpacked size
+      against a 64 MB cap before unpacking, because a client can push a pack.
+      Floats read back bit for bit: a Vector off the grid, `-0` included, keeps
+      its twelve bytes. No backwards compatibility, since nothing had shipped:
+      the record-per-row readers are gone.
+
+      What it cost on the real level, as stored: 163 KB in the first version
+      (positions and the attribute-to-block references were three quarters of
+      it), then 129 KB once references were written relative to their row.
+      All 472,431 non-colour values read back identical.
+
+      `Scene:Save(store, key)` and `Scenes.fromDataStore(config, store, key)`
+      store the pack as a buffer. The README used to say `buffer.tostring`,
+      which a DataStore refuses: it takes only valid UTF-8. Measured against a
+      real DataStore, a buffer counts at its base64 size, so one key holds
+      about 3 MiB of it (3,145,312 bytes stored, a few hundred more refused).
+
+      Database shards seal at 1 MB measured before compression rather than at
+      3 MB as stored. Every create rewrites the tail shard inside an
+      `UpdateAsync` transform that cannot yield, so the limit is a CPU budget:
+      a shard sealed at 3 MB packed would have held about 90,000 records and
+      stalled the server four seconds a create. Typical level records went
+      from 61 bytes each to 14, and a MemoryStore page of 50 from 4,038 bytes
+      to 1,760. An object kept because its type is not registered now goes back
+      into a pack as the tagged values it was read with, rather than as its
+      original record's bytes, which no longer exist in a pack.
+
+      The database suite ran for the first time against real DataStores, on
+      the published place: 243/243 server, 73/73 client.
+
+- [x] **`Table`, a tenth property type.** A list of values of one other type:
+      `Of` names it (required, and not `Table` -- nested lists are refused),
+      `Item` holds that type's constraints, checked on every item; `MinItems`
+      refuses a shorter list and `MaxItems` cuts a longer one, capped at 4,096,
+      which is also the default. Values are frozen and compare by contents,
+      so setting an equal list is no change. A `Table` of `Object` reads as
+      the objects its items name, leaving out any that do not resolve while
+      keeping their ids, and travels through transactions, duplication and
+      placement with its references remapped like a single reference's. A
+      `Table` cannot drive an instance member, so a link naming one is dropped
+      at registration.
 
 - [x] **The three left on purpose, fixed after all.** `Permissions:Can` on
       the client says no to an edit or a destroy of an object someone else
@@ -830,6 +933,8 @@ rather than guessed.
 
 ## Owned elsewhere
 
-- Saving and loading a level's contents. The database stores metadata records,
-  not the object graph; `CompressObject` and `fromCompression` are the seam.
-  Pedro is taking this one.
+- Saving and loading a level's contents, beyond the pack itself. A scene now
+  saves and loads its own pack (`Scene:Save`, `Scenes.fromDataStore`), and the
+  database stores metadata records about levels, not the levels. What a game
+  keys levels by, how it versions or backs them up, and how a level's pack and
+  its database record stay in step are the game's. Pedro is taking this one.
