@@ -676,6 +676,60 @@ budget covers telling connected players about the objects as well as building
 them: they go out in chunks of 50, as many chunks a frame as the budget allows,
 so `math.huge` sends them all in the same stall that built them.
 
+### What a loaded level costs
+
+Measured on 2026-10-22 on the same 34,918-object level (20,287 blocks with
+parts, 14,631 attributes, 495,279 properties: 14.2 an object), loaded with the
+default budget on a Studio server with three players.
+
+**Memory.** Lua heap, read with `gcinfo()` after allocating garbage until the
+collector had run, since an idle VM barely collects:
+
+| | Server | Each client |
+|---|---|---|
+| Prism required, nothing loaded | 4.4 MB | 7.4-8.1 MB |
+| Level loaded | 535 MB | 576-590 MB |
+| Per object | about 15.2 KB | about 16.5 KB |
+| Per property | about 1.1 KB | about 1.2 KB |
+| After unloading | 4.4 MB | 26-32 MB |
+
+Nearly all of it is properties. Each one is a table of its own holding four
+closures (`Set`, `Destroy`, `OnChange`, `SetDefault`) and a `Listeners`
+table, and each object adds six closures and three tables more. The parts
+themselves are engine memory, not Lua heap: about 8 MB on a client by the
+`Instances` memory tag.
+
+Building or loading the level allocates far more than it keeps: the server's
+heap read 451 MB of garbage straight after the level was built, and fell to
+4 MB once the collector ran.
+
+An unload gives the server everything back. A client keeps about 20 MB of
+Lua heap and the level's 8 MB of instances after the copy is gone, the same
+after two loads and unloads as after one, so it does not grow. What holds it
+has not been traced. The server holds on to anything still in a player's undo
+history: after the edit bursts below, 44 MB of edited objects stayed until
+`History:Clear` let them go.
+
+**Frames.** Prism runs nothing per frame, so a loaded level that nobody edits
+costs nothing measurable: server frames averaged 16.64 ms against 16.62 with
+nothing loaded (p99 18.6 against 18.2 ms, heartbeat work 0.09 ms against
+0.10), and clients 16.64 against 16.61.
+
+**Edits, three players at once:**
+
+| Burst | Server frames | Client frames | Result |
+|---|---|---|---|
+| One `Set` a frame each for 5 s (60 a second, a drag) | p99 18.5 ms, max 19.5 ms | p99 18.5 ms, max 19.4 ms | 906 edits, none refused, every client holding all of them |
+| One 1,000-set transaction each, together | p99 18.6 ms, max 29.4 ms | max 19-20 ms | each commit 380-400 ms round trip; every client held the other 2,000 within 0.65 s |
+
+The drag burst ran under a role with `Rate = 120`. The bulk burst ran under
+one with a `Rate` high enough for 1,000 operations at once, since a
+transaction spends one action per operation.
+
+Studio caps a server at 60 frames a second, so these say whether a frame went
+long, not how much headroom was left. The frame times are Studio's, on one
+machine running the server and three clients together.
+
 ### Placing a pack into a copy
 
 Loading reads a pack as a whole new copy, every object under the id it was saved
