@@ -1541,6 +1541,10 @@ Each column is written whichever of these ways comes out smallest:
 - **relative**: a reference as how far its target is from the object holding
   it. Something made right after the thing it points at -- an attribute after
   its block, a button after its door -- is one step back, every time.
+- **list**: a `Table` of `Object` the same way, a count and then each item as
+  how far its target is from the object holding the list. A wiring block made
+  after the blocks it takes inputs from writes the same few small numbers on
+  every row.
 
 Everything is written column by column, bitmaps and values alike, so similar
 bytes sit together. The pack is then compressed with zstd, at level 19 for

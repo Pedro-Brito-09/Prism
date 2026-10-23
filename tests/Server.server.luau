@@ -4492,6 +4492,71 @@ T:Test("a placed pack keeps the list items it carried", function()
     Scene:Destroy()
 end)
 
+-- Wiring as a level holds it: each panel made right after the two doors it
+-- names, so every list points the same distance back from its own row.
+const function WiredPanels(Name: string, Count: number, Wired: boolean)
+    const Scene = Scenes.new({Name = Name}) :: any
+    const Copy = Scene:Load()
+    const Panels = {}
+    for Index = 1, Count do
+        const First = Copy:Create(DoorId)
+        const Second = Copy:Create(DoorId)
+        Panels[Index] = Copy:Create(PanelId)
+        if Wired then
+            Panels[Index]:Set(DoorsId, {First, Second})
+        end
+    end
+
+    return Scene, Copy, Panels
+end
+
+T:Test("a list of references reads back from a pack relative to its row", function()
+    const Scene, Copy, Panels = WiredPanels("TableRelative", 300, true)
+
+    -- One panel names a door far away and one names nothing, so the column
+    -- holds more than one shape of list.
+    Panels[150]:Set(DoorsId, {Panels[1]:Get(DoorsId)[1]})
+    Panels[151]:Set(DoorsId, {})
+
+    const BackScene = Scenes.fromBuffer({Name = "TableRelativeBack"}, Copy:Serialize())
+    const Back = BackScene:Load()
+
+    local Wrong = 0
+    for _, Panel in Panels do
+        const Restored = Back:Find(Panel.LocalId)
+        const Saved = Panel:GetProperty(DoorsId).Value
+        const Read = Restored and Restored:GetProperty(DoorsId).Value
+        if not Read or #Read ~= #Saved then
+            Wrong += 1
+            continue
+        end
+
+        for Index, Target in Saved do
+            if Read[Index] ~= Target then
+                Wrong += 1
+            end
+        end
+    end
+
+    T:Eq(Wrong, 0, "every list holds the ids it was saved with")
+
+    Scene:Destroy()
+    BackScene:Destroy()
+end)
+
+T:Test("a list of references costs almost nothing in a pack", function()
+    const Bare, BareCopy = WiredPanels("TableBare", 2000, false)
+    const Wired, WiredCopy = WiredPanels("TableWired", 2000, true)
+
+    -- Written as whole ids, each list was a different few bytes on every row
+    -- and zstd kept most of them.
+    const Cost = buffer.len(WiredCopy:Serialize()) - buffer.len(BareCopy:Serialize())
+    T:Ok(Cost < 200, `2,000 lists of two cost {Cost} bytes`)
+
+    Bare:Destroy()
+    Wired:Destroy()
+end)
+
 T:Test("undoing a list set puts the list back", function()
     const Scene, Copy = Room("TableHistory")
     const Plr = Editor(-6200, Scene)

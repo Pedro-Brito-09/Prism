@@ -80,17 +80,6 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-- [ ] **Lists of references written relative to their row.** A pack writes a
-      single `Object` reference as its distance from the row's own local id
-      (`COLUMN_RELATIVE` in `src/Compressor.luau`), which took the
-      attribute-to-block references on a real level from 33 KB to almost
-      nothing. A `Table` of `Object` is still written as tagged values holding
-      whole ids, because `TargetOf` only accepts a lone reference. Wiring
-      blocks keep their inputs in such lists. Done when a `Table` of `Object`
-      column can be written with each item relative to the row, round trips in
-      a test, and the size on a level that uses them is measured before and
-      after.
-
 - [ ] **Telling players about a large load.** A load's `Budget` covers
       building the objects. Announcing them to connected players afterwards
       goes out 50 per packet with a frame between packets (`ANNOUNCE_CHUNK` in
@@ -121,6 +110,23 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **Lists of references written relative to their row.** A seventh
+      column encoding, `COLUMN_RELATIVE_LIST`: a `Table` of `Object` as a
+      count and then each item as its distance from the row's own local id,
+      chosen like the others only when it comes out smallest. A list is
+      written this way only if the tagged value rebuilds from its ids byte for
+      byte, so the reader gives back exactly what the writer was handed.
+
+      Measured on the real 34,918-object level, it changes nothing: 129,459
+      bytes before and after, the same bytes. That level has no lists of
+      references to write. Its schema leaves the wiring out, and every
+      `INPUT` and `OUTPUT` in all six saved copies holds `nil`, so there was no
+      real wiring to measure. Measured instead on wiring as a level would hold
+      it, 2,000 panels each made after the two doors it names: the lists cost
+      8,296 bytes as stored before and 11 after. The test asserts under 200.
+
+      Suites on the merged result, one player: pure 624, server 245, client 73.
 
 - [x] **A load chooses its frame budget, and a part enters the world
       finished.** `Scene:Load(parent, {Budget = seconds})`, and `Open({...})`

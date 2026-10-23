@@ -1599,6 +1599,10 @@ end
 --            is from the row's own id. An attribute made right after its block
 --            names the object one before it, every time; written as the id
 --            itself, that was a different number on every row.
+--   list     a Table of references the same way: a varint count, then each
+--            item as how far the object it names is from the row's own id.
+--            Wiring blocks keep their inputs in such lists, and the blocks
+--            they name are placed near them.
 --
 -- Whole, the body is then compressed with zstd when that comes out smaller,
 -- which flag 1 records. Most of what is left is a level repeating itself in
@@ -1624,6 +1628,7 @@ const COLUMN_PALETTE = 2
 const COLUMN_GRID = 3
 const COLUMN_RELATIVE = 4
 const COLUMN_GRID_DELTA = 5
+const COLUMN_RELATIVE_LIST = 6
 
 -- Steps a grid column may snap to, smallest first so that a tie goes to the
 -- smaller integers.
@@ -1639,6 +1644,7 @@ const BOOL_FALSE_KEY = buffer.tostring(BOOL_FALSE)
 const BOOL_TRUE_KEY = buffer.tostring(BOOL_TRUE)
 const VECTOR_TAG = MakeTag(WIRE_FIXED12, PropertyTypes:GetTypeId("Vector") :: number)
 const OBJECT_TAG = MakeTag(WIRE_VARINT, PropertyTypes:GetTypeId("Object") :: number)
+const TABLE_TAG = MakeTag(WIRE_BYTES, PropertyTypes:GetTypeId("Table") :: number)
 
 -- A buffer that grows as it is written, so a pack is built in one place rather
 -- than as thousands of pieces glued together at the end.
@@ -1773,6 +1779,65 @@ const function TargetOf(Key: string): number?
     end
 
     return Target
+end
+
+-- A Table of references, tagged exactly as CompressValue writes one. The one
+-- place both sides build it, so what the reader rebuilds is what the writer
+-- checked it would.
+const function ReferenceList(Targets: {number}): buffer
+    local Inner = Varint.Measure(#Targets)
+    for _, Target in Targets do
+        Inner += 1 + Varint.Measure(Target)
+    end
+
+    const Out = buffer.create(1 + Varint.Measure(Inner) + Inner)
+    buffer.writeu8(Out, 0, TABLE_TAG)
+    local At = 1 + Varint.Write(Out, 1, Inner)
+    At += Varint.Write(Out, At, #Targets)
+    for _, Target in Targets do
+        buffer.writeu8(Out, At, OBJECT_TAG)
+        At += 1 + Varint.Write(Out, At + 1, Target)
+    end
+
+    return Out
+end
+
+-- The local ids a tagged Table of references holds, or nil when the value is
+-- anything else -- or is one but would not be rebuilt byte for byte from its
+-- ids, which a column written relative to its rows could not give back.
+const function TargetsOf(Key: string): {number}?
+    if string.byte(Key, 1) ~= TABLE_TAG then
+        return nil
+    end
+
+    const Buf = buffer.fromstring(Key)
+    const Ok, Targets = pcall(function(): {number}?
+        const _, LengthRead = Varint.Read(Buf, 1)
+        const Count, CountRead = Varint.Read(Buf, 1 + LengthRead)
+        if Count > #Key then
+            return nil
+        end
+
+        local At = 1 + LengthRead + CountRead
+        const List = table.create(Count)
+        for Index = 1, Count do
+            if buffer.readu8(Buf, At) ~= OBJECT_TAG then
+                return nil
+            end
+
+            const Target, Read = Varint.Read(Buf, At + 1)
+            List[Index] = Target
+            At += 1 + Read
+        end
+
+        return List
+    end)
+
+    if not Ok or not Targets or buffer.tostring(ReferenceList(Targets)) ~= Key then
+        return nil
+    end
+
+    return Targets
 end
 
 type Column = {
@@ -1928,6 +1993,32 @@ const function PlanColumn(Id: number, Values: {[number]: string}, Rows: number, 
         end
     end
 
+    local List = math.huge
+    if #Distinct > 1 then
+        const Lists: {[string]: {number}} = {}
+        local Fits = true
+        for Position = 2, #Distinct do
+            const Targets = TargetsOf(Distinct[Position])
+            if not Targets then
+                Fits = false
+                break
+            end
+
+            Lists[Distinct[Position]] = Targets
+        end
+
+        if Fits then
+            List = 0
+            for Position, Key in Written do
+                const Row = LocalIds[WrittenRows[Position]]
+                List += Varint.Measure(#Lists[Key])
+                for _, Target in Lists[Key] do
+                    List += Varint.MeasureSigned(Target - Row)
+                end
+            end
+        end
+    end
+
     -- The smallest wins, and a tie goes to the simpler encoding.
     local Best, Encoding = Raw, COLUMN_RAW
     if Palette < Best then
@@ -1944,6 +2035,10 @@ const function PlanColumn(Id: number, Values: {[number]: string}, Rows: number, 
 
     if Relative < Best then
         Best, Encoding = Relative, COLUMN_RELATIVE
+    end
+
+    if List < Best then
+        Best, Encoding = List, COLUMN_RELATIVE_LIST
     end
 
     return {
@@ -2044,6 +2139,12 @@ const function PutColumnValues(W: Writer, Plan: Column, Values: {[number]: strin
             PutGrid(W, buffer.fromstring(Key), Plan.Scale :: number)
         elseif Plan.Encoding == COLUMN_RELATIVE then
             PutSigned(W, (TargetOf(Key) :: number) - LocalIds[WrittenRows[Index]])
+        elseif Plan.Encoding == COLUMN_RELATIVE_LIST then
+            const Targets = TargetsOf(Key) :: {number}
+            PutVarint(W, #Targets)
+            for _, Target in Targets do
+                PutSigned(W, Target - LocalIds[WrittenRows[Index]])
+            end
         end
 
         -- A bool column writes nothing: the written bit already said it.
@@ -2237,7 +2338,7 @@ const function ReadColumnHeader(Buf: buffer, Offset: number, Shared: {[buffer]: 
         end
 
         Column.Scale = Scale
-    elseif Encoding ~= COLUMN_RAW and Encoding ~= COLUMN_RELATIVE then
+    elseif Encoding ~= COLUMN_RAW and Encoding ~= COLUMN_RELATIVE and Encoding ~= COLUMN_RELATIVE_LIST then
         Logger:Error(`Column {Id} is written in encoding {Encoding}, which this build does not know.`)
     end
 
@@ -2361,6 +2462,24 @@ const function ReadColumnValues(
             Tagged = buffer.create(1 + Varint.Measure(Target))
             buffer.writeu8(Tagged, 0, OBJECT_TAG)
             Varint.Write(Tagged, 1, Target)
+        elseif Column.Encoding == COLUMN_RELATIVE_LIST then
+            const ItemCount, CountRead = ReadCount(Buf, At)
+            At += CountRead
+
+            const Targets = table.create(ItemCount)
+            for Item = 1, ItemCount do
+                const Distance, Read = Varint.ReadSigned(Buf, At)
+                At += Read
+
+                const Target = Ids[Row] + Distance
+                if Target < 0 then
+                    Logger:Error(`Column {Column.Id} points row {Ids[Row]} at {Target}, which is not an id.`)
+                end
+
+                Targets[Item] = Target
+            end
+
+            Tagged = ReferenceList(Targets)
         else
             const Length = TaggedLength(Buf, At)
             Tagged = Slice(Buf, At, Length)
