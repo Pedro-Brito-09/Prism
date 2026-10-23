@@ -169,6 +169,9 @@ export type Section = {
     Properties: {PropertyRegistry<any>},
 }
 
+-- Value, DefaultValue and Listeners are the property's own. Everything else is
+-- read through a metatable shared by every property of the same registry, so it
+-- reads the same but is not there to iterate, clone or send over a remote.
 export type Property<T = PropertyType> = {
     Parent: PropertyIdentifier,
     Name: string,

@@ -259,6 +259,21 @@ const function ValidateLinks(
     return if #Valid > 0 then Valid else nil
 end
 
+-- A link reads its registry's fields through this rather than carrying a copy
+-- of them: the copy was a table of five fields for every linked property of
+-- every object, and only Disconnect is the link's own.
+const LinkShapes: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
+
+const function LinkShapeOf(Registry: Types.InstanceLinkRegistry): any
+    local Shape = LinkShapes[Registry]
+    if not Shape then
+        Shape = {__index = Registry}
+        LinkShapes[Registry] = Shape
+    end
+
+    return Shape
+end
+
 -- Wiring only. ValidateLinks has already rejected anything that cannot work and
 -- every clone shares the template's shape, so this no longer warns about link
 -- shape -- it would repeat the same message once per object. The pcall stays
@@ -276,7 +291,7 @@ const function BuildLinks(
     local Count = 0
 
     for _, Registry in Links do
-        const Link: Types.InstanceLink = table.clone(Registry) :: any
+        const Link: Types.InstanceLink = setmetatable({}, LinkShapeOf(Registry)) :: any
         const Prop = Props[Link.Property]
         if not Prop then
             continue

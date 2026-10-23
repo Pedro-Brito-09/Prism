@@ -628,6 +628,36 @@ T:Test("instances start at the registry default", function()
     T:Eq(Prop.Parent, TitleId, "parent")
 end)
 
+T:Test("properties of one registry share everything but their values", function()
+    const First = Properties.new(HealthId)
+    const Second = Properties.new(HealthId)
+    const Registry = Properties:GetRegistry(HealthId) :: any
+
+    First:Set(10)
+    Second:SetDefault(20)
+
+    T:Eq(First.Value, 10, "a value is the property's own")
+    T:Eq(Second.Value, 100, "and the other keeps its own")
+    T:Eq(Second.DefaultValue, 20, "as is a default set on it")
+    T:Eq(First.DefaultValue, 100, "which the first does not see")
+
+    for _, Prop in {First, Second} do
+        T:Eq(Prop.__type, "Property", "still reads as a property")
+        T:Eq(Prop.Name, Registry.Name, "named")
+        T:Eq(Prop.Type, "Number", "typed")
+        T:Eq(Prop.Constraints, Registry.Constraints, "with the registry's constraints")
+    end
+
+    -- Eleven fields on every property was most of what a loaded level kept in
+    -- memory. Only what differs between two of them is theirs to hold.
+    local Own = 0
+    for _ in First do
+        Own += 1
+    end
+
+    T:Eq(Own, 2, "holding nothing but a value and a default")
+end)
+
 T:Test("Set reports accepted and changed separately", function()
     const Prop = Properties.new(HealthId)
 

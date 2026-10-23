@@ -99,6 +99,42 @@ const function __destroy<T>(self: Property<T>)
     self.Listeners = nil
 end
 
+-- What every property of one registry has in common, read through __index:
+-- its identity, its constraints and the four methods. These were fields on
+-- every property, eleven keys a table, and a real 34,918-object level holds
+-- 495,279 properties -- 535 MB of Lua heap on the server, nearly all of it
+-- property tables. Constraints is the registry's own table, which the client
+-- fills in place when a custom enum it names is registered, so sharing it
+-- shares that too.
+--
+-- Keyed by the registry table, weakly: a client replaces its registries
+-- wholesale when they are replayed, and a type unregistered and registered
+-- again under the same id is a different registry.
+const Shapes: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
+
+const function ShapeOf(Ref: PropertyRegistry<any>): any
+    local Shape = Shapes[Ref]
+    if not Shape then
+        Shape = {
+            __index = {
+                __type = "Property",
+                Parent = Ref.Id,
+                Name = Ref.Name,
+                Type = Ref.Type,
+                Constraints = Ref.Constraints,
+                Set = __setter,
+                SetDefault = __default_setter,
+                OnChange = __on_change,
+                Destroy = __destroy,
+            },
+        }
+
+        Shapes[Ref] = Shape
+    end
+
+    return Shape
+end
+
 --=============================================================================
 -- Display
 --=============================================================================
@@ -218,20 +254,14 @@ function Shared.new(
         Logger:Error("Invalid property reference. The registry it points at is not registered.")
     end
 
-    const Prop = {}
-    Prop.__type = "Property"
-    Prop.Parent = Ref.Id
-    Prop.Name = Ref.Name
-    Prop.Type = Ref.Type
-    Prop.Constraints = Ref.Constraints
-    Prop.DefaultValue = Ref.DefaultValue
-    Prop.Value = Ref.DefaultValue
-
-    Prop.Set = __setter
-    Prop.SetDefault = __default_setter
-    Prop.OnChange = __on_change
-    Prop.Destroy = __destroy
-    return Prop :: any
+    -- Only what can differ between two properties of one registry lives on the
+    -- property. The default stays too: it is the registry's at the moment the
+    -- property was made, and a registry's default changing afterwards must not
+    -- reach a property that already exists.
+    return setmetatable({
+        DefaultValue = Ref.DefaultValue,
+        Value = Ref.DefaultValue,
+    }, ShapeOf(Ref)) :: any
 end
 
 return Shared
