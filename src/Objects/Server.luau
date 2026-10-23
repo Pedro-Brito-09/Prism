@@ -379,16 +379,23 @@ end
 -- transaction's creates, a player being told about a scene. Send is handed one
 -- chunk at a time and answers whether to go on; Keep, where given, drops an
 -- object at the moment it would have been packed.
+--
+-- Budget, where given, is seconds a frame: chunks go out back to back until it
+-- runs out, then the next frame. Without one every chunk waits a frame, which
+-- put a 34,918 object load 698 frames -- 11.8 seconds -- behind its building,
+-- with one player or three. The packets were never the cost; the waits were.
 const function SendObjects(
     List: {Object},
     Send: (RuntimeIds: {RuntimeId}, InstanceIds: {number}, Buffers: {buffer}, Instances: {any}) -> boolean,
-    Keep: ((Object) -> boolean)?
+    Keep: ((Object) -> boolean)?,
+    Budget: number?
 )
     local RuntimeIds = {}
     local InstanceIds = {}
     local Buffers = {}
     local Instances = {}
     local Count = 0
+    local Since = os.clock()
 
     const function Flush(): boolean
         if Count == 0 then
@@ -401,7 +408,12 @@ const function SendObjects(
         Buffers = {}
         Instances = {}
         Count = 0
-        task.wait()
+
+        if Budget == nil or os.clock() - Since > Budget then
+            task.wait()
+            Since = os.clock()
+        end
+
         return Continue
     end
 
@@ -432,7 +444,10 @@ end
 -- The audience is taken once, before the first chunk. Someone told about the
 -- scene while this is still sending was handed these objects by that telling,
 -- and sending them here as well would send them twice.
-function Objects.AnnounceAll(List: {Object})
+--
+-- A load passes its own Budget, so the announce goes as fast as the building
+-- did. Everything else announces a chunk a frame.
+function Objects.AnnounceAll(List: {Object}, Budget: number?)
     for Scene, ByReach in Group(List, Itself) do
         for Key, Entries in ByReach do
             const Reach = Key :: Types.Reach
@@ -444,7 +459,7 @@ function Objects.AnnounceAll(List: {Object})
             SendObjects(Entries, function(RuntimeIds, InstanceIds, Buffers, Instances): boolean
                 Audience.FireHearing(Network.ObjectsReplayed, Scene, Reach, Hearing, RuntimeIds, InstanceIds, Buffers, Instances)
                 return true
-            end)
+            end, nil, Budget)
         end
     end
 end

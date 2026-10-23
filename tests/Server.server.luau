@@ -3352,6 +3352,26 @@ T:Test("a load given a budget of math.huge builds everything without waiting", f
     Scene:Destroy()
 end)
 
+T:Test("a load given a budget of math.huge announces everything without waiting", function()
+    -- Announcing to nobody sends nothing and waits for nothing, so this says
+    -- something only with a player connected to hear it.
+    if not Players:GetPlayers()[1] then
+        T:Skip("no player to announce to")
+        return
+    end
+
+    const Scene = CratePack("LargeLoadAnnounced", 4000)
+
+    -- The announce used to wait a frame after every 50 objects whatever the
+    -- budget, so this load yielded 80 times after it had finished building.
+    const Built, Done = BuiltBeforeFirstYield(Scene, {Budget = math.huge})
+    T:Eq(Built, 4000, "every object built")
+    T:Ok(Done(), "and announced before the load first yielded")
+    T:Eventually(Done, 15, "the load returned")
+
+    Scene:Destroy()
+end)
+
 T:Test("a load given a budget it cannot use reads in frames as usual", function()
     const Scene = CratePack("LargeLoadBadBudget", 4000)
 

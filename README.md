@@ -672,8 +672,9 @@ Draft:Open({Budget = 1 / 30})                     -- server, an opened copy
 ```
 
 A budget that isn't a number above zero warns and falls back to 1/120. The
-budget covers building the objects; telling connected players about them
-afterwards goes out in chunks of 50, a frame apart, whatever the budget.
+budget covers telling connected players about the objects as well as building
+them: they go out in chunks of 50, as many chunks a frame as the budget allows,
+so `math.huge` sends them all in the same stall that built them.
 
 ### Placing a pack into a copy
 
