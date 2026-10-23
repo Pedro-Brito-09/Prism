@@ -80,6 +80,25 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
+- [ ] **Properties that cost less memory.** A loaded 34,918-object level
+      holds 535 MB of Lua heap on the server and about 580 MB on each client:
+      1.1 KB for each of its 495,279 properties (README, "What a loaded level
+      costs"). Each property is a table carrying four closures and a
+      `Listeners` table of its own, and each object six closures and three
+      tables more. Methods shared through a metatable, and a `Listeners`
+      table made only when something listens, are the obvious candidates.
+      Measure the same level before and after. *Ask* whether a property
+      table's shape may change: games that read `Prop.Value` or keep a
+      property table would see it.
+
+- [ ] **What a client keeps after an unload.** After the level above is
+      unloaded, a client keeps about 20 MB of Lua heap and the level's 8 MB of
+      instances, even on a client that only watched the load and edited
+      nothing. It stays the same after a second load and unload, so it does
+      not grow, but something still holds the parts. The server gives
+      everything back. Find what holds them, and add a test that fails while
+      it does.
+
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
 safety -- the tests use `Scene:Load()` without checking the `SceneInstance?` it
