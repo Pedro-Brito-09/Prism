@@ -19,6 +19,7 @@ const Properties: typeof(require("../Properties/Server")) = if RunService:IsClie
     else require("../Properties/Server")
 
 const PropertyTypes = require("../Properties/Types")
+const PropertyShared = require("../Properties/Shared")
 const Compressor = require("../Compressor")
 const Logger = require("../Logger")
 const Types = require("./Types")
@@ -259,39 +260,28 @@ const function ValidateLinks(
     return if #Valid > 0 then Valid else nil
 end
 
--- A link reads its registry's fields through this rather than carrying a copy
--- of them: the copy was a table of five fields for every linked property of
--- every object, and only Disconnect is the link's own.
-const LinkShapes: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
-
-const function LinkShapeOf(Registry: Types.InstanceLinkRegistry): any
-    local Shape = LinkShapes[Registry]
-    if not Shape then
-        Shape = {__index = Registry}
-        LinkShapes[Registry] = Shape
-    end
-
-    return Shape
-end
-
 -- Wiring only. ValidateLinks has already rejected anything that cannot work and
 -- every clone shares the template's shape, so this no longer warns about link
 -- shape -- it would repeat the same message once per object. The pcall stays
 -- because the clone is not literally the instance that was validated.
+--
+-- Each property is handed its instance and the type's own link entry, and Set
+-- writes the instance from there. Nothing is built per link: what comes back
+-- is the type's own list, to say the object drives something and to hand to
+-- ReleaseLinks. Registration keeps one link a property, so a property never
+-- has two to hold.
 const function BuildLinks(
     Target: Instance?,
     Links: {Types.InstanceLinkRegistry}?,
     Props: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>}
-): {[PropertyTypes.PropertyIdentifier]: Types.InstanceLink}?
+): {Types.InstanceLinkRegistry}?
     if not Links or not Target then
         return nil
     end
 
-    const Map = {}
     local Count = 0
 
-    for _, Registry in Links do
-        const Link: Types.InstanceLink = setmetatable({}, LinkShapeOf(Registry)) :: any
+    for _, Link in Links do
         const Prop = Props[Link.Property]
         if not Prop then
             continue
@@ -305,25 +295,17 @@ const function BuildLinks(
             continue
         end
 
-        const Apply = if Link.Type == "Attribute"
-            then function(Value: any)
-                Inst:SetAttribute(Link.Name, Value)
-            end
-            else function(Value: any)
-                (Inst :: any)[Link.Name] = Value
-            end
-
-        if Prop.Value ~= nil and not pcall(Apply, Prop.Value) then
+        if Prop.Value ~= nil and not pcall(PropertyShared.Drive, Link, Inst, Prop.Value) then
             Logger:Warn(`Failed to apply link {Link.Name} on {Inst.ClassName}. Link dropped.`)
             continue
         end
 
-        Link.Disconnect = Prop:OnChange(Apply)
-        Map[Link.Property] = Link
+        Prop.Drives = Inst
+        Prop.Link = Link
         Count += 1
     end
 
-    return if Count > 0 then Map else nil
+    return if Count > 0 then Links else nil
 end
 
 --=============================================================================
@@ -653,14 +635,24 @@ end
 -- to the instance they drive: hanging them off an AncestryChanged handler kept
 -- every instance alive in a strongly keyed pool and never fired at all for an
 -- object destroyed directly.
-const function ReleaseLinks(Links: {[PropertyTypes.PropertyIdentifier]: Types.InstanceLink}?)
+--
+-- Only a property driving through one of these entries lets go. One whose
+-- descendant was missing was never wired, and a link the type no longer has --
+-- a client's registries are replaced when they are replayed -- is not this
+-- list's to undo.
+const function ReleaseLinks(
+    Links: {Types.InstanceLinkRegistry}?,
+    Props: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>}
+)
     if not Links then
         return
     end
 
     for _, Link in Links do
-        if Link.Disconnect then
-            Link.Disconnect()
+        const Prop = Props[Link.Property]
+        if Prop and Prop.Link == Link then
+            Prop.Drives = nil
+            Prop.Link = nil
         end
     end
 end

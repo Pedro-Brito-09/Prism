@@ -20,6 +20,21 @@ export type Property<T> = Types.Property<T>
 
 const Shared = {}
 
+-- Writes a value onto the instance a property drives. A link used to be an
+-- OnChange listener: a link table, two closures and a listener array a
+-- property, 431 bytes, and 330,259 of the 495,279 properties of a real
+-- 34,918-object level drive a part -- about 140 MB of a client's 309. Two
+-- fields on the property, the instance and the type's own link, do the same.
+const function Drive(Link: Types.Drive, Inst: Instance, Value: any)
+    if Link.Type == "Attribute" then
+        Inst:SetAttribute(Link.Name, Value)
+    else
+        (Inst :: any)[Link.Name] = Value
+    end
+end
+
+Shared.Drive = Drive
+
 const function __setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): (boolean, boolean)
     const Val = Types:FixValue(self.Type, Value, self.Constraints)
     if Val == nil then
@@ -33,6 +48,18 @@ const function __setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): (boole
     end
 
     self.Value = Val
+
+    -- First, so a listener reading the instance sees the value it was told of.
+    -- Protected rather than spawned like a listener: a link was checked against
+    -- the template when its type was registered, so this throwing is rare, and
+    -- a thread a set is no price to pay for the case where it does not.
+    const Drives = self.Drives
+    if Drives then
+        const Link = self.Link :: Types.Drive
+        if not pcall(Drive, Link, Drives, Val) then
+            Logger:Warn(`Failed to drive {self.Name} onto {Link.Name} of {Drives:GetFullName()}.`)
+        end
+    end
 
     const Listeners = self.Listeners
     if Listeners then
@@ -97,6 +124,8 @@ end
 
 const function __destroy<T>(self: Property<T>)
     self.Listeners = nil
+    self.Drives = nil
+    self.Link = nil
 end
 
 -- What every property of one registry has in common, read through __index:

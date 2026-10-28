@@ -594,7 +594,7 @@ end
 -- bring back the object it took -- under its own local id, or every reference
 -- to it comes back pointing at nothing.
 const function Withdraw(Obj: Object)
-    Shared.ReleaseLinks(Obj.Links)
+    Shared.ReleaseLinks(Obj.Links, Obj.Properties)
     Obj.Links = nil
 
     if Obj.Instance then
@@ -1106,7 +1106,7 @@ const function WireServerPart(Obj: any)
         return
     end
 
-    Shared.ReleaseLinks(Obj.Links)
+    Shared.ReleaseLinks(Obj.Links, Obj.Properties)
     Obj.Links = nil
 
     const Registry = Registered[Obj.Registry]

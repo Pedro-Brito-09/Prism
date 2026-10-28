@@ -1116,10 +1116,33 @@ end)
 T:Test("links are disconnected on destroy", function()
     const Obj = Objects.new(CrateId)
     const Prop = Obj.Properties[TintId]
+    const Inst = Obj.Instance
 
-    T:Ok(Prop.Listeners, "listener attached while alive")
+    T:Eq(Prop.Drives, Inst, "driving its part while alive")
     Obj:Destroy()
-    T:Eq(Prop.Listeners, nil, "listener released")
+    T:Eq(Prop.Drives, nil, "and no longer")
+    T:Eq(Prop.Link, nil, "nor through anything")
+end)
+
+-- A link used to be an OnChange listener: a link table, two closures and a
+-- listener array a property, 431 bytes, and two thirds of a real level's
+-- 495,279 properties drive a part -- about 140 MB of a client's heap.
+T:Test("a link costs its property two fields and nothing else", function()
+    const One = Objects.new(CrateId)
+    const Two = Objects.new(CrateId)
+    const Prop = One.Properties[TintId]
+
+    T:Eq(Prop.Listeners, nil, "no listener")
+    T:Eq(Prop.Drives, One.Instance, "the part it drives")
+    T:Eq(Prop.Link, Two.Properties[TintId].Link, "through the entry every crate shares")
+    T:Eq(One.Links, Two.Links, "and the object holds the type's own list")
+
+    -- Written by Set itself, so it is there before the call returns.
+    One:Set(TintId, Color3.fromRGB(0, 0, 255))
+    T:Eq(One.Instance.Color, Color3.fromRGB(0, 0, 255), "applied at once")
+
+    One:Destroy()
+    Two:Destroy()
 end)
 
 T:Test("links that cannot work are refused at registration", function()
