@@ -108,6 +108,33 @@ rather than guessed.
 
 ## Done
 
+- [x] **A record links the scenes it is about.** `db:Link(id, guid)` and
+      `db:Unlink(id, guid)`, and `record.Scenes`, the Guids in link order. A
+      level is a record and one or more scenes, and the record was the only
+      place a game could look up which, with nowhere to keep the answer but a
+      String property it parsed itself.
+
+      Decided: the link lives on the record alone, and only `db:Link` makes
+      one -- no `scene:Link`. A set, not named slots: linking a Guid already
+      there writes nothing, unlinking one that is not there is false. At most
+      64 a record, since every create in a shard re-encodes the whole shard
+      inside a transform that cannot yield. Only a Prism Guid is accepted,
+      through `Handles.IsGuid`, which moved there from Scenes so both check
+      the same thing; nothing checks the scene was ever saved. Each call is
+      one `UpdateAsync` that decides the change from the shard as that attempt
+      reads it, so a retry cannot add a Guid twice or drop one another server
+      added.
+
+      `SavedVersion` and `PublishedVersion` came off records. Nothing ever set
+      them, and a scene's draft and published packs say what was saved and
+      what went live. Their columns, 0 and 1, are retired rather than reused:
+      a shard written before still carries them, the reader skips them, and a
+      new meaning in either slot would read those numbers as something else.
+      The scenes go in column 2 as a `Table` of `String`, a column no property
+      ever wrote, since property ids start at 1 and sit at id plus two. A
+      record linking nothing writes nothing there. Existing shards read as
+      before.
+
 - [x] **A scene is saved under a Guid, as a draft and a published pack.**
       `Scene:Save(store)` took a key from the game, so what a level was saved
       under was whatever the game made up, and `Scene.Id` could not stand in
@@ -1027,7 +1054,6 @@ rather than guessed.
 
 ## Owned elsewhere
 
-- Tying a saved scene to the rest of a game's data. A scene saves, publishes
-  and backs itself up under its own Guid, and the database stores metadata
-  records about levels, not the levels. Keeping a scene's Guid on its level's
-  record, deciding when to back up, and removing old backups are the game's.
+- Looking after a saved scene's backups. A scene backs itself up under its own
+  Guid when asked and a record links the scenes it is about; deciding when to
+  back up, and removing old backups, are the game's.

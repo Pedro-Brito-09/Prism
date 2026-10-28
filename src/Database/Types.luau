@@ -9,8 +9,12 @@ export type Fields<T> = {[string]: MetadataValue | ValueTransformer<T>}
 
 export type Metadata = {
     Id: number,
-    SavedVersion: number,
-    PublishedVersion: number,
+
+    -- Guids of the scenes this record is about, in the order they were linked:
+    -- a level's rooms, a world's areas. Empty when it links none. Written by
+    -- Link and Unlink, never directly -- a record handed out by a read is a
+    -- frozen snapshot of the cache.
+    Scenes: {string},
 
     [number]: PropertyTypes.Property<any>,
 }
@@ -98,6 +102,12 @@ export type Database<T> = {
     Find: (self: Database<T>, Predicate: Predicate, Limit: number?) -> {Metadata},
     Edit: (self: Database<T>, Id: number, ToChange: {[number]: any}) -> boolean,
     Delete: (self: Database<T>, Id: number) -> boolean,
+
+    -- A scene, by Guid, added to or taken from what a record links. Linking
+    -- one already there is true and writes nothing; unlinking one that is not
+    -- there is false.
+    Link: (self: Database<T>, Id: number, Guid: string) -> boolean,
+    Unlink: (self: Database<T>, Id: number, Guid: string) -> boolean,
     Refresh: (self: Database<T>) -> (),
 }
 

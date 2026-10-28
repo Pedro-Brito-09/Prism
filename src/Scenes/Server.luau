@@ -63,9 +63,8 @@ local InstanceCounter = 0
 --
 -- Written as base64url without padding, 22 characters, because it goes into
 -- DataStore keys and a key is capped at 50: the longest one built from it,
--- "<Guid>:Backup:<13 digits>", is 43.
-const GUID_LENGTH = 22
-
+-- "<Guid>:Backup:<13 digits>", is 43. What one looks like is Handles', since a
+-- database record checks the Guids it links as well.
 const function NewGuid(): string
     const Hex = (string.gsub(HttpService:GenerateGUID(false), "-", ""))
     const Bytes = buffer.create(16)
@@ -74,16 +73,11 @@ const function NewGuid(): string
     end
 
     -- Sixteen bytes are 24 base64 characters, the last two padding.
-    const Text = string.sub(Encoding.Encode(Bytes), 1, GUID_LENGTH)
+    const Text = string.sub(Encoding.Encode(Bytes), 1, Handles.GUID_LENGTH)
     return (string.gsub(Text, "[+/]", {["+"] = "-", ["/"] = "_"}))
 end
 
--- Only Prism makes Guids, so anything else handed in as one is a mistake --
--- and reading a key that does not hold a Prism scene would hand a scene an
--- identity Prism never gave it.
-const function IsGuid(Text: any): boolean
-    return type(Text) == "string" and #Text == GUID_LENGTH and string.match(Text, "^[%w%-_]+$") ~= nil
-end
+const IsGuid = Handles.IsGuid
 
 const function ToPayload(Scene: Scene): SceneRegistry
     return {

@@ -1846,14 +1846,21 @@ end
 -- Metadata packs
 --=============================================================================
 
--- A record's two version numbers ride as columns 0 and 1, and its properties as
--- columns from 2 on, so a version can never be taken for a property. A group is
--- every record carrying the same properties in the same order: a record's
--- properties are read back by position as well as by id, and the order is the
--- one a record was built in.
-const METADATA_SAVED = 0
-const METADATA_PUBLISHED = 1
+-- A record's properties ride as columns from 2 on, property id plus two, so
+-- nothing else a record carries can be taken for a property. A group is every
+-- record carrying the same columns in the same order: a record's properties
+-- are read back by position as well as by id, and the order is the one a
+-- record was built in.
+--
+-- Columns 0 and 1 held a saved and a published version number that nothing
+-- ever set. They are retired rather than reused: a shard written before still
+-- carries them, and a new meaning in either slot would read those numbers as
+-- something they are not. The reader skips them. Column 2 is the Guids of the
+-- scenes a record links, as a Table of String; no property ever wrote there,
+-- because property ids start at 1.
+const METADATA_SCENES = 2
 const METADATA_FIRST_PROPERTY = 2
+const SCENES_CONSTRAINTS = {Of = "String"}
 
 -- Returns the pack and the size of its body before compression, which is what a
 -- caller measures a shard by: rewriting it decodes and encodes all of that.
@@ -1862,12 +1869,15 @@ function Compressor:CompressMetadatas(LastId: number, Metadatas: {DatabaseTypes.
     const ByLayout: {[string]: Group} = {}
 
     for _, Metadata in Metadatas do
-        const Fields = {
-            [METADATA_SAVED] = Compressor:CompressValue("Number", Metadata.SavedVersion) :: buffer,
-            [METADATA_PUBLISHED] = Compressor:CompressValue("Number", Metadata.PublishedVersion) :: buffer,
-        }
+        const Fields: {[number]: buffer} = {}
+        const Order: {number} = {}
 
-        const Order = {METADATA_SAVED, METADATA_PUBLISHED}
+        -- Nothing written for a record linking no scene, which is most of them.
+        if #Metadata.Scenes > 0 then
+            Fields[METADATA_SCENES] = Compressor:CompressValue("Table", Metadata.Scenes, SCENES_CONSTRAINTS) :: buffer
+            table.insert(Order, METADATA_SCENES)
+        end
+
         for Index, Prop in Metadata do
             if type(Index) ~= "number" then
                 continue
@@ -1914,20 +1924,21 @@ function Compressor:DecompressMetadatas(CompressedMetadatas: buffer): (number, {
     const Decode = Decoder()
 
     const LastId = ReadPack(CompressedMetadatas, VersionRead, function(_, Id, Fields, Order, Shared)
-        const Saved = Fields[METADATA_SAVED]
-        const Published = Fields[METADATA_PUBLISHED]
+        const Linked = Fields[METADATA_SCENES]
+        const Scenes = if Linked then Compressor:DecompressValue(Linked, 0) else nil
 
         const Metadata: any = {
             Id = Id,
-            SavedVersion = if Saved then Compressor:DecompressValue(Saved, 0) else 0,
-            PublishedVersion = if Published then Compressor:DecompressValue(Published, 0) else 0,
+            -- Copied rather than kept: a decoded Table is frozen, and Link and
+            -- Unlink change this list on a record decoded for the purpose.
+            Scenes = if type(Scenes) == "table" then table.clone(Scenes) else {},
         }
 
         -- Metadata does not keep what it cannot place. It is a database's own
         -- bookkeeping rather than anybody's level, and has nowhere to hold it.
         for _, Column in Order do
             const Tagged = Fields[Column]
-            if Column < METADATA_FIRST_PROPERTY or not Tagged then
+            if Column <= METADATA_SCENES or not Tagged then
                 continue
             end
 
