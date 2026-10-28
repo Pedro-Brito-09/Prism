@@ -14,6 +14,8 @@
 -- Objects therefore live on the copy, not on the scene. Asking a scene loaded
 -- twice for "the object with local id 4" has no answer; asking a copy does.
 
+const HttpService = game:GetService("HttpService")
+
 const Permissions = require("../Permissions/Server")
 const Compressor = require("../Compressor")
 const Objects = require("../Objects/Server")
@@ -24,6 +26,7 @@ const World = require("../World")
 const Network = require("./Network")
 const Handles = require("../Handles")
 const IdPool = require("../IdPool")
+const Encoding = require("../Encoding")
 const Logger = require("../Logger")
 const Try = require("../Try")
 const ObjectTypes = require("../Objects/Types")
@@ -33,6 +36,8 @@ export type SceneIdentifier = Types.SceneIdentifier
 export type SceneConfig = Types.SceneConfig
 export type LoadOptions = Types.LoadOptions
 export type SceneRegistry = Types.SceneRegistry
+export type SceneSource = Types.SceneSource
+export type SceneVersion = Types.SceneVersion
 export type SceneInstance = Types.SceneInstance
 export type Scene = Types.ServerScene
 
@@ -47,10 +52,43 @@ const Ids = IdPool.new(Handles.MAX_SCENE, false)
 -- session, and there is no saved data for a reused one to confuse.
 local InstanceCounter = 0
 
+-- The id above is unique on one server for one session: it is claimed in
+-- registration order, so scene 3 here is not scene 3 on the next server or
+-- after a restart, and a key built from it would read back the wrong level. It
+-- also has to fit the u16 the wire and every persistent id carry, which is
+-- 65,535 scenes for a whole game, ever. A Guid is the identity a scene is saved
+-- under instead: 128 random bits, so no server has to ask another which ones
+-- are taken, and nothing yields to make one.
+--
+-- Written as base64url without padding, 22 characters, because it goes into
+-- DataStore keys and a key is capped at 50: the longest one built from it,
+-- "<Guid>:Backup:<13 digits>", is 43.
+const GUID_LENGTH = 22
+
+const function NewGuid(): string
+    const Hex = (string.gsub(HttpService:GenerateGUID(false), "-", ""))
+    const Bytes = buffer.create(16)
+    for Index = 0, 15 do
+        buffer.writeu8(Bytes, Index, tonumber(string.sub(Hex, Index * 2 + 1, Index * 2 + 2), 16) :: number)
+    end
+
+    -- Sixteen bytes are 24 base64 characters, the last two padding.
+    const Text = string.sub(Encoding.Encode(Bytes), 1, GUID_LENGTH)
+    return (string.gsub(Text, "[+/]", {["+"] = "-", ["/"] = "_"}))
+end
+
+-- Only Prism makes Guids, so anything else handed in as one is a mistake --
+-- and reading a key that does not hold a Prism scene would hand a scene an
+-- identity Prism never gave it.
+const function IsGuid(Text: any): boolean
+    return type(Text) == "string" and #Text == GUID_LENGTH and string.match(Text, "^[%w%-_]+$") ~= nil
+end
+
 const function ToPayload(Scene: Scene): SceneRegistry
     return {
         Id = Scene.Id,
         Name = Scene.Name,
+        Guid = Scene.Guid,
     }
 end
 
@@ -663,16 +701,57 @@ end
 
 const SAVE_ATTEMPTS = 5
 
+-- Every key a scene is stored under starts with its Guid. A draft and a
+-- published pack are one key each, overwritten in place: their history is the
+-- DataStore's own versions, which it keeps for thirty days. A backup is a key
+-- of its own per call, so it outlives that, and nothing here ever deletes one.
+const function KeyOf(Guid: string, Which: string): string
+    return `{Guid}:{Which}`
+end
+
+const function BackupKey(Guid: string, Id: number): string
+    return KeyOf(Guid, `Backup:{Id}`)
+end
+
 -- The buffer itself rather than buffer.tostring of it. A DataStore only takes
 -- a string that is valid UTF-8, and a pack is binary through and through: any
 -- byte past 127 that does not open a UTF-8 sequence makes the write fail.
-const function __save(self: Scene, Store: GlobalDataStore, Key: string): boolean
+const function Write(self: Scene, Store: DataStore, Key: string): boolean
     const Success = Try(SAVE_ATTEMPTS, Store.SetAsync, Store, Key, __serialize(self))
     if not Success then
-        Logger:Warn(`Failed to save scene {self.Name} to key {Key}.`)
+        Logger:Warn(`Failed to write scene {self.Name} to key {Key}.`)
     end
 
     return Success
+end
+
+-- What a draft and a published pack hold is the same thing -- the scene as it
+-- was last committed -- and publishing does not read the draft back. A scene
+-- published without being saved first goes live as it is, which is what the
+-- game asked for by publishing it.
+const function __save(self: Scene, Store: DataStore): boolean
+    return Write(self, Store, KeyOf(self.Guid, "Draft"))
+end
+
+const function __publish(self: Scene, Store: DataStore): boolean
+    return Write(self, Store, KeyOf(self.Guid, "Published"))
+end
+
+-- Climbs within a server, so two backups in the same millisecond do not land on
+-- one key and leave the first unreachable.
+local LastBackup = 0
+
+-- When to take one is the game's: after every publish, once a day, before a
+-- risky edit. The id is the moment it was taken, in unix milliseconds.
+const function __backup(self: Scene, Store: DataStore): number?
+    const Id = math.max(DateTime.now().UnixTimestampMillis, LastBackup + 1)
+    LastBackup = Id
+
+    if not Write(self, Store, BackupKey(self.Guid, Id)) then
+        return nil
+    end
+
+    return Id
 end
 
 const function __get_instances(self: Scene): {any}
@@ -695,6 +774,7 @@ const function __destroy(self: Scene)
 
     Registry.ById[self.Id] = nil
     Registry.ByName[self.Name] = nil
+    Registry.ByGuid[self.Guid] = nil
     self.Data = nil
 
     -- To whoever was told its name, after which nobody holds it at all. Its
@@ -803,9 +883,20 @@ end
 -- Names have to be unique as well as ids. A name is how a caller asks for a
 -- scene back, and two scenes answering to "Lobby" means one of them is
 -- unreachable and which one depends on registration order.
-function Scenes.new(Config: SceneConfig): Scene?
+--
+-- Guid is only ever one Prism made: a fresh one, or the one a stored scene was
+-- saved under, handed back by fromDataStore. The config has no field for it,
+-- so a game cannot give a scene an identity of its own choosing.
+const function Build(Config: SceneConfig, Guid: string?): Scene?
     if Registry.ByName[Config.Name] then
         Logger:Warn(`There's already a scene named {Config.Name}.`)
+        return nil
+    end
+
+    -- The same level read back twice on one server would be two scenes saving
+    -- over each other's keys, each believing it was the level.
+    if Guid and Registry.ByGuid[Guid] then
+        Logger:Warn(`Scene {Registry.ByGuid[Guid].Name} is already registered under {Guid}.`)
         return nil
     end
 
@@ -818,6 +909,7 @@ function Scenes.new(Config: SceneConfig): Scene?
     const Scene = {}
     Scene.Id = Identifier
     Scene.Name = Config.Name
+    Scene.Guid = Guid or NewGuid()
     Scene.LastId = 0
     Scene.Data = nil
     Scene.Instances = {}
@@ -849,6 +941,8 @@ function Scenes.new(Config: SceneConfig): Scene?
     Scene.Unload = __unload
     Scene.Serialize = __serialize
     Scene.Save = __save
+    Scene.Publish = __publish
+    Scene.Backup = __backup
     Scene.GetInstances = __get_instances
     Scene.Destroy = __destroy
     Scene.Admit = __admit
@@ -865,6 +959,7 @@ function Scenes.new(Config: SceneConfig): Scene?
 
     Registry.ById[Identifier] = Scene
     Registry.ByName[Config.Name] = Scene
+    Registry.ByGuid[Scene.Guid] = Scene
 
     -- Told to whoever it admits, which for a scene with no list is everyone.
     Reconcile(Scene :: any)
@@ -876,9 +971,16 @@ function Scenes.new(Config: SceneConfig): Scene?
     return Scene :: any
 end
 
+-- A new scene, under a Guid nobody has used.
+function Scenes.new(Config: SceneConfig): Scene?
+    return Build(Config, nil)
+end
+
 -- Registers a scene around a pack someone stored earlier. Nothing goes live
 -- until Load, which is what makes a menu of saved levels cheap: register them
--- all, load the one that gets picked.
+-- all, load the one that gets picked. A pack carries no Guid, so this is a new
+-- scene with a new one -- the way to read a saved scene back as itself is
+-- fromDataStore.
 function Scenes.fromBuffer(Config: SceneConfig, Data: buffer): Scene?
     const Scene = Scenes.new(Config)
     if not Scene then
@@ -889,27 +991,165 @@ function Scenes.fromBuffer(Config: SceneConfig, Data: buffer): Scene?
     return Scene
 end
 
--- Registers a scene around what Save wrote to a key. A key holding nothing is a
--- level nobody has saved yet, and comes back as an empty scene; nil means the
--- key could not be read, or holds something that is not a pack, and nothing
--- was registered.
-function Scenes.fromDataStore(Config: SceneConfig, Store: GlobalDataStore, Key: string): Scene?
-    const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key)
+-- Which stored pack fromDataStore reads, and how: the current draft or
+-- published pack, one of the DataStore's own versions of either, or a backup.
+const function ReadStored(Store: DataStore, Guid: string, Source: Types.SceneSource): (boolean, any, string?)
+    if Source == "Draft" or Source == "Published" then
+        const Key = KeyOf(Guid, Source)
+        const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key)
+        return Success, Stored, Key
+    end
+
+    if type(Source) ~= "table" then
+        return false, nil, nil
+    end
+
+    if Source.Backup then
+        const Key = BackupKey(Guid, Source.Backup)
+        const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key)
+        return Success, Stored, Key
+    end
+
+    const Which = if Source.Draft then "Draft" elseif Source.Published then "Published" else nil
+    if not Which then
+        return false, nil, nil
+    end
+
+    const Key = KeyOf(Guid, Which)
+    const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetVersionAsync, Store, Key, (Source.Draft or Source.Published) :: string)
+    return Success, Stored, `{Key} at version {Source.Draft or Source.Published}`
+end
+
+-- Registers a saved scene as itself: under the Guid it was saved with, so
+-- saving it again writes the same keys. The draft unless Source names another
+-- pack. Nil when the Guid is not one Prism made, the pack could not be read,
+-- or there is nothing there -- a new level is Scenes.new, which gets a Guid of
+-- its own, and reading an empty key as an empty scene would let any string
+-- shaped like a Guid become one.
+function Scenes.fromDataStore(Config: SceneConfig, Store: DataStore, Guid: string, Source: Types.SceneSource?): Scene?
+    if not IsGuid(Guid) then
+        Logger:Warn(`{Guid} is not a scene Guid. Only Prism makes them; read one off Scene.Guid.`)
+        return nil
+    end
+
+    const Success, Stored, Where = ReadStored(Store, Guid, Source or "Draft")
+    if not Where then
+        Logger:Warn(`Cannot read scene {Config.Name}: unknown source {Source}.`)
+        return nil
+    end
+
     if not Success then
-        Logger:Warn(`Failed to read scene {Config.Name} from key {Key}.`)
+        Logger:Warn(`Failed to read scene {Config.Name} from {Where}.`)
         return nil
     end
 
     if Stored == nil then
-        return Scenes.new(Config)
+        Logger:Warn(`Nothing is stored at {Where}.`)
+        return nil
     end
 
-    if type(Stored) == "buffer" then
-        return Scenes.fromBuffer(Config, Stored)
+    if type(Stored) ~= "buffer" then
+        Logger:Warn(`{Where} holds a {typeof(Stored)}, not a scene pack.`)
+        return nil
     end
 
-    Logger:Warn(`Key {Key} holds a {typeof(Stored)}, not a scene pack.`)
-    return nil
+    const Scene = Build(Config, Guid)
+    if not Scene then
+        return nil
+    end
+
+    Scene.Data = Stored
+    return Scene
+end
+
+-- How many versions a listing asks the DataStore for at once.
+const LIST_PAGE_SIZE = 100
+
+-- The DataStore's own history of a draft or a published pack, newest first:
+-- every write in the last thirty days, which is as long as it keeps them. Nil
+-- when the listing could not be read. Limit caps how many come back; a scene
+-- saved on every edit has a great many.
+function Scenes.ListVersions(Store: DataStore, Guid: string, Which: "Draft" | "Published", Limit: number?): {Types.SceneVersion}?
+    if not IsGuid(Guid) then
+        Logger:Warn(`{Guid} is not a scene Guid.`)
+        return nil
+    end
+
+    const Wanted = Limit or math.huge
+    const Success, Versions = Try(SAVE_ATTEMPTS, function(): {Types.SceneVersion}
+        const Found: {Types.SceneVersion} = {}
+        const Pages = Store:ListVersionsAsync(KeyOf(Guid, Which), Enum.SortDirection.Descending, 0, 0, math.min(Wanted, LIST_PAGE_SIZE))
+
+        while true do
+            for _, Info in Pages:GetCurrentPage() do
+                -- A version the key was removed at holds no pack to read.
+                if Info.IsDeleted then
+                    continue
+                end
+
+                table.insert(Found, {Version = Info.Version, Time = Info.CreatedTime})
+                if #Found >= Wanted then
+                    return Found
+                end
+            end
+
+            if Pages.IsFinished then
+                return Found
+            end
+
+            Pages:AdvanceToNextPageAsync()
+        end
+    end)
+
+    if not Success then
+        Logger:Warn(`Failed to list versions of scene {Guid}.`)
+        return nil
+    end
+
+    return Versions
+end
+
+-- Every backup of a scene, newest first, by id -- which is the moment it was
+-- taken, in unix milliseconds. Nil when the listing could not be read.
+function Scenes.ListBackups(Store: DataStore, Guid: string): {number}?
+    if not IsGuid(Guid) then
+        Logger:Warn(`{Guid} is not a scene Guid.`)
+        return nil
+    end
+
+    const Prefix = KeyOf(Guid, "Backup:")
+    const Success, Ids = Try(SAVE_ATTEMPTS, function(): {number}
+        const Found: {number} = {}
+        const Pages = Store:ListKeysAsync(Prefix, LIST_PAGE_SIZE, "", true)
+
+        while true do
+            for _, Key in Pages:GetCurrentPage() do
+                const Id = tonumber(string.sub(Key.KeyName, #Prefix + 1))
+                if Id then
+                    table.insert(Found, Id)
+                end
+            end
+
+            if Pages.IsFinished then
+                break
+            end
+
+            Pages:AdvanceToNextPageAsync()
+        end
+
+        table.sort(Found, function(A: number, B: number): boolean
+            return A > B
+        end)
+
+        return Found
+    end)
+
+    if not Success then
+        Logger:Warn(`Failed to list backups of scene {Guid}.`)
+        return nil
+    end
+
+    return Ids
 end
 
 function Scenes:Get(Name: string): Scene?
@@ -918,6 +1158,10 @@ end
 
 function Scenes:GetById(Identifier: SceneIdentifier): Scene?
     return Registry.ById[Identifier]
+end
+
+function Scenes:GetByGuid(Guid: string): Scene?
+    return Registry.ByGuid[Guid]
 end
 
 function Scenes:GetRegistered(): {[SceneIdentifier]: Scene}

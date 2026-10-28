@@ -103,6 +103,18 @@ function Scenes:Get(Name: string): SceneRegistry?
     return nil
 end
 
+-- A server scene by what it is saved under. Scenes this client owns have none:
+-- only the server saves.
+function Scenes:GetByGuid(Guid: string): SceneRegistry?
+    for _, Scene in Registered do
+        if Scene.Guid == Guid then
+            return Scene
+        end
+    end
+
+    return nil
+end
+
 -- Which scene a live copy came from. Answers for a local copy too, which is
 -- filed the same way.
 function Scenes:GetInstanceScene(Instance_: SceneInstanceId): SceneIdentifier?

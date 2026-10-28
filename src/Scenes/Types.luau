@@ -29,6 +29,27 @@ export type SceneConfig = {
 export type SceneRegistry = {
     Id: SceneIdentifier,
     Name: string,
+
+    -- What the scene is saved under, so a client's list of levels can name one
+    -- the server will find again tomorrow.
+    Guid: string,
+}
+
+-- Which stored pack fromDataStore reads. "Draft" and "Published" are the
+-- current ones; {Draft = version} and {Published = version} are the
+-- DataStore's own earlier versions of them, as ListVersions names them, and
+-- {Backup = id} one of the scene's backups.
+export type SceneSource = "Draft" | "Published" | {
+    Draft: string?,
+    Published: string?,
+    Backup: number?,
+}
+
+-- One of the DataStore's versions of a draft or published pack. Time is when
+-- it was written, in unix milliseconds.
+export type SceneVersion = {
+    Version: string,
+    Time: number,
 }
 
 -- How a pack is read into a new copy.
@@ -171,9 +192,23 @@ export type Scene = {
 -- one that has admitted anybody is told to them and to nobody else -- its name,
 -- its copies and its objects alike.
 export type ServerScene = Scene & {
-    -- Writes the committed pack to a DataStore key, as the buffer itself.
-    -- False when every attempt failed.
-    Save: (self: ServerScene, Store: GlobalDataStore, Key: string) -> boolean,
+    -- The identity the scene is saved under, made by Prism when the scene is
+    -- registered and kept for as long as it is stored. Id is not that: it is
+    -- claimed per server in registration order and names a different scene on
+    -- the next server. Every key below starts with this.
+    Guid: string,
+
+    -- The committed pack, as the buffer itself, to "<Guid>:Draft" and
+    -- "<Guid>:Published". Each overwrites the last; the DataStore keeps thirty
+    -- days of versions of both. Publishing writes the scene as it is, not the
+    -- draft. False when every attempt failed.
+    Save: (self: ServerScene, Store: DataStore) -> boolean,
+    Publish: (self: ServerScene, Store: DataStore) -> boolean,
+
+    -- The committed pack to a key of its own that nothing overwrites, for as
+    -- long as the game keeps it. Returns the backup's id -- when it was taken,
+    -- in unix milliseconds -- or nil when every attempt failed.
+    Backup: (self: ServerScene, Store: DataStore) -> number?,
 
     -- Whether the scene is anybody's to see. A private scene is told to the
     -- players it admits and to nobody else; a public one is everybody's, and

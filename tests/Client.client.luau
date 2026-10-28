@@ -298,6 +298,19 @@ end)
 
 T:Describe("Admission")
 
+T:Test("a scene arrives with the Guid it is saved under", function()
+    const Scene = T:Eventually(function()
+        return Scenes:Get("FixtureAdmitted")
+    end, 5, "the scene arrived")
+
+    if not Scene then
+        return
+    end
+
+    T:Eq(type(Scene.Guid), "string", "a Guid")
+    T:Eq(Scenes:GetByGuid(Scene.Guid), Scene, "found by it")
+end)
+
 T:Test("a scene you were not admitted to sends only what replicates to everyone", function()
     -- The admitted one first, so this does not pass merely because nothing has
     -- arrived yet.

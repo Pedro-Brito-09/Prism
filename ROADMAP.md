@@ -108,6 +108,35 @@ rather than guessed.
 
 ## Done
 
+- [x] **A scene is saved under a Guid, as a draft and a published pack.**
+      `Scene:Save(store)` took a key from the game, so what a level was saved
+      under was whatever the game made up, and `Scene.Id` could not stand in
+      for it: it is claimed per server in registration order, names a
+      different scene on the next server, and is a u16 because it rides on the
+      wire -- 65,535 scenes for a whole game, ever. Every server scene now
+      carries `Guid`, 128 random bits as 22 base64url characters, made by
+      Prism at registration with no request and never supplied by the game.
+      `Scene.Id` and persistent ids are unchanged.
+
+      `Save` writes `<Guid>:Draft`, `Publish` writes `<Guid>:Published`, and
+      `Backup` writes `<Guid>:Backup:<unix ms>`, returning the id. Decided:
+      history is the DataStore's own versions, thirty days of them, not a key
+      per save; backups are separate keys that outlive that, taken only when
+      the game calls `Backup`, and Prism never deletes one. Publishing writes
+      the scene as it is rather than copying the stored draft.
+      `Scenes.ListVersions` and `ListBackups` list both, newest first, and
+      `fromDataStore(config, store, guid, source?)` reads the draft, the
+      published pack, a version of either, or a backup.
+
+      `fromDataStore` registers the scene under the Guid it was saved with, so
+      saving again writes the same keys. It refuses a string that is not a
+      Prism Guid, a Guid already registered, and an empty key -- which used to
+      come back as an empty scene, and would now let any string shaped like a
+      Guid become one. `fromBuffer` and a push make a new scene with a new
+      Guid, since a pack carries none. Clients get the Guid with the scene's
+      name; `Scenes:GetByGuid` on both sides. Breaking: `Save` no longer takes
+      a key, and nothing had shipped.
+
 - [x] **Properties that cost less memory.** A property held eleven fields,
       nine of them the same for every property of its registry. They are read
       through a metatable shared per registry now, so a property holds its
@@ -992,8 +1021,7 @@ rather than guessed.
 
 ## Owned elsewhere
 
-- Saving and loading a level's contents, beyond the pack itself. A scene now
-  saves and loads its own pack (`Scene:Save`, `Scenes.fromDataStore`), and the
-  database stores metadata records about levels, not the levels. What a game
-  keys levels by, how it versions or backs them up, and how a level's pack and
-  its database record stay in step are the game's. Pedro is taking this one.
+- Tying a saved scene to the rest of a game's data. A scene saves, publishes
+  and backs itself up under its own Guid, and the database stores metadata
+  records about levels, not the levels. Keeping a scene's Guid on its level's
+  record, deciding when to back up, and removing old backups are the game's.

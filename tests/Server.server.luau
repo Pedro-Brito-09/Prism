@@ -1576,10 +1576,24 @@ T:Test("a pack this build cannot read is refused", function()
     end, "a column encoding it does not know")
 end)
 
--- A DataStore that keeps keys in a table and refuses what a real one refuses:
--- a string that is not valid UTF-8.
+-- A DataStore that keeps keys in a table, every write as a version of its key,
+-- and refuses what a real one refuses: a string that is not valid UTF-8, and a
+-- key past 50 characters.
 const function FakeStore(): any
     const Keys = {}
+    const Versions: {[string]: {{Version: string, CreatedTime: number, IsDeleted: boolean, Value: any}}} = {}
+    local Written = 0
+
+    const function Pages(Items: {any}): any
+        return {
+            IsFinished = true,
+            GetCurrentPage = function()
+                return Items
+            end,
+            AdvanceToNextPageAsync = function() end,
+        }
+    end
+
     return {
         Keys = Keys,
         SetAsync = function(_, Key: string, Value: any)
@@ -1587,43 +1601,186 @@ const function FakeStore(): any
                 error("not valid UTF-8")
             end
 
+            if #Key > 50 then
+                error("key too long")
+            end
+
             Keys[Key] = Value
+            Written += 1
+            Versions[Key] = Versions[Key] or {}
+            table.insert(Versions[Key], {Version = `v{Written}`, CreatedTime = Written, IsDeleted = false, Value = Value})
         end,
         GetAsync = function(_, Key: string)
             return Keys[Key]
         end,
+        GetVersionAsync = function(_, Key: string, Version: string)
+            const List = Versions[Key]
+            if not List then
+                return nil
+            end
+
+            for _, Entry in List do
+                if Entry.Version == Version then
+                    return Entry.Value
+                end
+            end
+
+            return nil
+        end,
+        ListVersionsAsync = function(_, Key: string)
+            const Newest = {}
+            const List = Versions[Key] or {}
+            for Index = #List, 1, -1 do
+                table.insert(Newest, List[Index])
+            end
+
+            return Pages(Newest)
+        end,
+        ListKeysAsync = function(_, Prefix: string)
+            const Found = {}
+            for Key in Keys do
+                if string.sub(Key, 1, #Prefix) == Prefix then
+                    table.insert(Found, {KeyName = Key})
+                end
+            end
+
+            return Pages(Found)
+        end,
     }
 end
 
-T:Test("a scene saves to a DataStore key and reads back from it", function()
-    const Store = FakeStore()
-    const Scene = Scenes.new({Name = "TestSaved"}) :: any
+const function SavedScene(Name: string, Count: number): (any, any)
+    const Scene = Scenes.new({Name = Name}) :: any
     const Live = Scene:Load()
-    for Index = 1, 50 do
+    for Index = 1, Count do
         Live:Create(BlockId, BlockValues(Index))
     end
 
     Live:Commit()
-    T:Ok(Scene:Save(Store, "Level"), "saved")
-    T:Eq(type(Store.Keys.Level), "buffer", "as the buffer itself")
+    return Scene, Live
+end
+
+T:Test("every scene gets a Guid of Prism's, unique and found by it", function()
+    const A = Scenes.new({Name = "TestGuidA"}) :: any
+    const B = Scenes.new({Name = "TestGuidB"}) :: any
+
+    T:Eq(type(A.Guid), "string", "a Guid")
+    T:Eq(#A.Guid, 22, "22 characters")
+    T:Ok(string.match(A.Guid, "^[%w%-_]+$"), "base64url")
+    T:Ok(A.Guid ~= B.Guid, "unique")
+    T:Eq(Scenes:GetByGuid(A.Guid), A, "found by it")
+    T:Eq(Scenes:GetRegistryPayload(A.Id).Guid, A.Guid, "and goes out with the registry")
+
+    -- A pack carries no Guid: a scene read from one is a new scene.
+    const Copy = Scenes.fromBuffer({Name = "TestGuidCopy"}, A:Serialize()) :: any
+    T:Ok(Copy.Guid ~= A.Guid, "a buffer gets a fresh one")
+
+    const Guid = A.Guid
+    A:Destroy()
+    T:Eq(Scenes:GetByGuid(Guid), nil, "and loses it when destroyed")
+
+    B:Destroy()
+    Copy:Destroy()
+end)
+
+T:Test("a scene saves its draft and reads back as itself", function()
+    const Store = FakeStore()
+    const Scene = SavedScene("TestSaved", 50)
+    const Guid = Scene.Guid
+
+    T:Ok(Scene:Save(Store), "saved")
+    T:Eq(type(Store.Keys[`{Guid}:Draft`]), "buffer", "under its Guid, as the buffer itself")
+    T:Eq(Store.Keys[`{Guid}:Published`], nil, "and nothing published")
 
     -- What the old instructions said to do, which a real store refuses.
     T:Ok(not utf8.len(buffer.tostring(Scene:Serialize())), "a pack is not valid UTF-8 as a string")
     Scene:Destroy()
 
-    const Back = Scenes.fromDataStore({Name = "TestSavedBack"}, Store, "Level")
+    const Back = Scenes.fromDataStore({Name = "TestSavedBack"}, Store, Guid) :: any
     T:Eq(Back and #Back:Load():GetObjects(), 50, "every object came back")
+    T:Eq(Back and Back.Guid, Guid, "under the Guid it was saved with")
 
-    const Empty = Scenes.fromDataStore({Name = "TestSavedEmpty"}, Store, "Nothing")
-    T:Eq(Empty and #Empty:Load():GetObjects(), 0, "a key never saved is an empty scene")
+    T:Eq(Scenes.fromDataStore({Name = "TestSavedTwice"}, Store, Guid), nil, "a Guid already registered is refused")
 
     if Back then
         Back:Destroy()
     end
+end)
 
-    if Empty then
-        Empty:Destroy()
+T:Test("publishing writes the scene as it is, not the draft", function()
+    const Store = FakeStore()
+    const Scene, Live = SavedScene("TestPublished", 3)
+    Scene:Save(Store)
+
+    Live:Create(BlockId, BlockValues(4))
+    Live:Commit()
+    T:Ok(Scene:Publish(Store), "published")
+    const Guid = Scene.Guid
+    Scene:Destroy()
+
+    const Draft = Scenes.fromDataStore({Name = "TestPublishedDraft"}, Store, Guid) :: any
+    T:Eq(#Draft:Load():GetObjects(), 3, "the draft is what was saved")
+    Draft:Destroy()
+
+    const Live_ = Scenes.fromDataStore({Name = "TestPublishedLive"}, Store, Guid, "Published") :: any
+    T:Eq(#Live_:Load():GetObjects(), 4, "the published pack has the unsaved edit")
+    Live_:Destroy()
+end)
+
+T:Test("an earlier version of a draft reads back", function()
+    const Store = FakeStore()
+    const Scene, Live = SavedScene("TestVersioned", 2)
+    Scene:Save(Store)
+
+    Live:Create(BlockId, BlockValues(3))
+    Live:Commit()
+    Scene:Save(Store)
+    const Guid = Scene.Guid
+    Scene:Destroy()
+
+    const Versions = Scenes.ListVersions(Store, Guid, "Draft") :: any
+    T:Eq(#Versions, 2, "both saves listed")
+    T:Ok(Versions[1].Time > Versions[2].Time, "newest first")
+    T:Eq(#(Scenes.ListVersions(Store, Guid, "Draft", 1) :: any), 1, "and capped by the limit")
+
+    const Old = Scenes.fromDataStore({Name = "TestVersionedOld"}, Store, Guid, {Draft = Versions[2].Version}) :: any
+    T:Eq(#Old:Load():GetObjects(), 2, "the first save")
+    Old:Destroy()
+end)
+
+T:Test("a backup is a key of its own and reads back", function()
+    const Store = FakeStore()
+    const Scene, Live = SavedScene("TestBackedUp", 2)
+    const First = Scene:Backup(Store)
+
+    Live:Create(BlockId, BlockValues(3))
+    Live:Commit()
+    const Second = Scene:Backup(Store)
+    const Guid = Scene.Guid
+    Scene:Destroy()
+
+    T:Ok(First and Second and Second > First, "ids climb")
+    T:Ok(Store.Keys[`{Guid}:Backup:{First}`], "the first is kept")
+
+    const Ids = Scenes.ListBackups(Store, Guid) :: any
+    T:Eq(Ids and #Ids, 2, "both listed")
+    T:Eq(Ids and Ids[1], Second, "newest first")
+
+    const Back = Scenes.fromDataStore({Name = "TestBackedUpOld"}, Store, Guid, {Backup = First}) :: any
+    T:Eq(Back and #Back:Load():GetObjects(), 2, "the first backup")
+    if Back then
+        Back:Destroy()
     end
+end)
+
+T:Test("fromDataStore takes only a Guid Prism made, and only a stored pack", function()
+    const Store = FakeStore()
+    T:Eq(Scenes.fromDataStore({Name = "TestNotGuid"}, Store, "Level 1"), nil, "a name is refused")
+
+    -- Shaped like a Guid, never saved: an empty key would otherwise hand a
+    -- scene an identity Prism never gave it.
+    T:Eq(Scenes.fromDataStore({Name = "TestNeverSaved"}, Store, string.rep("a", 22)), nil, "an empty key is refused")
+    T:Eq(Scenes:Get("TestNeverSaved"), nil, "and nothing registered")
 end)
 
 T:Test("a pack that unpacks past the limit is refused before it is unpacked", function()
