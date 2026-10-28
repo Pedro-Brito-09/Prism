@@ -213,6 +213,21 @@ T:Test("the live fixtures arrived with distinct values", function()
     end
 end)
 
+-- Run before this client edits anything. Every arriving property used to take
+-- an entry here, and a Luau table keeps the room its emptied keys took: a
+-- client held 16 MB of it after the real level was unloaded.
+T:Test("an arriving object holds nothing for edits it has not had", function()
+    local Count = 0
+    for _, Obj in Objects:GetWorkspace() do
+        for _ in Obj.Properties do
+            Count += 1
+        end
+    end
+
+    T:Ok(Count > 0, "properties arrived")
+    T:Eq(Objects:CountConfirmed(), 0, "and none are held")
+end)
+
 T:Test("the object's instance is reachable", function()
     if not Denied then
         T:Ok(false, "no instance-backed fixture")

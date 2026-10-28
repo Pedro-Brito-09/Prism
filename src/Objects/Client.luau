@@ -312,9 +312,45 @@ const Pending: {[any]: number} = setmetatable({}, {__mode = "k"}) :: any
 -- back to this rather than to whatever was on screen just before the refused
 -- set: two refused sets in a row used to leave the second one's starting value
 -- in place, which is the first refused value, and no broadcast follows a
--- refusal to correct it. Seeded when the object arrives, updated on every
--- PropertyChanged.
+-- refusal to correct it.
+--
+-- Held only for a property this client has edited, from just before the edit
+-- shows, and kept current by every PropertyChanged after. Until then the value
+-- on screen is the server's: a set and a preview are the only two things that
+-- show anything else, and both hold first. It used to be seeded for every
+-- property as it arrived, which on a 34,918-object level is 495,279 entries
+-- and 16 MB of hash -- kept after the level was unloaded, since a Luau table
+-- never gives back the room its emptied keys took, weak or not.
 const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
+
+-- What Confirmed holds for a nil value, which would otherwise read as no entry
+-- at all and be held again over whatever is on screen by then.
+const NONE = table.freeze({})
+
+const function Hold(Prop: any)
+    if Confirmed[Prop] == nil then
+        Confirmed[Prop] = if Prop.Value == nil then NONE else Prop.Value
+    end
+end
+
+-- What a refusal rolls back to. A property never held has never shown
+-- anything but the server's value.
+const function ConfirmedOf(Prop: any): any
+    const Value = Confirmed[Prop]
+    if Value == nil then
+        return Prop.Value
+    end
+
+    return if Value == NONE then nil else Value
+end
+
+-- A value the server has asserted, for a property that is held. One that is not
+-- shows it already.
+const function Confirm(Prop: any, Value: any)
+    if Confirmed[Prop] ~= nil then
+        Confirmed[Prop] = if Value == nil then NONE else Value
+    end
+end
 
 -- Properties being set with ClientSided, and the value each held before the
 -- first of those sets. A drag used to send a set per frame, which at sixty
@@ -448,7 +484,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     if HeldByOther(self.RuntimeId) then
         if Previewing[Prop] then
             Previewing[Prop] = nil
-            Prop:Set(Confirmed[Prop])
+            Prop:Set(ConfirmedOf(Prop))
         end
 
         return false
@@ -463,6 +499,8 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         return false
     end
 
+    Hold(Prop)
+
     if ClientSided then
         return Preview(Prop, Val)
     end
@@ -476,7 +514,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     const Accepted, Changed = Prop:Set(Val)
     if not Accepted then
         if Held then
-            Prop:Set(Confirmed[Prop])
+            Prop:Set(ConfirmedOf(Prop))
         end
 
         return false
@@ -487,7 +525,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     -- from what the server holds, not from the last frame: a drag let go where
     -- it started is a cancel, and costs nothing.
     if Held then
-        if PropertyTypes:Equals(Prop.Type, Prop.Value, Confirmed[Prop]) then
+        if PropertyTypes:Equals(Prop.Type, Prop.Value, ConfirmedOf(Prop)) then
             return true
         end
     elseif not Changed then
@@ -528,7 +566,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         -- already off screen, and the drag's own last set will be judged on
         -- its own; snapping back now would yank it out of the player's hand.
         if (not Ok or not Allowed) and not self.Destroyed and not Previewing[Prop] then
-            Prop:Set(Confirmed[Prop])
+            Prop:Set(ConfirmedOf(Prop))
         end
     end)
 
@@ -1126,6 +1164,18 @@ function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end
 
+-- How many properties this client holds a server value for, which is how many
+-- it has edited and still has. A diagnostic: an object arriving must not add to
+-- it, since what it adds stays as room in the table after the object is gone.
+function Objects:CountConfirmed(): number
+    local Count = 0
+    for _ in Confirmed do
+        Count += 1
+    end
+
+    return Count
+end
+
 function Objects:Get(RuntimeId: RuntimeId): Object?
     return Workspace[RuntimeId]
 end
@@ -1354,8 +1404,6 @@ const function AddObject(
             Prop:Set(Data.Properties[PropId])
         end
 
-        -- Whatever the object arrived holding is what the server holds.
-        Confirmed[Prop] = Prop.Value
         Obj.Properties[PropId] = Prop
     end
 
@@ -1511,14 +1559,14 @@ const function ApplyChange(RuntimeId: RuntimeId, PropId: PropertyTypes.PropertyI
         if Previewing[Prop] then
             const Fixed = PropertyTypes:FixValue(Prop.Type, Value, Prop.Constraints)
             if Fixed ~= nil then
-                Confirmed[Prop] = Fixed
+                Confirm(Prop, Fixed)
             end
 
             return
         end
 
         Prop:Set(Value)
-        Confirmed[Prop] = Prop.Value
+        Confirm(Prop, Prop.Value)
     end
 end
 
