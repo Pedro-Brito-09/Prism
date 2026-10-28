@@ -826,10 +826,15 @@ function Transactions.Apply(
             Withdrew = Withdrew,
         }
 
+        -- Every recorder is offered the record, and one answering true has
+        -- taken the step. The loop used to stop at that one, which quietly made
+        -- this a single-consumer hook: History registers here as Prism loads
+        -- and answers true for every edit that records a step, so a recorder a
+        -- game added afterwards never ran at all. A game using this to observe
+        -- -- to stamp who created what, say -- got nothing and no warning.
         for _, Callback in Recorders do
             if Callback(Plr, Record) then
                 Kept = true
-                break
             end
         end
     end
