@@ -122,24 +122,25 @@ const function __on_change<T>(self: Property<T>, Callback: (Value: Types.ValueFo
     end
 end
 
-const function __destroy<T>(self: Property<T>)
-    self.Listeners = nil
-    self.Drives = nil
-    self.Link = nil
-end
-
 -- What every property of one registry has in common, read through __index:
--- its identity, its constraints and the four methods. These were fields on
--- every property, eleven keys a table, and a real 34,918-object level holds
--- 495,279 properties -- 535 MB of Lua heap on the server, nearly all of it
--- property tables. Constraints is the registry's own table, which the client
+-- its identity, its constraints, its default and the four methods. These were
+-- fields on every property, eleven keys a table, and a real 34,918-object level
+-- holds 495,279 properties -- 535 MB of Lua heap on the server, nearly all of
+-- it property tables. Constraints is the registry's own table, which the client
 -- fills in place when a custom enum it names is registered, so sharing it
 -- shares that too.
+--
+-- The default is the registry's, which never changes once it is registered; a
+-- property's own SetDefault writes a field of its own over it. It was a field
+-- on every property, and a table's slots come in powers of two: a property
+-- holding only its Value takes one slot, one holding two takes two.
 --
 -- Keyed by the registry table, weakly: a client replaces its registries
 -- wholesale when they are replayed, and a type unregistered and registered
 -- again under the same id is a different registry.
 const Shapes: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
+
+local __destroy: <T>(self: Property<T>) -> ()
 
 const function ShapeOf(Ref: PropertyRegistry<any>): any
     local Shape = Shapes[Ref]
@@ -151,17 +152,60 @@ const function ShapeOf(Ref: PropertyRegistry<any>): any
                 Name = Ref.Name,
                 Type = Ref.Type,
                 Constraints = Ref.Constraints,
+                DefaultValue = Ref.DefaultValue,
                 Set = __setter,
                 SetDefault = __default_setter,
                 OnChange = __on_change,
                 Destroy = __destroy,
             },
+
+            -- Shapes of this one with a link on top, by link. See Drive.
+            Linked = setmetatable({}, {__mode = "k"}),
         }
 
         Shapes[Ref] = Shape
     end
 
     return Shape
+end
+
+-- A property driving an instance reads its link through its shape as well,
+-- the base shape's fields with the link beside them, so the property itself
+-- holds only its Value and the instance: two slots rather than the four that
+-- Value, DefaultValue, Drives and Link took. One shape a registry and a link,
+-- and a link is an object type's own entry, shared by every object of it.
+const function LinkedShapeOf(Base: any, Link: Types.Drive): any
+    local Shape = Base.Linked[Link]
+    if not Shape then
+        const Index = table.clone(Base.__index)
+        Index.Link = Link
+        Shape = {__index = Index, Base = Base}
+        Base.Linked[Link] = Shape
+    end
+
+    return Shape
+end
+
+-- Has the property write every value it is set to onto Inst, through Link.
+function Shared.Link(Prop: any, Link: Types.Drive, Inst: Instance)
+    const Current = getmetatable(Prop)
+    Prop.Drives = Inst
+    setmetatable(Prop, LinkedShapeOf(Current.Base or Current, Link))
+end
+
+-- Stops it. Safe on a property that drives nothing.
+function Shared.Unlink(Prop: any)
+    Prop.Drives = nil
+
+    const Base = getmetatable(Prop).Base
+    if Base then
+        setmetatable(Prop, Base)
+    end
+end
+
+__destroy = function<T>(self: Property<T>)
+    self.Listeners = nil
+    Shared.Unlink(self)
 end
 
 --=============================================================================
@@ -284,11 +328,8 @@ function Shared.new(
     end
 
     -- Only what can differ between two properties of one registry lives on the
-    -- property. The default stays too: it is the registry's at the moment the
-    -- property was made, and a registry's default changing afterwards must not
-    -- reach a property that already exists.
+    -- property.
     return setmetatable({
-        DefaultValue = Ref.DefaultValue,
         Value = Ref.DefaultValue,
     }, ShapeOf(Ref)) :: any
 end

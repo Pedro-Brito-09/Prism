@@ -649,13 +649,14 @@ T:Test("properties of one registry share everything but their values", function(
     end
 
     -- Eleven fields on every property was most of what a loaded level kept in
-    -- memory. Only what differs between two of them is theirs to hold.
+    -- memory. Only what differs between two of them is theirs to hold, and the
+    -- default is the registry's until SetDefault gives a property its own.
     local Own = 0
     for _ in First do
         Own += 1
     end
 
-    T:Eq(Own, 2, "holding nothing but a value and a default")
+    T:Eq(Own, 1, "holding nothing but a value")
 end)
 
 T:Test("Set reports accepted and changed separately", function()
@@ -1124,10 +1125,30 @@ T:Test("links are disconnected on destroy", function()
     T:Eq(Prop.Link, nil, "nor through anything")
 end)
 
+-- Each object used to carry its own name map and its five methods as fields:
+-- about 1.5 KB an object, 50 MB on a 34,918-object level.
+T:Test("objects of a type share their name map and methods", function()
+    const One = Objects.new(CrateId)
+    const Two = Objects.new(CrateId)
+
+    T:Eq(One.Names, Two.Names, "one name map for the type")
+    T:Ok(table.isfrozen(One.Names), "which nobody can write into")
+    T:Eq(rawget(One :: any, "Get"), nil, "methods are not the object's own")
+    T:Eq(One:Get(TitleId), Two:Get(TitleId), "and still answer")
+
+    One:Destroy()
+    T:Eq(One:Get(TitleId), nil, "a destroyed one answers nil")
+    T:Eq(One:Set(TitleId, "x"), false, "and refuses")
+    T:Ok(Two:Set(TitleId, "Still"), "while the other is untouched")
+    T:Eq(Two:Get(TitleId), "Still", "and holds it")
+
+    Two:Destroy()
+end)
+
 -- A link used to be an OnChange listener: a link table, two closures and a
 -- listener array a property, 431 bytes, and two thirds of a real level's
 -- 495,279 properties drive a part -- about 140 MB of a client's heap.
-T:Test("a link costs its property two fields and nothing else", function()
+T:Test("a link costs its property one field and nothing else", function()
     const One = Objects.new(CrateId)
     const Two = Objects.new(CrateId)
     const Prop = One.Properties[TintId]
@@ -1135,6 +1156,25 @@ T:Test("a link costs its property two fields and nothing else", function()
     T:Eq(Prop.Listeners, nil, "no listener")
     T:Eq(Prop.Drives, One.Instance, "the part it drives")
     T:Eq(Prop.Link, Two.Properties[TintId].Link, "through the entry every crate shares")
+    T:Eq(rawget(Prop :: any, "Link"), nil, "read through its shape")
+
+    -- Value and Drives: two slots, where the default and the link as fields of
+    -- their own made four.
+    const Own = {}
+    for Key in Prop :: any do
+        table.insert(Own, Key)
+    end
+    table.sort(Own)
+    T:Eq(table.concat(Own, ","), "Drives,Value", "all the property holds")
+
+    -- The registry's default, read through the shape, until SetDefault gives
+    -- the property one of its own.
+    const Title = One.Properties[TitleId]
+    T:Eq(rawget(Title :: any, "DefaultValue"), nil, "the default is the registry's")
+    T:Eq(Title.DefaultValue, Properties:GetRegistry(TitleId).DefaultValue, "and reads as it")
+    Title:SetDefault("Mine")
+    T:Eq(Title.DefaultValue, "Mine", "a default of its own")
+    T:Eq(Two.Properties[TitleId].DefaultValue, Properties:GetRegistry(TitleId).DefaultValue, "reaches no other")
     T:Eq(One.Links, Two.Links, "and the object holds the type's own list")
 
     -- Written by Set itself, so it is there before the call returns.

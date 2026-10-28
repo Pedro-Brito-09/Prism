@@ -5,6 +5,7 @@ const Players = game:GetService("Players")
 const Properties = require("../Properties/Client")
 const CustomEnum = require("../CustomEnum")
 const PropertyTypes = require("../Properties/Types")
+const PropertyShared = require("../Properties/Shared")
 const Compressor = require("../Compressor")
 const Network = require("./Network")
 const Shared = require("./Shared")
@@ -625,9 +626,14 @@ const function Withdraw(Obj: Object)
     -- Out of the scene copy before out of the workspace, so a copy walking its
     -- own objects while they are torn down never sees one that is already gone
     -- from the world but still listed as its own.
-    if Obj.Release then
-        Obj.Release()
-        Obj.Release = nil
+    const Copy = Obj.Copy
+    if Copy then
+        Obj.Copy = nil
+        Copy.Objects[Obj.RuntimeId] = nil
+
+        if Copy.ByLocal[Obj.LocalId] == Obj then
+            Copy.ByLocal[Obj.LocalId] = nil
+        end
     end
 
     -- Cleared here rather than by each caller. The two callers that come off
@@ -636,14 +642,7 @@ const function Withdraw(Obj: Object)
     -- the session -- destroyed, but still there to be found.
     Workspace[Obj.RuntimeId] = nil
 
-    -- Not table.clear: a stale reference should still be able to report its own
-    -- handle and read Destroyed rather than turning into an empty table
-    -- whose every method throws.
-    Obj.Get = Shared.Destroyed.Get
-    Obj.Set = Shared.Destroyed.Set
-    Obj.GetProperty = Shared.Destroyed.GetProperty
-    Obj.OnChange = Shared.Destroyed.OnChange
-    Obj.Destroy = Shared.Destroyed.Destroy
+    setmetatable(Obj :: any, Shared.Gone)
 
     Listeners.Notify(Removed, Obj)
 end
@@ -728,14 +727,36 @@ const function __local_destroy(self: Object): boolean
     return true
 end
 
+-- An object's methods, read through __index rather than set on each one: five
+-- fields an object took it past the 16 a table's slots come in, and every
+-- object paid for 32. Set and Destroy differ by side: a replicated object asks
+-- the server for both, a local one does neither. A destroyed object swaps to
+-- Shared.Gone.
+const Replicated = {
+    __index = {
+        Get = __getter,
+        Set = __setter,
+        GetProperty = Shared.GetProperty,
+        OnChange = Shared.OnChange,
+        Destroy = __destroy,
+    },
+}
+
+const Local = {
+    __index = {
+        Get = __getter,
+        Set = __local_setter,
+        GetProperty = Shared.GetProperty,
+        OnChange = Shared.OnChange,
+        Destroy = __local_destroy,
+    },
+}
+
 -- What every object here shares, filed into the tables the workspace is read
--- through. Set and Destroy are the caller's: a replicated object asks the
--- server for both, a local one does neither.
-const function File(Obj: any, Order: {PropertyTypes.PropertyIdentifier})
-    Obj.Names = Shared.BuildNameMap(Order, Obj.Properties)
-    Obj.Get = __getter
-    Obj.GetProperty = Shared.GetProperty
-    Obj.OnChange = Shared.OnChange
+-- through.
+const function File(Obj: any, Order: {PropertyTypes.PropertyIdentifier}, Methods: any)
+    Obj.Names = Shared.NameMapOf(Order, Obj.Properties)
+    setmetatable(Obj, Methods)
 
     Workspace[Obj.RuntimeId] = Obj
     Index(Obj)
@@ -786,18 +807,9 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Live: any, Restored: boolean
     if Inst then
         Inst.Parent = Live.Folder
     end
-    Obj.Set = __local_setter
-    Obj.Destroy = __local_destroy
 
-    Obj.Release = function()
-        Live.Objects[Obj.RuntimeId] = nil
-
-        if Live.ByLocal[Obj.LocalId] == Obj then
-            Live.ByLocal[Obj.LocalId] = nil
-        end
-    end
-
-    File(Obj, Ref.Properties)
+    Obj.Copy = Live
+    File(Obj, Ref.Properties, Local)
     Live.Objects[Obj.RuntimeId] = Obj
     Live.ByLocal[Obj.LocalId] = Obj
     LocalCopy[Obj] = Live
@@ -1110,8 +1122,20 @@ const function WireServerPart(Obj: any)
     Obj.Links = nil
 
     const Registry = Registered[Obj.Registry]
-    if Obj.Instance and Registry then
-        Obj.Links = Shared.BuildLinks(Obj.Instance, Registry.Links, Obj.Properties)
+    if not Obj.Instance or not Registry then
+        return
+    end
+
+    -- The part holds the server's values already. Only a property this client
+    -- is showing something else on -- a set in flight, or a preview, when the
+    -- part streams back in -- has anything to write.
+    Obj.Links = Shared.BuildLinks(Obj.Instance, Registry.Links, Obj.Properties, true)
+
+    for _, Prop in Obj.Properties do
+        const Inst = Prop.Drives
+        if Inst and (Pending[Prop] or Previewing[Prop]) then
+            pcall(PropertyShared.Drive, Prop.Link, Inst, Prop.Value)
+        end
     end
 end
 
@@ -1423,10 +1447,7 @@ const function AddObject(
         WireServerPart(Obj)
     end
 
-    Obj.Set = __setter
-    Obj.Destroy = __destroy
-
-    File(Obj, Registry.Properties)
+    File(Obj, Registry.Properties, Replicated)
 
     -- Never restored: an object arriving from the server is the server's to
     -- have loaded or created, and either way nothing on this side did it.

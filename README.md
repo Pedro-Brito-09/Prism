@@ -688,8 +688,9 @@ Measured on 2026-10-22 and 2026-10-23 on the same 34,918-object level (20,287
 blocks with parts, 14,631 attributes, 495,279 properties: 14.2 an object),
 loaded with the default budget on a Studio server with up to three players.
 Both columns were measured again on 2026-10-28, with one player, after a
-client stopped keeping a value for every property that arrived and links
-stopped being listeners.
+client stopped keeping a value for every property that arrived, links stopped
+being listeners, and objects and properties stopped carrying what their type
+shares.
 
 **Memory.** Lua heap, read with `gcinfo()` after allocating garbage until the
 collector had run, since an idle VM barely collects:
@@ -697,24 +698,32 @@ collector had run, since an idle VM barely collects:
 | | Server | Each client |
 |---|---|---|
 | Prism required, nothing loaded | 3.4-4.4 MB | 7.4-9.9 MB |
-| Level loaded | 170 MB | 200 MB |
-| Per object | about 4.8 KB | about 5.4 KB |
-| Per property | about 340 bytes | about 385 bytes |
+| Level loaded | 114-115 MB | 131-137 MB |
+| Per object | about 3.2 KB | about 3.6 KB |
+| Per property | about 225 bytes | about 250 bytes |
 | After unloading | 4.4-4.7 MB | 12.1-12.7 MB |
 
-Most of it is properties. A property holds only its `Value` and its
-`DefaultValue`, and reads everything else -- its name, type, constraints and
-methods -- through a table shared by every property of its registry. It used
-to hold eleven fields of its own, and the level took 535 MB on the server and
-576-590 MB on a client: 1.1 KB a property. A property an instance link drives
-also holds the instance and the type's own link entry, and `Set` writes the
+Most of it is properties. A property holds only its `Value`, and reads
+everything else -- its name, type, constraints, default and methods --
+through a table shared by every property of its registry; `SetDefault` gives
+it a default of its own. It used to hold eleven fields of its own, and the
+level took 535 MB on the server and 576-590 MB on a client: 1.1 KB a property.
+A property an instance link drives also holds the instance, reads the type's
+own link entry through a shared table of the same kind, and `Set` writes the
 instance itself. Links used to be `OnChange` listeners -- a link table, two
 functions and a listener array, about 430 bytes for each of the level's
 330,259 linked properties -- and the level took 320 MB on the server and
 309 MB on a client. Since a link is not a listener, a linked property's
-`Listeners` stays nil until something else watches it. The parts
-themselves are engine memory, not Lua heap: about 8 MB on a client by the
-`Instances` memory tag.
+`Listeners` stays nil until something else watches it.
+
+An object reads its methods through a metatable, and shares its name map --
+frozen, since every object of the type reads it -- with every object of its
+type. The methods as fields of its own and a name map each took 170 MB on the
+server and 200 MB on a client. A table's slots come in powers of two, so
+these pay twice: five method fields took an object past 16 keys to 32 slots,
+and a property holding two values takes twice the room of one holding one.
+The parts themselves are engine memory, not Lua heap: about 8 MB on a client
+by the `Instances` memory tag.
 
 Reading a shared field goes through `__index`: about 23 ns instead of 5,
 which loading the level does not notice -- 3.8-4.1 s with `math.huge`
