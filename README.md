@@ -667,6 +667,22 @@ real 34,918 object level:
 | 1/30 | 5.2 s | 129 | 0.33 s |
 | `math.huge` | 4.1 s | 1 | 4.1 s |
 
+The same level was timed again on 2026-10-28, in the game's own place on a
+Studio server with one player connected, which is slower than wherever the
+table above was measured -- so the two are side by side here, today's code
+against the code from before that day's work on links and objects, in the
+same session:
+
+| Budget | Load takes now | Before | Frames now | Longest frame now |
+|---|---|---|---|---|
+| 1/120 (default) | 18.8-19.4 s | 21.4-22.4 s | 1,011-1,062 | 0.32-0.41 s |
+| 1/30 | 7.2 s | 8.7 s | 134-137 | 0.54-0.61 s |
+| `math.huge` | 4.2-4.4 s | 5.1-5.5 s | 1 | 4.2-4.4 s |
+
+About 15-20% less at every budget, nearly all of it what a link used to
+build. Most of what is left is the engine's: cloning, parenting and writing
+each part.
+
 The longest frame is never shorter than reading the pack, which happens in one
 go before any building starts: about a third of a second for that level.
 
@@ -718,8 +734,9 @@ functions and a listener array, about 430 bytes for each of the level's
 
 An object reads its methods through a metatable, and shares its name map --
 frozen, since every object of the type reads it -- with every object of its
-type. The methods as fields of its own and a name map each took 170 MB on the
-server and 200 MB on a client. A table's slots come in powers of two, so
+type. With the methods as fields of every object and a name map built for
+each, the level took 170 MB on the server and 200 MB on a client. A table's
+slots come in powers of two, so
 these pay twice: five method fields took an object past 16 keys to 32 slots,
 and a property holding two values takes twice the room of one holding one.
 The parts themselves are engine memory, not Lua heap: about 8 MB on a client
