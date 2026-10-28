@@ -816,8 +816,8 @@ local id = Rooms:Backup(DataStore)    -- a copy nothing overwrites; nil on failu
 
 local guid = Rooms.Guid               -- keep this wherever your game lists its levels
 
-Prism.Scenes.fromDataStore({Name = "Rooms"}, DataStore, guid)                -- the draft
-Prism.Scenes.fromDataStore({Name = "Rooms"}, DataStore, guid, "Published")
+Prism.Scenes.fromDataStore(DataStore, guid, {Name = "Rooms"})                -- the draft
+Prism.Scenes.fromDataStore(DataStore, guid, {Name = "Rooms"}, "Published")
 ```
 
 Every server scene gets a Guid when it is registered: 22 characters, made by
@@ -841,16 +841,21 @@ call — after a publish, once a day, before something risky. A backup's id is
 the moment it was taken, in unix milliseconds. Prism never deletes one.
 
 ```lua
-Prism.Scenes.ListVersions(DataStore, guid, "Draft", 20)    -- {{Version, Time}}, newest first
-Prism.Scenes.ListBackups(DataStore, guid)                  -- {id}, newest first
+Prism.Scenes:ListVersions(DataStore, guid, "Draft", 20)    -- {{Version, Time}}, newest first
+Prism.Scenes:ListBackups(DataStore, guid, 20)              -- {{Backup, Time}}, newest first
 
-Prism.Scenes.fromDataStore(config, DataStore, guid, {Draft = version})
-Prism.Scenes.fromDataStore(config, DataStore, guid, {Published = version})
-Prism.Scenes.fromDataStore(config, DataStore, guid, {Backup = id})
+Prism.Scenes.fromDataStore(DataStore, guid, config, {Draft = version})
+Prism.Scenes.fromDataStore(DataStore, guid, config, {Published = version})
+Prism.Scenes.fromDataStore(DataStore, guid, config, {Backup = id})
 ```
 
+A listing's entries are what `fromDataStore` takes back: `Version` goes in as
+`{Draft = version}` or `{Published = version}`, and `Backup` as `{Backup = id}`.
+Every call that reads a stored scene starts with the store and the Guid.
+
 `fromDataStore` returns `nil`, with a warning, when the Guid is not one Prism
-made, when a scene is already registered under it, when the key couldn't be
+made, when the source names more or less than one pack, when a scene is
+already registered under it, when the key couldn't be
 read, or when nothing is stored there. A new level is `Scenes.new`; reading an
 empty key as an empty scene would let any string shaped like a Guid become one.
 
@@ -1568,7 +1573,7 @@ The sections above explain each one.
 | | `.Suspend(object)`, `.Revive(object)`, `.Dispose(object)`, `.Retire(...)` | S C |
 | an object | `:Set(property, value, clientSided?)`, `:Get(property)`, `:GetProperty(property)`, `:OnChange(property, fn)`, `:Destroy()` | S C |
 | `Scenes` | `.new(config)`, `.fromBuffer(config, pack)`, `:Get(name)`, `:GetById(id)`, `:GetByGuid(guid)`, `:GetRegistered()` | S C |
-| | `.fromDataStore(config, store, guid, source?)`, `.ListVersions(store, guid, which, limit?)`, `.ListBackups(store, guid)`, `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
+| | `.fromDataStore(store, guid, config, source?)`, `:ListVersions(store, guid, which, limit?)`, `:ListBackups(store, guid, limit?)`, `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
 | | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:GetInstances(sceneId)`, `:GetInstanceScene(copyId)`, `:GetObjects(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
 | a scene | `:Load(parent?, options?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
 | | `.Guid`, `:Save(store)`, `:Publish(store)`, `:Backup(store)`, `:Open(options?)`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |

@@ -1696,11 +1696,11 @@ T:Test("a scene saves its draft and reads back as itself", function()
     T:Ok(not utf8.len(buffer.tostring(Scene:Serialize())), "a pack is not valid UTF-8 as a string")
     Scene:Destroy()
 
-    const Back = Scenes.fromDataStore({Name = "TestSavedBack"}, Store, Guid) :: any
+    const Back = Scenes.fromDataStore(Store, Guid, {Name = "TestSavedBack"}) :: any
     T:Eq(Back and #Back:Load():GetObjects(), 50, "every object came back")
     T:Eq(Back and Back.Guid, Guid, "under the Guid it was saved with")
 
-    T:Eq(Scenes.fromDataStore({Name = "TestSavedTwice"}, Store, Guid), nil, "a Guid already registered is refused")
+    T:Eq(Scenes.fromDataStore(Store, Guid, {Name = "TestSavedTwice"}), nil, "a Guid already registered is refused")
 
     if Back then
         Back:Destroy()
@@ -1718,11 +1718,11 @@ T:Test("publishing writes the scene as it is, not the draft", function()
     const Guid = Scene.Guid
     Scene:Destroy()
 
-    const Draft = Scenes.fromDataStore({Name = "TestPublishedDraft"}, Store, Guid) :: any
+    const Draft = Scenes.fromDataStore(Store, Guid, {Name = "TestPublishedDraft"}) :: any
     T:Eq(#Draft:Load():GetObjects(), 3, "the draft is what was saved")
     Draft:Destroy()
 
-    const Live_ = Scenes.fromDataStore({Name = "TestPublishedLive"}, Store, Guid, "Published") :: any
+    const Live_ = Scenes.fromDataStore(Store, Guid, {Name = "TestPublishedLive"}, "Published") :: any
     T:Eq(#Live_:Load():GetObjects(), 4, "the published pack has the unsaved edit")
     Live_:Destroy()
 end)
@@ -1738,12 +1738,12 @@ T:Test("an earlier version of a draft reads back", function()
     const Guid = Scene.Guid
     Scene:Destroy()
 
-    const Versions = Scenes.ListVersions(Store, Guid, "Draft") :: any
+    const Versions = Scenes:ListVersions(Store, Guid, "Draft") :: any
     T:Eq(#Versions, 2, "both saves listed")
     T:Ok(Versions[1].Time > Versions[2].Time, "newest first")
-    T:Eq(#(Scenes.ListVersions(Store, Guid, "Draft", 1) :: any), 1, "and capped by the limit")
+    T:Eq(#(Scenes:ListVersions(Store, Guid, "Draft", 1) :: any), 1, "and capped by the limit")
 
-    const Old = Scenes.fromDataStore({Name = "TestVersionedOld"}, Store, Guid, {Draft = Versions[2].Version}) :: any
+    const Old = Scenes.fromDataStore(Store, Guid, {Name = "TestVersionedOld"}, {Draft = Versions[2].Version}) :: any
     T:Eq(#Old:Load():GetObjects(), 2, "the first save")
     Old:Destroy()
 end)
@@ -1762,11 +1762,14 @@ T:Test("a backup is a key of its own and reads back", function()
     T:Ok(First and Second and Second > First, "ids climb")
     T:Ok(Store.Keys[`{Guid}:Backup:{First}`], "the first is kept")
 
-    const Ids = Scenes.ListBackups(Store, Guid) :: any
-    T:Eq(Ids and #Ids, 2, "both listed")
-    T:Eq(Ids and Ids[1], Second, "newest first")
+    const Backups = Scenes:ListBackups(Store, Guid) :: any
+    T:Eq(Backups and #Backups, 2, "both listed")
+    T:Eq(Backups and Backups[1].Backup, Second, "newest first")
+    T:Eq(Backups and Backups[1].Time, Second, "taken when the id says")
+    T:Eq(#(Scenes:ListBackups(Store, Guid, 1) :: any), 1, "and capped by the limit")
 
-    const Back = Scenes.fromDataStore({Name = "TestBackedUpOld"}, Store, Guid, {Backup = First}) :: any
+    -- Listed the way it is read back, as a version's Version is.
+    const Back = Scenes.fromDataStore(Store, Guid, {Name = "TestBackedUpOld"}, {Backup = Backups[2].Backup}) :: any
     T:Eq(Back and #Back:Load():GetObjects(), 2, "the first backup")
     if Back then
         Back:Destroy()
@@ -1775,12 +1778,30 @@ end)
 
 T:Test("fromDataStore takes only a Guid Prism made, and only a stored pack", function()
     const Store = FakeStore()
-    T:Eq(Scenes.fromDataStore({Name = "TestNotGuid"}, Store, "Level 1"), nil, "a name is refused")
+    T:Eq(Scenes.fromDataStore(Store, "Level 1", {Name = "TestNotGuid"}), nil, "a name is refused")
 
     -- Shaped like a Guid, never saved: an empty key would otherwise hand a
     -- scene an identity Prism never gave it.
-    T:Eq(Scenes.fromDataStore({Name = "TestNeverSaved"}, Store, string.rep("a", 22)), nil, "an empty key is refused")
+    T:Eq(Scenes.fromDataStore(Store, string.rep("a", 22), {Name = "TestNeverSaved"}), nil, "an empty key is refused")
     T:Eq(Scenes:Get("TestNeverSaved"), nil, "and nothing registered")
+end)
+
+T:Test("a source names one pack, and versions are kept only of draft and published", function()
+    const Store = FakeStore()
+    const Scene = SavedScene("TestSources", 1)
+    Scene:Save(Store)
+    const Id = Scene:Backup(Store)
+    const Version = (Scenes:ListVersions(Store, Scene.Guid, "Draft") :: any)[1].Version
+    const Guid = Scene.Guid
+    Scene:Destroy()
+
+    -- Read as whichever was checked first, before this was refused.
+    T:Eq(Scenes.fromDataStore(Store, Guid, {Name = "TestSourcesTwo"}, {Draft = Version, Backup = Id} :: any), nil, "two named is refused")
+    T:Eq(Scenes.fromDataStore(Store, Guid, {Name = "TestSourcesNone"}, {} :: any), nil, "none named is refused")
+    T:Eq(Scenes.fromDataStore(Store, Guid, {Name = "TestSourcesWord"}, "Backup" :: any), nil, "a word that is not one is refused")
+
+    -- Listed a key nothing writes, and came back as an empty list.
+    T:Eq(Scenes:ListVersions(Store, Guid, "Backup" :: any), nil, "versions of a backup are refused")
 end)
 
 T:Test("a pack that unpacks past the limit is refused before it is unpacked", function()

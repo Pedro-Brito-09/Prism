@@ -124,9 +124,15 @@ rather than guessed.
       per save; backups are separate keys that outlive that, taken only when
       the game calls `Backup`, and Prism never deletes one. Publishing writes
       the scene as it is rather than copying the stored draft.
-      `Scenes.ListVersions` and `ListBackups` list both, newest first, and
-      `fromDataStore(config, store, guid, source?)` reads the draft, the
-      published pack, a version of either, or a backup.
+      `Scenes:ListVersions` and `ListBackups` list both, newest first, as
+      `{Version, Time}` and `{Backup, Time}` -- each entry's first field is
+      what goes back in as a source -- and `fromDataStore(store, guid,
+      config, source?)` reads the draft, the published pack, a version of
+      either, or a backup. Every call that reads a stored scene starts with
+      the store and the Guid. A source naming more or less than one pack is
+      refused, and so is listing versions of anything but a draft or a
+      published pack, rather than quietly reading the wrong pack or listing
+      nothing.
 
       `fromDataStore` registers the scene under the Guid it was saved with, so
       saving again writes the same keys. It refuses a string that is not a

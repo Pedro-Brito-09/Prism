@@ -38,6 +38,7 @@ export type LoadOptions = Types.LoadOptions
 export type SceneRegistry = Types.SceneRegistry
 export type SceneSource = Types.SceneSource
 export type SceneVersion = Types.SceneVersion
+export type SceneBackup = Types.SceneBackup
 export type SceneInstance = Types.SceneInstance
 export type Scene = Types.ServerScene
 
@@ -993,6 +994,8 @@ end
 
 -- Which stored pack fromDataStore reads, and how: the current draft or
 -- published pack, one of the DataStore's own versions of either, or a backup.
+-- Returns where it read from, or nil for a source that names no single pack --
+-- a table naming two would otherwise read whichever was checked first.
 const function ReadStored(Store: DataStore, Guid: string, Source: Types.SceneSource): (boolean, any, string?)
     if Source == "Draft" or Source == "Published" then
         const Key = KeyOf(Guid, Source)
@@ -1004,20 +1007,30 @@ const function ReadStored(Store: DataStore, Guid: string, Source: Types.SceneSou
         return false, nil, nil
     end
 
-    if Source.Backup then
+    local Named = 0
+    for _ in Source do
+        Named += 1
+    end
+
+    if Named ~= 1 then
+        return false, nil, nil
+    end
+
+    if type(Source.Backup) == "number" then
         const Key = BackupKey(Guid, Source.Backup)
         const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key)
         return Success, Stored, Key
     end
 
-    const Which = if Source.Draft then "Draft" elseif Source.Published then "Published" else nil
+    const Which = if type(Source.Draft) == "string" then "Draft" elseif type(Source.Published) == "string" then "Published" else nil
     if not Which then
         return false, nil, nil
     end
 
+    const Version = (Source.Draft or Source.Published) :: string
     const Key = KeyOf(Guid, Which)
-    const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetVersionAsync, Store, Key, (Source.Draft or Source.Published) :: string)
-    return Success, Stored, `{Key} at version {Source.Draft or Source.Published}`
+    const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetVersionAsync, Store, Key, Version)
+    return Success, Stored, `{Key} at version {Version}`
 end
 
 -- Registers a saved scene as itself: under the Guid it was saved with, so
@@ -1026,7 +1039,10 @@ end
 -- or there is nothing there -- a new level is Scenes.new, which gets a Guid of
 -- its own, and reading an empty key as an empty scene would let any string
 -- shaped like a Guid become one.
-function Scenes.fromDataStore(Config: SceneConfig, Store: DataStore, Guid: string, Source: Types.SceneSource?): Scene?
+--
+-- The store and the Guid lead, as they do in every call that reads a stored
+-- scene, and the config follows: it says how to register what was found.
+function Scenes.fromDataStore(Store: DataStore, Guid: string, Config: SceneConfig, Source: Types.SceneSource?): Scene?
     if not IsGuid(Guid) then
         Logger:Warn(`{Guid} is not a scene Guid. Only Prism makes them; read one off Scene.Guid.`)
         return nil
@@ -1034,7 +1050,7 @@ function Scenes.fromDataStore(Config: SceneConfig, Store: DataStore, Guid: strin
 
     const Success, Stored, Where = ReadStored(Store, Guid, Source or "Draft")
     if not Where then
-        Logger:Warn(`Cannot read scene {Config.Name}: unknown source {Source}.`)
+        Logger:Warn(`Cannot read scene {Config.Name}: a source is "Draft", "Published", or a table naming one of Draft, Published or Backup.`)
         return nil
     end
 
@@ -1062,16 +1078,23 @@ function Scenes.fromDataStore(Config: SceneConfig, Store: DataStore, Guid: strin
     return Scene
 end
 
--- How many versions a listing asks the DataStore for at once.
+-- How many entries a listing asks the DataStore for at once.
 const LIST_PAGE_SIZE = 100
 
 -- The DataStore's own history of a draft or a published pack, newest first:
 -- every write in the last thirty days, which is as long as it keeps them. Nil
 -- when the listing could not be read. Limit caps how many come back; a scene
 -- saved on every edit has a great many.
-function Scenes.ListVersions(Store: DataStore, Guid: string, Which: "Draft" | "Published", Limit: number?): {Types.SceneVersion}?
+function Scenes:ListVersions(Store: DataStore, Guid: string, Which: "Draft" | "Published", Limit: number?): {Types.SceneVersion}?
     if not IsGuid(Guid) then
         Logger:Warn(`{Guid} is not a scene Guid.`)
+        return nil
+    end
+
+    -- Anything else names a key nothing writes, and would list as no versions
+    -- at all rather than as a mistake.
+    if Which ~= "Draft" and Which ~= "Published" then
+        Logger:Warn(`Versions are kept of "Draft" and "Published", not {Which}. Backups are listed by ListBackups.`)
         return nil
     end
 
@@ -1109,9 +1132,14 @@ function Scenes.ListVersions(Store: DataStore, Guid: string, Which: "Draft" | "P
     return Versions
 end
 
--- Every backup of a scene, newest first, by id -- which is the moment it was
--- taken, in unix milliseconds. Nil when the listing could not be read.
-function Scenes.ListBackups(Store: DataStore, Guid: string): {number}?
+-- Every backup of a scene, newest first, shaped like a version: Backup is the
+-- id fromDataStore takes back as {Backup = id}, as Version is for a version.
+-- The id is the moment it was taken, so Time is the same number. Nil when the
+-- listing could not be read.
+--
+-- Limit cuts the list after sorting rather than stopping the walk early: keys
+-- list in name order, which is oldest first, so the newest are the last read.
+function Scenes:ListBackups(Store: DataStore, Guid: string, Limit: number?): {Types.SceneBackup}?
     if not IsGuid(Guid) then
         Logger:Warn(`{Guid} is not a scene Guid.`)
         return nil
@@ -1131,17 +1159,11 @@ function Scenes.ListBackups(Store: DataStore, Guid: string): {number}?
             end
 
             if Pages.IsFinished then
-                break
+                return Found
             end
 
             Pages:AdvanceToNextPageAsync()
         end
-
-        table.sort(Found, function(A: number, B: number): boolean
-            return A > B
-        end)
-
-        return Found
     end)
 
     if not Success then
@@ -1149,7 +1171,16 @@ function Scenes.ListBackups(Store: DataStore, Guid: string): {number}?
         return nil
     end
 
-    return Ids
+    table.sort(Ids, function(A: number, B: number): boolean
+        return A > B
+    end)
+
+    const Backups: {Types.SceneBackup} = {}
+    for Index = 1, math.min(#Ids, Limit or math.huge) do
+        table.insert(Backups, {Backup = Ids[Index], Time = Ids[Index]})
+    end
+
+    return Backups
 end
 
 function Scenes:Get(Name: string): Scene?

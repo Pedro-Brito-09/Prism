@@ -38,7 +38,8 @@ export type SceneRegistry = {
 -- Which stored pack fromDataStore reads. "Draft" and "Published" are the
 -- current ones; {Draft = version} and {Published = version} are the
 -- DataStore's own earlier versions of them, as ListVersions names them, and
--- {Backup = id} one of the scene's backups.
+-- {Backup = id} one of the scene's backups. A table names exactly one of the
+-- three; one naming two is refused rather than read as whichever came first.
 export type SceneSource = "Draft" | "Published" | {
     Draft: string?,
     Published: string?,
@@ -49,6 +50,14 @@ export type SceneSource = "Draft" | "Published" | {
 -- it was written, in unix milliseconds.
 export type SceneVersion = {
     Version: string,
+    Time: number,
+}
+
+-- One of a scene's backups, shaped like a version so a list of either reads
+-- the same. Backup is the id fromDataStore takes back as {Backup = id}; it is
+-- the moment the backup was taken, so Time is the same number.
+export type SceneBackup = {
+    Backup: number,
     Time: number,
 }
 
