@@ -104,6 +104,45 @@ rather than guessed.
 
 ## Done
 
+- [x] **Objects and properties hold only what is theirs.** Measured on the
+      real 34,918-object level after links stopped being listeners. A
+      table's slots come in powers of two, so a field over the line costs a
+      whole doubling, and four things were over it:
+
+      - Every object built its own name map, about 1 KB. `NameMapOf` builds
+        one a type's property list, frozen, cached weakly by the list: every
+        object of a type holds every property on it, and a property cannot be
+        unregistered while a type is built on it.
+      - Every object carried its five methods as fields, which took it from
+        13 keys past 16 to 32 slots. They are read through a metatable now,
+        one a side and kind -- server, replicated, local -- and a destroyed
+        object swaps to `Shared.Gone` rather than having five fields
+        overwritten.
+      - Every object in a copy carried a closure that dropped it from the
+        copy. It holds the copy as `Copy` instead, and the dropping is done
+        where the closure was called. `Release` is gone from the type.
+      - Every property carried its registry's default, which never changes
+        once registered, and every linked property the link entry: four
+        fields, four slots. Both are read through the property's shape, a
+        linked shape being the base one with the link beside it, so a
+        property holds its `Value`, and a linked one `Drives` as well.
+        `SetDefault` still writes a default of the property's own.
+
+      The server holds 114-115 MB with the level loaded rather than 170, a
+      client 131-137 MB rather than 200; both give it back on unload as
+      before. A client wiring links on a part the server built no longer
+      writes every value back onto it, the same value the part held: 330,259
+      writes, and wiring went from about 40% of an arriving object's time to
+      13%. A property with a set in flight or a preview open is still
+      written, for a part that streams back in mid-drag.
+
+      One new analyser diagnostic is in the baseline: the old solver reads
+      `Objects.Retire` in `__local_destroy` as missing, because the method
+      table naming that function now comes before `Retire` is defined. It is
+      defined by the time anything is destroyed. Server 252/255 and client
+      75/75 in the game's place; the three failing are the record scene links
+      bug fixed separately.
+
 - [x] **A record that links a scene can be saved.** The Guids of the scenes a
       record links were written as a Table whose constraints named `String`
       as its item type, and Prism has no `String` -- the string type is

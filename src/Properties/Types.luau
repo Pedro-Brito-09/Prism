@@ -193,9 +193,10 @@ export type Property<T = PropertyType> = {
     Listeners: {(Value: ValueFor<T>) -> ()}?,
 
     -- The instance this property drives and the link it drives it through, the
-    -- object type's own entry, shared by every object of the type. Set by the
-    -- object that wires it, and written straight from Set rather than through
-    -- a listener; see Properties/Shared.
+    -- object type's own entry, shared by every object of the type. Drives is
+    -- the property's own field and Link is read through its shape. Set by the
+    -- object that wires it with Shared.Link, and written straight from Set
+    -- rather than through a listener; see Properties/Shared.
     Drives: Instance?,
     Link: Drive?,
 

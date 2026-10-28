@@ -186,9 +186,17 @@ const function Withdraw(self: Object, Announce: boolean)
     -- Out of the scene before out of the workspace, so a scene walking its own
     -- objects while they are being destroyed never sees one that is already
     -- gone from the world but still listed as its own.
-    if self.Release then
-        self.Release()
-        self.Release = nil
+    const Copy = self.Copy
+    if Copy then
+        self.Copy = nil
+        Copy.Objects[self.RuntimeId] = nil
+
+        -- Only if it is still the one filed there. Restoring refuses a
+        -- duplicate, so it always is, but a scene tearing down while another
+        -- rebuilds must not have the loser clear the winner's entry.
+        if Copy.ByLocal[self.LocalId] == self then
+            Copy.ByLocal[self.LocalId] = nil
+        end
     end
 
     if Workspace[self.RuntimeId] then
@@ -201,11 +209,7 @@ const function Withdraw(self: Object, Announce: boolean)
         end
     end
 
-    self.Get = Shared.Destroyed.Get
-    self.Set = Shared.Destroyed.Set
-    self.GetProperty = Shared.Destroyed.GetProperty
-    self.OnChange = Shared.Destroyed.OnChange
-    self.Destroy = Shared.Destroyed.Destroy
+    setmetatable(self :: any, Shared.Gone)
 
     -- Last, so a listener is handed an object that is already gone from
     -- everywhere it can be looked up rather than one halfway out.
@@ -240,6 +244,19 @@ end
 const function __destroy(self: Object)
     Teardown(self, true)
 end
+
+-- Read through __index rather than set on each object: five fields an object
+-- took it from 13 keys to 18, past the 16 a table's slots come in, and every
+-- object paid for 32. A destroyed object swaps to Shared.Gone the same way.
+const Methods = {
+    __index = {
+        Get = __getter,
+        Set = __setter,
+        GetProperty = Shared.GetProperty,
+        OnChange = Shared.OnChange,
+        Destroy = __destroy,
+    },
+}
 
 -- The whole registry, template and links included, because a client drawing a
 -- copy or owning a scene builds instances from exactly what the server does.
@@ -754,22 +771,8 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
         Inst.Parent = Instance_.Folder
     end
 
-    Obj.Get = __getter
-    Obj.Set = __setter
-    Obj.GetProperty = Shared.GetProperty
-    Obj.OnChange = Shared.OnChange
-    Obj.Destroy = __destroy
-
-    Obj.Release = function()
-        Instance_.Objects[Obj.RuntimeId] = nil
-
-        -- Only if it is still the one filed there. Restoring refuses a
-        -- duplicate, so it always is, but a scene tearing down while another
-        -- rebuilds must not have the loser clear the winner's entry.
-        if Instance_.ByLocal[Obj.LocalId] == Obj then
-            Instance_.ByLocal[Obj.LocalId] = nil
-        end
-    end
+    setmetatable(Obj, Methods)
+    Obj.Copy = Instance_
 
     Workspace[Obj.RuntimeId] = Obj
     Instance_.Objects[Obj.RuntimeId] = Obj
@@ -917,7 +920,7 @@ const function Construct(
     Obj.Name = Ref.Name
     Obj.Destroyed = false
     Obj.Properties = Props
-    Obj.Names = Shared.BuildNameMap(Ref.Properties, Props)
+    Obj.Names = Shared.NameMapOf(Ref.Properties, Props)
 
     -- Restored when it was given the id it was saved under, which is a copy
     -- reading its pack rather than anybody creating anything.

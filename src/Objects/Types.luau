@@ -124,10 +124,11 @@ export type Object = {
 
     Instance: Instance?,
 
-    -- Called by Destroy to drop the object from the scene copy holding it. A
-    -- plain callback rather than a reference to the copy, because naming that
-    -- type here would put Objects and Scenes in a require cycle.
-    Release: (() -> ())?,
+    -- The scene copy holding it, which Destroy drops it from. Untyped, because
+    -- naming that type here would put Objects and Scenes in a require cycle.
+    -- A closure doing the dropping used to stand here, about 64 bytes an
+    -- object where a reference costs nothing.
+    Copy: any?,
 
     -- The type's own links, when the object drives anything through them. Each
     -- linked property holds its instance and its entry; see BuildLinks.

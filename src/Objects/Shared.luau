@@ -32,10 +32,24 @@ const function NoDisconnect() end
 -- resolved to whichever one iteration happened to reach first. Built from the
 -- registry's ordered property list instead: the lookup is constant, and the
 -- name declared first wins every time.
-const function BuildNameMap(
+--
+-- One map a list, shared by every object of the type, rather than one an
+-- object: it was about 1 KB each, 35 MB on a 34,918-object level. Every object
+-- of a type holds every property on its list, and a property cannot be
+-- unregistered while a type is built on it, so the answer is the same for all
+-- of them. Weak keyed, since a client replaces its registries when they are
+-- replayed.
+const NameMaps: {[any]: {[string]: PropertyTypes.PropertyIdentifier}} = setmetatable({}, {__mode = "k"}) :: any
+
+const function NameMapOf(
     Order: {PropertyTypes.PropertyIdentifier},
     Props: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>}
 ): {[string]: PropertyTypes.PropertyIdentifier}
+    const Existing = NameMaps[Order]
+    if Existing then
+        return Existing
+    end
+
     const Map = {}
     for _, Identifier in Order do
         const Prop = Props[Identifier]
@@ -44,6 +58,10 @@ const function BuildNameMap(
         end
     end
 
+    -- Read only from here on. A caller writing a name in would write it into
+    -- every object of the type.
+    table.freeze(Map)
+    NameMaps[Order] = Map
     return Map
 end
 
@@ -270,10 +288,16 @@ end
 -- is the type's own list, to say the object drives something and to hand to
 -- ReleaseLinks. Registration keeps one link a property, so a property never
 -- has two to hold.
+--
+-- Settled says the instance already holds the values, which a part the server
+-- built and replicated does: a client wiring one used to write every value
+-- back onto it, the same value it held, 330,259 writes on a real level and a
+-- fifth of the time an arriving object took.
 const function BuildLinks(
     Target: Instance?,
     Links: {Types.InstanceLinkRegistry}?,
-    Props: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>}
+    Props: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
+    Settled: boolean?
 ): {Types.InstanceLinkRegistry}?
     if not Links or not Target then
         return nil
@@ -295,13 +319,12 @@ const function BuildLinks(
             continue
         end
 
-        if Prop.Value ~= nil and not pcall(PropertyShared.Drive, Link, Inst, Prop.Value) then
+        if not Settled and Prop.Value ~= nil and not pcall(PropertyShared.Drive, Link, Inst, Prop.Value) then
             Logger:Warn(`Failed to apply link {Link.Name} on {Inst.ClassName}. Link dropped.`)
             continue
         end
 
-        Prop.Drives = Inst
-        Prop.Link = Link
+        PropertyShared.Link(Prop, Link, Inst)
         Count += 1
     end
 
@@ -651,11 +674,35 @@ const function ReleaseLinks(
     for _, Link in Links do
         const Prop = Props[Link.Property]
         if Prop and Prop.Link == Link then
-            Prop.Drives = nil
-            Prop.Link = nil
+            PropertyShared.Unlink(Prop)
         end
     end
 end
+
+-- Reading or destroying an already destroyed object answers instead of
+-- throwing. The previous noop raised an error, which meant a stale reference
+-- could not even be checked and Destroy was not idempotent.
+const Destroyed = {
+    Get = function(): any?
+        return nil
+    end,
+
+    Set = function(): boolean
+        return false
+    end,
+
+    GetProperty = function(): PropertyTypes.Property<any>?
+        return nil
+    end,
+
+    -- Still a disconnect function, so a caller that watches a stale object
+    -- and later releases the listener does not fail on the release.
+    OnChange = function(): () -> ()
+        return NoDisconnect
+    end,
+
+    Destroy = function() end,
+}
 
 return {
     -- Stamped on every clone an object owns, before it is parented, so the tag
@@ -672,7 +719,7 @@ return {
     RuntimeAttribute = "PrismRuntimeId",
     ObjectTag = "PrismObject",
 
-    BuildNameMap = BuildNameMap,
+    NameMapOf = NameMapOf,
     GetProperty = GetProperty,
     OnChange = OnChange,
 
@@ -691,28 +738,12 @@ return {
     Accept = Accept,
     SplitReferences = SplitReferences,
 
-    -- Reading or destroying an already destroyed object answers instead of
-    -- throwing. The previous noop raised an error, which meant a stale
-    -- reference could not even be checked and Destroy was not idempotent.
-    Destroyed = {
-        Get = function(): any?
-            return nil
-        end,
+    Destroyed = Destroyed,
 
-        Set = function(): boolean
-            return false
-        end,
-
-        GetProperty = function(): PropertyTypes.Property<any>?
-            return nil
-        end,
-
-        -- Still a disconnect function, so a caller that watches a stale object
-        -- and later releases the listener does not fail on the release.
-        OnChange = function(): () -> ()
-            return NoDisconnect
-        end,
-
-        Destroy = function() end,
-    },
+    -- What a destroyed object's methods are read through. Not table.clear: a
+    -- stale reference should still be able to report its own handle and read
+    -- Destroyed rather than turning into an empty table whose every method
+    -- throws. A live object reads its side's methods through a metatable of
+    -- the same shape, so going is one swap rather than five writes.
+    Gone = {__index = Destroyed},
 }
