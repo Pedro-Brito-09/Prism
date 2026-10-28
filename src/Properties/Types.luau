@@ -172,6 +172,14 @@ export type Section = {
 -- Value, DefaultValue and Listeners are the property's own. Everything else is
 -- read through a metatable shared by every property of the same registry, so it
 -- reads the same but is not there to iterate, clone or send over a remote.
+-- What a property needs of an instance link to drive its instance. An object
+-- type's link entry is one; Properties cannot name that type without requiring
+-- Objects.
+export type Drive = {
+    Type: "Property" | "Attribute",
+    Name: string,
+}
+
 export type Property<T = PropertyType> = {
     Parent: PropertyIdentifier,
     Name: string,
@@ -183,6 +191,13 @@ export type Property<T = PropertyType> = {
     -- Allocated on the first OnChange call and dropped again when the last
     -- listener disconnects, so a property nobody watches costs one nil field.
     Listeners: {(Value: ValueFor<T>) -> ()}?,
+
+    -- The instance this property drives and the link it drives it through, the
+    -- object type's own entry, shared by every object of the type. Set by the
+    -- object that wires it, and written straight from Set rather than through
+    -- a listener; see Properties/Shared.
+    Drives: Instance?,
+    Link: Drive?,
 
     -- Returns (Accepted, Changed). Accepted is false when the value failed
     -- validation; Changed is false when it was accepted but equal to the

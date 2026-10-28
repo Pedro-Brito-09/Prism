@@ -18,7 +18,6 @@ const Types = require("./Types")
 
 export type ObjectIdentifier = Types.ObjectIdentifier
 export type InstanceLinkRegistry = Types.InstanceLinkRegistry
-export type InstanceLink = Types.InstanceLink
 export type ObjectRegistry = Types.ObjectRegistry
 export type ObjectConfig = Types.ObjectConfig
 export type RuntimeId = Types.RuntimeId
@@ -167,7 +166,7 @@ end
 -- local id out twice, so an object that comes back under its own is pointed at
 -- again by everything that was pointing at it.
 const function Withdraw(self: Object, Announce: boolean)
-    Shared.ReleaseLinks(self.Links)
+    Shared.ReleaseLinks(self.Links, self.Properties)
     self.Links = nil
 
     -- Gone with its object. The packet saying the object went is all a client

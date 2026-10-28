@@ -32,13 +32,6 @@ export type InstanceLinkRegistry = {
     Name: string,
 }
 
-export type InstanceLink = InstanceLinkRegistry & {
-    -- The disconnect function returned by Property:OnChange, not an
-    -- RBXScriptConnection. The old code called :Destroy() on this, which is not
-    -- a member of RBXScriptConnection and threw during cleanup.
-    Disconnect: (() -> ())?,
-}
-
 export type ObjectRegistry = {
     Id: ObjectIdentifier,
     Name: string,
@@ -136,9 +129,9 @@ export type Object = {
     -- type here would put Objects and Scenes in a require cycle.
     Release: (() -> ())?,
 
-    -- Keyed by property id, not an array: a link is looked up by the property
-    -- it mirrors.
-    Links: {[PropertyTypes.PropertyIdentifier]: InstanceLink}?,
+    -- The type's own links, when the object drives anything through them. Each
+    -- linked property holds its instance and its entry; see BuildLinks.
+    Links: {InstanceLinkRegistry}?,
 
     -- ClientSided is the client's, and ignored on the server: shown here, sent
     -- nowhere, until a set without it ends the preview. See Objects/Client.

@@ -104,6 +104,33 @@ rather than guessed.
 
 ## Done
 
+- [x] **A link is two fields on its property.** Measured on the real
+      34,918-object level: 330,259 of its 495,279 properties drive a part,
+      and each link was an `OnChange` listener -- a link table, the closure
+      that wrote the part, the property's listener array and the disconnect
+      closure, about 431 bytes, or roughly 140 MB of a client's 309. It was
+      also the largest share of Prism's own time in a load: `BuildLinks` was
+      about 40% of `AddObject` on a client.
+
+      A linked property now holds `Drives`, the instance, and `Link`, the
+      object type's own link entry, shared by every object of the type, and
+      `Set` writes the instance itself, before any listener runs. Two fields
+      cost what one would, since a table's slots come in powers of two. The
+      write is protected rather than spawned, so a set makes no thread for
+      it, and warns if it throws, which registration's checks make rare.
+      `Object.Links` is the type's own list now rather than a map of link
+      tables, and `ReleaseLinks` clears the two fields; the `InstanceLink`
+      type is gone. A linked property's `Listeners` stays nil until something
+      else watches it.
+
+      On the same level the server holds 170 MB loaded rather than 320 and a
+      client 200 rather than 309; both give it back on unload as before. The
+      load took 16.9 s rather than 20.8 with the default budget, side by side
+      in the game's place. A server test checks a linked property has no
+      listener, drives its part through the shared entry and is written
+      before `Set` returns. Server 251/254 and client 75/75 in the game's
+      place, the three failures the same pre-existing ones as before.
+
 - [x] **A client gives back what a level took.** After the real
       34,918-object level was unloaded, a client kept about 20 MB of Lua heap
       for good, edited or not. Nothing held the level: weak probes on every
