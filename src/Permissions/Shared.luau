@@ -176,7 +176,7 @@ const function PropertyList(Set: {[number]: Types.PropertyEntry}): {Types.Proper
         })
     end
 
-    table.sort(List, function(A, B)
+    table.sort(List, function(A: Types.PropertyEntryPayload, B: Types.PropertyEntryPayload)
         return A.Property < B.Property
     end)
 

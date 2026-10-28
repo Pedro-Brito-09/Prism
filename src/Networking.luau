@@ -79,7 +79,7 @@ end
 
 const function Unpack(Schema: {Codec<any>}, Buf: buffer, Extras: {any}?): {any}
     const Side = Extras or {}
-    const Args = table.create(#Schema)
+    const Args = table.create(#Schema) :: {any}
 
     local Offset = 1
     for Index, Codec in Schema do
@@ -95,21 +95,21 @@ end
 -- malformed buffer has to fail as a dropped packet rather than a thrown error.
 const function Decode(Buf: any, Extras: any): (Entry?, {any}?)
     if typeof(Buf) ~= "buffer" or buffer.len(Buf) < 1 then
-        return nil
+        return nil, nil
     end
 
     if Extras ~= nil and typeof(Extras) ~= "table" then
-        return nil
+        return nil, nil
     end
 
     const Entry = Registered[buffer.readu8(Buf, 0)]
     if not Entry then
-        return nil
+        return nil, nil
     end
 
     const Ok, Args = pcall(Unpack, Entry.Args, Buf, Extras)
     if not Ok then
-        return nil
+        return nil, nil
     end
 
     return Entry, Args :: {any}
@@ -140,7 +140,7 @@ const function __fire(self: Entry, ...)
     const Args = table.pack(select(2, ...))
     const Buf, Extras = Pack(self.Id, self.Args, Args, Args.n)
 
-    if typeof(Target) == "Instance" and Target:IsA("Player") then
+    if typeof(Target) == "Instance" and (Target :: Instance):IsA("Player") then
         Event:FireClient(Target, Buf, Extras)
         return
     end
@@ -248,21 +248,21 @@ elseif IS_SERVER then
         end
     end)
 
-    Function.OnServerInvoke = function(Plr: Player, Buf: any, Extras: any)
+    Function.OnServerInvoke = function(Plr: Player, Buf: any, Extras: any): (boolean, buffer?, {any}?)
         const Entry, Args = Decode(Buf, Extras)
         if not Entry or not Args then
-            return false
+            return false, nil, nil
         end
 
         const Handler = Entry.OnInvoke
         if not Handler then
-            return false
+            return false, nil, nil
         end
 
         const Returns = Entry.Returns
         if not Returns then
             Handler(Plr, table.unpack(Args, 1, #Entry.Args))
-            return true
+            return true, nil, nil
         end
 
         const Results = table.pack(Handler(Plr, table.unpack(Args, 1, #Entry.Args)))

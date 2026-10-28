@@ -11,16 +11,16 @@
 #   scripts/analyze.sh --raw           print every diagnostic and exit 0
 #   scripts/analyze.sh --update-baseline   rewrite the baseline from what is there now
 #
-# Why a ratchet rather than a clean bill of health. Most of what is left is the
-# default type solver disagreeing with code written for the new one: `type
-# function` and `read` fields are new-solver features, `for _, X in List or {}`
-# is a union the old solver will not iterate, and `pcall(fn)` binding two
-# results is flagged whenever fn returns nothing. None of those are runtime
-# faults and none can be fixed without either migrating solvers -- which
-# reports 269 problems where the default one reports 91 -- or making the code
-# worse. So the baseline records how many diagnostics each file has today and
-# the build fails when a file grows a new one. Real bugs get caught; the
-# standing noise does not have to be fixed first for the check to be useful.
+# Checked under the new type solver, which is the one the code is written for:
+# `type function`, `read` fields and the rest are new-solver features, and the
+# default solver reports them as errors that are not.
+#
+# Why a ratchet rather than a clean bill of health. src/ is clean. What is left
+# is the suites' `require("./Prism")`, which resolves inside the test model --
+# build.js puts a copy of Prism beside the suites -- but names nothing on disk,
+# so everything a suite gets from Prism reads as any. The baseline records how
+# many diagnostics each file has and the build fails when a file grows a new
+# one, so those three do not have to be pretended away for the check to hold.
 set -euo pipefail
 
 LUAU_LSP_VERSION="1.69.0"
@@ -63,6 +63,7 @@ run() {
         --defs="$TOOLING/globalTypes.d.luau" \
         --base-luaurc="$ROOT/.luaurc" \
         --platform=roblox \
+        --flag:LuauSolverV2=true \
         $(find src tests -name '*.luau' | sort) 2>&1 \
     | grep -vE '^\[INFO\]' || true
 }

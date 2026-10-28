@@ -53,7 +53,7 @@ const Synced: {[Player]: true} = {}
 -- can name someone who is not here yet, and so that it outlives someone who
 -- has left.
 function Audience.Resolve(Who: any): number?
-    if typeof(Who) == "Instance" and Who:IsA("Player") then
+    if typeof(Who) == "Instance" and (Who :: Instance):IsA("Player") then
         return (Who :: Player).UserId
     end
 

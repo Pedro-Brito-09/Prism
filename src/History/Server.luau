@@ -178,17 +178,18 @@ const Shelves: {[Player]: Shelf} = {}
 const Applying: {[thread]: true} = {}
 
 const function ShelfFor(Plr: Player): Shelf
-    local Shelf = Shelves[Plr]
-    if not Shelf then
-        Shelf = {Undo = {}, Redo = {}, Next = 1, Busy = false, Forked = 0, Wiped = 0}
-        Shelves[Plr] = Shelf
+    const Existing = Shelves[Plr]
+    if Existing then
+        return Existing
     end
 
-    return Shelf
+    const Made: Shelf = {Undo = {}, Redo = {}, Next = 1, Busy = false, Forked = 0, Wiped = 0}
+    Shelves[Plr] = Made
+    return Made
 end
 
 const function Ids(Steps: {Step}): {number}
-    const List = table.create(#Steps)
+    const List = table.create(#Steps) :: {number}
     for Index, Step in Steps do
         List[Index] = Step.Id
     end
@@ -346,7 +347,7 @@ const function Ordered(Entries: {Entry}, Forward: boolean): {Entry}
         return Entries
     end
 
-    const Reversed = table.create(#Entries)
+    const Reversed = table.create(#Entries) :: {Entry}
     for Index = #Entries, 1, -1 do
         table.insert(Reversed, Entries[Index])
     end
@@ -437,7 +438,9 @@ const function Apply(Plr: Player, Step: Step, Forward: boolean): boolean
         -- step being reversed -- a stack that grows every time it is undone.
         const Thread = coroutine.running()
         Applying[Thread] = true
-        const Ok, Err = pcall(if Forward then Custom.Redo else Custom.Undo)
+        -- Widened so pcall's error message is in the type: an action returns
+        -- nothing, and pcall of one types as the boolean alone.
+        const Ok, Err = pcall((if Forward then Custom.Redo else Custom.Undo) :: () -> ...any)
         Applying[Thread] = nil
 
         if not Ok then

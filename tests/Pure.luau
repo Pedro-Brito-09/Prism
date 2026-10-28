@@ -218,7 +218,7 @@ roundTrip("Optional nil", OptU8, nil)
 roundTrip("Optional value", OptU8, 42)
 roundTrip("Optional zero", OptU8, 0)
 
-local function arrEq(a, b)
+local function arrEq(a: {any}, b: {any})
     if #a ~= #b then return false end
     for i, v in b do if a[i] ~= v then return false end end
     return true

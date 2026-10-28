@@ -222,12 +222,13 @@ Codecs.CFrame = {
     end,
 
     Read = function(Buf: buffer, Offset: number): (CFrame, number)
-        const Components = table.create(12)
+        const Components = table.create(12) :: {number}
         for Index = 1, 12 do
             Components[Index] = buffer.readf32(Buf, Offset + (Index - 1) * 4)
         end
 
-        return CFrame.new(table.unpack(Components, 1, 12)), 48
+        const C = Components
+        return CFrame.new(C[1], C[2], C[3], C[4], C[5], C[6], C[7], C[8], C[9], C[10], C[11], C[12]), 48
     end,
 } :: Codec<CFrame>
 
@@ -319,7 +320,7 @@ function Codecs.Array<T>(Inner: Codec<T>): Codec<{T}>
 
         Read = function(Buf: buffer, Offset: number, Extras: {any}): ({T}, number)
             const Count = buffer.readu16(Buf, Offset)
-            const Out = table.create(Count)
+            const Out = table.create(Count) :: {T}
 
             local Cursor = Offset + 2
             for Index = 1, Count do

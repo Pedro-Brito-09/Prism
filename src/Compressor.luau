@@ -198,9 +198,7 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?,
     end
 
     const TypeId = PropertyTypes:GetTypeId(Type)
-    if not TypeId then
-        Logger:Error(`Tried compressing unsupported value type: {Type}`)
-    end
+        or Logger:Error(`Tried compressing unsupported value type: {Type}`)
 
     local Wire: number
     local Payload: buffer
@@ -276,7 +274,7 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?,
         end
 
         const List = Value :: {any}
-        const Items: {buffer} = table.create(#List)
+        const Items = table.create(#List) :: {buffer}
         local Size = Varint.Measure(#List)
 
         for Index, Item in List do
@@ -298,13 +296,16 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?,
 
         Wire, Payload = WIRE_BYTES, BytesBuffer(Inner)
     else
-        Logger:Error(`Tried compressing unsupported value type: {Type}`)
+        return Logger:Error(`Tried compressing unsupported value type: {Type}`)
     end
 
-    const Length = buffer.len(Payload)
+    -- Every branch above assigns it or returns, but the solver still reads a
+    -- local declared without a value as possibly nil.
+    const Body = Payload :: buffer
+    const Length = buffer.len(Body)
     const Out = buffer.create(1 + Length)
     buffer.writeu8(Out, 0, MakeTag(Wire, TypeId))
-    buffer.copy(Out, 1, Payload, 0)
+    buffer.copy(Out, 1, Body, 0)
     return Out
 end
 
@@ -358,12 +359,13 @@ function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number
             buffer.readf32(Buf, Body + 8)
         ), 13, Type
     elseif Type == "CFrame" then
-        const Components = table.create(12)
+        const Components = table.create(12) :: {number}
         for Index = 1, 12 do
             Components[Index] = buffer.readf32(Buf, Body + (Index - 1) * 4)
         end
 
-        return CFrame.new(table.unpack(Components, 1, 12)), 49, Type
+        const C = Components
+        return CFrame.new(C[1], C[2], C[3], C[4], C[5], C[6], C[7], C[8], C[9], C[10], C[11], C[12]), 49, Type
     elseif Type == "Enum" then
         const Length, Read = Varint.Read(Buf, Body)
         const Consumed = 1 + Read + Length
@@ -627,7 +629,7 @@ const function ToRaw(Obj: ObjectTypes.Object | DecompressedObject, WithUnknown: 
         local Id, Type, Value, Constraints
 
         if IsDecompressed then
-            const Registry = Properties:GetRegistry(Key)
+            const Registry = Properties:GetRegistry(Key :: PropertyTypes.PropertyIdentifier)
             if not Registry then
                 Logger:Warn(`Tried compressing an object with unregistered property id {Key}. Skipping.`)
                 continue
@@ -1032,7 +1034,7 @@ const function TargetsOf(Key: string): {number}?
         end
 
         local At = 1 + LengthRead + CountRead
-        const List = table.create(Count)
+        const List = table.create(Count) :: {number}
         for Index = 1, Count do
             if buffer.readu8(Buf, At) ~= OBJECT_TAG then
                 return nil
@@ -1313,8 +1315,8 @@ const function PutColumnValues(W: Writer, Plan: Column, Values: {[number]: strin
 
     if Plan.Encoding == COLUMN_GRID_DELTA then
         const Scale = Plan.Scale :: number
-        const Ints: {{number}?} = table.create(#Written)
-        const Escaped: {boolean} = table.create(#Written)
+        const Ints = table.create(#Written) :: {{number}?}
+        const Escaped = table.create(#Written) :: {boolean}
         for Index, Key in Written do
             const Step = GridInts(buffer.fromstring(Key), Scale)
             Ints[Index] = Step
@@ -1371,15 +1373,15 @@ const function WriteGroup(W: Writer, Group: Group)
     const Rows = Group.Rows
     const Order = Group.Order
 
-    table.sort(Rows, function(A, B)
+    table.sort(Rows, function(A: RawObject, B: RawObject)
         return A.LocalId < B.LocalId
     end)
 
-    const Plans: {Column} = table.create(#Order)
-    const Keys: {{[number]: string}} = table.create(#Order)
+    const Plans = table.create(#Order) :: {Column}
+    const Keys = table.create(#Order) :: {{[number]: string}}
     local Partial = false
 
-    const LocalIds: {number} = table.create(#Rows)
+    const LocalIds = table.create(#Rows) :: {number}
     for Row, Raw in Rows do
         LocalIds[Row] = Raw.LocalId
     end
@@ -1414,7 +1416,7 @@ const function WriteGroup(W: Writer, Group: Group)
         Previous = Raw.LocalId
     end
 
-    const Bits = table.create(#Rows)
+    const Bits = table.create(#Rows) :: {boolean}
 
     if Partial then
         for Index in Order do
@@ -1533,7 +1535,7 @@ const function ReadColumnHeader(Buf: buffer, Offset: number, Shared: {[buffer]: 
         const Count, CountRead = ReadCount(Buf, At)
         At += CountRead
 
-        const Palette = table.create(Count)
+        const Palette = table.create(Count) :: {buffer}
         for Index = 1, Count do
             const Length = TaggedLength(Buf, At)
             Palette[Index] = Slice(Buf, At, Length)
@@ -1610,10 +1612,10 @@ const function ReadColumnValues(
 
     if Column.Encoding == COLUMN_GRID_DELTA then
         const Scale = Column.Scale :: number
-        const Escaped: {boolean} = table.create(Count)
+        const Escaped = table.create(Count) :: {boolean}
         At += ReadBitmap(Buf, At, Count, Escaped)
 
-        const Axes: {{number}} = {table.create(Count), table.create(Count), table.create(Count)}
+        const Axes: {{number}} = {table.create(Count) :: {number}, table.create(Count) :: {number}, table.create(Count) :: {number}}
         for Axis = 1, 3 do
             const Values = Axes[Axis]
             local Previous = 0
@@ -1679,7 +1681,7 @@ const function ReadColumnValues(
             const ItemCount, CountRead = ReadCount(Buf, At)
             At += CountRead
 
-            const Targets = table.create(ItemCount)
+            const Targets = table.create(ItemCount) :: {number}
             for Item = 1, ItemCount do
                 const Distance, Read = Varint.ReadSigned(Buf, At)
                 At += Read
@@ -1749,8 +1751,8 @@ const function ReadPack(Pack: buffer, Offset: number, Each: OnRow): number
         const ColumnCount, ColumnCountRead = ReadCount(Buf, At)
         At += ColumnCountRead
 
-        const Columns: {ReadColumn} = table.create(ColumnCount)
-        const Order: {number} = table.create(ColumnCount)
+        const Columns = table.create(ColumnCount) :: {ReadColumn}
+        const Order = table.create(ColumnCount) :: {number}
         for Index = 1, ColumnCount do
             const Column, Read = ReadColumnHeader(Buf, At, Shared)
             Columns[Index] = Column
@@ -1764,8 +1766,8 @@ const function ReadPack(Pack: buffer, Offset: number, Each: OnRow): number
         const Partial = buffer.readu8(Buf, At) == 1
         At += 1
 
-        const Ids: {number} = table.create(RowCount)
-        const Rows: {{[number]: buffer}} = table.create(RowCount)
+        const Ids = table.create(RowCount) :: {number}
+        const Rows = table.create(RowCount) :: {{[number]: buffer}}
         local Previous = 0
         for Row = 1, RowCount do
             const Step, StepRead = Varint.Read(Buf, At)
@@ -1780,15 +1782,15 @@ const function ReadPack(Pack: buffer, Offset: number, Each: OnRow): number
         const Present: {{boolean}} = {}
         if Partial then
             for Index = 1, ColumnCount do
-                const Bits = table.create(RowCount)
+                const Bits = table.create(RowCount) :: {boolean}
                 At += ReadBitmap(Buf, At, RowCount, Bits)
                 Present[Index] = Bits
             end
         end
 
-        const Written: {{boolean}} = table.create(ColumnCount)
+        const Written = table.create(ColumnCount) :: {{boolean}}
         for Index = 1, ColumnCount do
-            const Bits = table.create(RowCount)
+            const Bits = table.create(RowCount) :: {boolean}
             At += ReadBitmap(Buf, At, RowCount, Bits)
             Written[Index] = Bits
         end
@@ -1900,12 +1902,14 @@ function Compressor:CompressMetadatas(LastId: number, Metadatas: {DatabaseTypes.
             Group = Made
         end
 
-        table.insert(Group.Rows, {
+        const Row: RawObject = {
             __type = "RawObject",
             LocalId = Metadata.Id,
             Registry = 0,
             Fields = Fields,
-        })
+        }
+
+        table.insert(Group.Rows, Row)
     end
 
     return WritePack(LastId, Groups, METADATA_COMPRESSION_LEVEL)
@@ -1952,7 +1956,7 @@ function Compressor:DecompressMetadatas(CompressedMetadatas: buffer): (number, {
 
     -- In id order across groups: the order records were created in, which is
     -- the order paging a shard relies on.
-    table.sort(Metadatas, function(A, B)
+    table.sort(Metadatas, function(A: DatabaseTypes.Metadata, B: DatabaseTypes.Metadata)
         return A.Id < B.Id
     end)
 
@@ -2047,7 +2051,7 @@ function Compressor:DecompressScene(CompressedScene: buffer): (number, {Decompre
 
     -- In local id order across types, which is the order a copy serializes
     -- them in and the order a load builds them in.
-    table.sort(Objects, function(A, B)
+    table.sort(Objects, function(A: DecompressedObject, B: DecompressedObject)
         return A.LocalId < B.LocalId
     end)
 
@@ -2104,9 +2108,7 @@ const function WriteValues(Buffers: {buffer}, Values: {[PropertyTypes.PropertyId
     -- caller built, applied in full at the far end and reported as a success.
     for _, Key in Keys do
         const Registry = Properties:GetRegistry(Key)
-        if not Registry then
-            Logger:Error(`Cannot write an operation carrying unregistered property id {Key}.`)
-        end
+            or Logger:Error(`Cannot write an operation carrying unregistered property id {Key}.`)
 
         const Written = WriteProperty(Buffers, Key, Registry.Type, Values[Key], Registry.Constraints)
         if Written == 0 then
@@ -2195,9 +2197,7 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         return Concat("", Prefix, Buffers, Size + ReferenceSize)
     elseif Operation.Kind == "Set" then
         const Registry = Properties:GetRegistry(Operation.Property)
-        if not Registry then
-            Logger:Error(`Cannot write a set for unregistered property id {Operation.Property}.`)
-        end
+            or Logger:Error(`Cannot write a set for unregistered property id {Operation.Property}.`)
 
         const Buffers = {}
         const Size = WriteProperty(Buffers, Operation.Property, Registry.Type, Operation.Value, Registry.Constraints)
@@ -2218,7 +2218,9 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         return Encoded
     elseif Operation.Kind == "Lock" or Operation.Kind == "Unlock" then
         const Encoded = buffer.create(1 + Varint.Measure(Operation.Target))
-        buffer.writeu8(Encoded, 0, TransactionTypes.Kinds[Operation.Kind])
+        buffer.writeu8(Encoded, 0, if Operation.Kind == "Lock"
+            then TransactionTypes.Kinds.Lock
+            else TransactionTypes.Kinds.Unlock)
         Varint.Write(Encoded, 1, Operation.Target)
 
         return Encoded
@@ -2236,7 +2238,7 @@ const function WriteOperation(Operation: TransactionTypes.Operation): buffer
         return Encoded
     end
 
-    Logger:Error(`Cannot write an operation of unknown kind {tostring((Operation :: any).Kind)}.`)
+    return Logger:Error(`Cannot write an operation of unknown kind {tostring((Operation :: any).Kind)}.`)
 end
 
 function Compressor:CompressTransaction(Operations: {TransactionTypes.Operation}): buffer
@@ -2330,7 +2332,7 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
                         Logger:Error("A list of references claims more entries than the packet holds.")
                     end
 
-                    const Entries = table.create(Length)
+                    const Entries = table.create(Length) :: {number}
                     for Index = 1, Length do
                         const Entry, EntryRead = Varint.Read(CompressedTransaction, Offset)
                         Offset += EntryRead
@@ -2394,10 +2396,11 @@ function Compressor:DecompressTransaction(CompressedTransaction: buffer): {Trans
             const Target, TargetRead = Varint.Read(CompressedTransaction, Offset)
             Offset += TargetRead
 
-            table.insert(Operations, {
-                Kind = if Kind == TransactionTypes.Kinds.Lock then "Lock" :: "Lock" else "Unlock" :: "Unlock",
-                Target = Target,
-            })
+            -- Two literals rather than one with a union Kind: the solver will not
+            -- match {Kind: "Lock" | "Unlock"} against either operation alone.
+            table.insert(Operations, if Kind == TransactionTypes.Kinds.Lock
+                then {Kind = "Lock" :: "Lock", Target = Target}
+                else {Kind = "Unlock" :: "Unlock", Target = Target})
         elseif Kind == TransactionTypes.Kinds.Load then
             const Scene, SceneRead = Varint.Read(CompressedTransaction, Offset)
             Offset += SceneRead

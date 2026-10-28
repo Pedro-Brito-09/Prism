@@ -12,7 +12,7 @@
 const RunService = game:GetService("RunService")
 
 -- Typed as the server half. The two halves share every member this file uses,
--- but the default solver cannot call through a union of two module types even
+-- but the solver cannot call through a union of two module types even
 -- when their signatures match.
 const Properties: typeof(require("../Properties/Server")) = if RunService:IsClient()
     then require("../Properties/Client") :: any
@@ -50,7 +50,7 @@ const function NameMapOf(
         return Existing
     end
 
-    const Map = {}
+    const Map: {[string]: PropertyTypes.PropertyIdentifier} = {}
     for _, Identifier in Order do
         const Prop = Props[Identifier]
         if Prop and Map[Prop.Name] == nil then
@@ -243,7 +243,7 @@ const function ValidateLinks(
             continue
         end
 
-        const Expected = PropertyTypes.Map[Registry.Type]
+        const Expected = (PropertyTypes.Map :: {[string]: string})[Registry.Type]
 
         if Link.Type == "Property" then
             const Actual = GetInstancePropertyType(Inst, Link.Name)
@@ -436,7 +436,7 @@ const function ReferenceOne(
     Find: Find
 ): (number?, string?)
     if Value == nil then
-        return NO_TARGET
+        return NO_TARGET, nil
     end
 
     local Target: number
@@ -464,7 +464,7 @@ const function ReferenceOne(
     end
 
     if Target == NO_TARGET then
-        return NO_TARGET
+        return NO_TARGET, nil
     end
 
     const Found = Find(Copy, Target)
@@ -472,7 +472,7 @@ const function ReferenceOne(
         return nil, `{Name} may not point at a {Found.Name}`
     end
 
-    return Target
+    return Target, nil
 end
 
 -- The same for a whole property: one id for an Object, a frozen list of them
@@ -501,7 +501,7 @@ const function Reference(
     end
 
     const Item = Prop.Constraints and Prop.Constraints.Item
-    const List = table.create(#Value)
+    const List = table.create(#Value) :: {number}
 
     for Index, Each in Value do
         if type(Index) ~= "number" then

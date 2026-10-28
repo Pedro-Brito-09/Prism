@@ -1,7 +1,7 @@
 --!strict
 -- Retry with exponential backoff. Errors are swallowed by design: callers branch
 -- on the boolean, they do not handle the failure.
-return function<A..., B...>(Attempts: number, fn: (A...) -> B..., ...: A...): (boolean, B...)
+const function Try(Attempts: number, fn: (...any) -> ...any, ...: any): ...any
     local Result = table.pack(false)
     local Delay = 0.125
     const Total = math.max(1, Attempts)
@@ -30,3 +30,12 @@ return function<A..., B...>(Attempts: number, fn: (A...) -> B..., ...: A...): (b
     -- trailing nils when the wrapped call returns them.
     return table.unpack(Result, 1, Result.n)
 end
+
+-- Typed from outside rather than inside. The body only moves packs from pcall
+-- to table.unpack, which the solver sees as a list of booleans and anys and
+-- cannot match back to B..., so it is written untyped and given its signature
+-- here: callers still get fn's arguments checked and its results typed. That
+-- includes an optional parameter at the end of fn, which still has to be
+-- passed, as nil if need be: GetAsync's options are a slot in A... like any
+-- other.
+return (Try :: any) :: <A..., B...>(Attempts: number, fn: (A...) -> B..., A...) -> (boolean, B...)

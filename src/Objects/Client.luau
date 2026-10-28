@@ -756,7 +756,10 @@ const Local = {
 -- through.
 const function File(Obj: any, Order: {PropertyTypes.PropertyIdentifier}, Methods: any)
     Obj.Names = Shared.NameMapOf(Order, Obj.Properties)
-    setmetatable(Obj, Methods)
+
+    -- Through any: the solver retypes a table passed to setmetatable as the
+    -- metatable pair, which has none of the object's fields.
+    setmetatable(Obj :: any, Methods)
 
     Workspace[Obj.RuntimeId] = Obj
     Index(Obj)
@@ -906,7 +909,8 @@ const function Construct(
         end
     end
 
-    const Obj = {}
+    -- Built a field at a time and handed out as any, as File takes it.
+    const Obj: any = {}
     Obj.RuntimeId = RuntimeId
     Obj.PersistentId = Handles.Join(Live.Scene, Local :: number)
     Obj.Scene = Live.Scene
@@ -1409,7 +1413,7 @@ const function AddObject(
         Logger:Warn(`Object {RuntimeId} arrived for unknown scene instance {Live}.`)
     end
 
-    const Obj = {}
+    const Obj: any = {}
     Obj.RuntimeId = RuntimeId
     Obj.InstanceId = Live
     Obj.Scene = Scene or 0

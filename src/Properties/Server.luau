@@ -112,12 +112,12 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     if Config.Type == "Table" then
         if not Constraints or not Types.IsItemType(Constraints.Of) then
             Logger:Warn(`Property {Config.Name} is a Table, which needs Constraints.Of naming the type of its items -- any property type but Table.`)
-            return
+            return nil
         end
 
         if Constraints.Item ~= nil and type(Constraints.Item) ~= "table" then
             Logger:Warn(`Property {Config.Name} has Constraints.Item of type {type(Constraints.Item)}, not a table.`)
-            return
+            return nil
         end
 
         Prepare(Config.Type, Constraints)
@@ -127,7 +127,7 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
         Default = Types:FixValue("Table", Default or {}, Constraints)
         if Default == nil then
             Logger:Warn(`Property {Config.Name} has a DefaultValue that is not a list its constraints accept.`)
-            return
+            return nil
         end
     elseif Constraints then
         Prepare(Config.Type, Constraints)
@@ -136,7 +136,7 @@ function Properties:Register<T>(Config: PropertyConfig<T>): PropertyIdentifier?
     const Identifier = Ids:Claim()
     if not Identifier then
         Logger:Warn("The property id pool is exhausted.")
-        return
+        return nil
     end
 
     const Prop = {}

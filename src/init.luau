@@ -35,11 +35,15 @@ if IS_SERVER then
     -- Required for the side effect: it wires up the join replay.
     require("@self/Replication")
 else
-    Prism.Properties = require("@self/Properties/Client")
-    Prism.Objects = require("@self/Objects/Client")
-    Prism.Scenes = require("@self/Scenes/Client")
-    Prism.Permissions = require("@self/Permissions/Client")
-    Prism.Transactions = require("@self/Transactions/Client")
+    -- Through any: each field is typed by the server half, assigned first, and
+    -- the client half is a different module type with fewer members. Prism
+    -- reads as the server API on both sides, which is what it read as before
+    -- the solver started refusing the second assignment.
+    Prism.Properties = require("@self/Properties/Client") :: any
+    Prism.Objects = require("@self/Objects/Client") :: any
+    Prism.Scenes = require("@self/Scenes/Client") :: any
+    Prism.Permissions = require("@self/Permissions/Client") :: any
+    Prism.Transactions = require("@self/Transactions/Client") :: any
 
     -- Client only, and not as a policy: it reads Objects/Client directly, so
     -- requiring it on the server would pull the client half of the object
@@ -49,7 +53,7 @@ else
     -- Client only, and only half the history: it keeps the steps of scenes this
     -- client owns and the order the two halves make together, and asks the
     -- server for the rest.
-    Prism.History = require("@self/History/Client")
+    Prism.History = require("@self/History/Client") :: any
 end
 
 Prism.CustomEnum = require("@self/CustomEnum")

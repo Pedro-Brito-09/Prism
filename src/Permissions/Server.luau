@@ -64,7 +64,7 @@ const Default: GlobalRights = Shared.GlobalRights(nil, nil)
 -- A Player, a user id, or anything carrying a numeric UserId, which is what the
 -- test suite passes for a player who is not connected.
 const function UserIdOf(Who: any): number?
-    if typeof(Who) == "Instance" and Who:IsA("Player") then
+    if typeof(Who) == "Instance" and (Who :: Instance):IsA("Player") then
         return (Who :: Player).UserId
     end
 

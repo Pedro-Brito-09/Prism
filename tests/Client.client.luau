@@ -1406,11 +1406,11 @@ T:Test("a replicated reference resolves to the object it names", function()
     end
 
     const Door = WaitFor("reference door", function()
-        return FindLiveObject(DoorId, TitleId, "FixtureReferenceDoor")
+        return FindLiveObject(DoorId :: number, TitleId :: number, "FixtureReferenceDoor")
     end)
 
     const Button = WaitFor("reference button", function()
-        return FindLiveObject(ButtonId, TitleId, "FixtureRefButton")
+        return FindLiveObject(ButtonId :: number, TitleId :: number, "FixtureRefButton")
     end)
 
     if not Door or not Button then

@@ -362,7 +362,7 @@ const function __instance_serialize(self: SceneInstance): buffer
     -- order would make two identical copies serialize differently, which rules
     -- out diffing, merging or deduplicating saves -- the same reason a single
     -- object's properties are written in id order.
-    table.sort(List, function(A, B)
+    table.sort(List, function(A: {LocalId: number}, B: {LocalId: number})
         return A.LocalId < B.LocalId
     end)
 
@@ -993,7 +993,7 @@ end
 const function ReadStored(Store: DataStore, Guid: string, Source: Types.SceneSource): (boolean, any, string?)
     if Source == "Draft" or Source == "Published" then
         const Key = KeyOf(Guid, Source)
-        const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key)
+        const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key, nil)
         return Success, Stored, Key
     end
 
@@ -1001,8 +1001,10 @@ const function ReadStored(Store: DataStore, Guid: string, Source: Types.SceneSou
         return false, nil, nil
     end
 
+    -- Through any: SceneSource's table half has named fields and no indexer,
+    -- and counting what is in it is exactly what has to be done to one.
     local Named = 0
-    for _ in Source do
+    for _ in Source :: any do
         Named += 1
     end
 
@@ -1012,7 +1014,7 @@ const function ReadStored(Store: DataStore, Guid: string, Source: Types.SceneSou
 
     if type(Source.Backup) == "number" then
         const Key = BackupKey(Guid, Source.Backup)
-        const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key)
+        const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key, nil)
         return Success, Stored, Key
     end
 

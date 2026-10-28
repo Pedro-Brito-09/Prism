@@ -282,7 +282,7 @@ function Objects:Register(Config: ObjectConfig): ObjectIdentifier?
     const Identifier = Ids:Claim()
     if not Identifier then
         Logger:Warn("The object type id pool is exhausted.")
-        return
+        return nil
     end
 
     const Valid = {}
@@ -567,10 +567,16 @@ end
 --
 -- Each change carries its object, because the object's scene and type are who
 -- hears about it.
-function Objects.AnnounceChanged(Changes: {{Object: Object, Property: PropertyTypes.PropertyIdentifier, Value: buffer}})
-    for Scene, ByReach in Group(Changes, function(Change): Object
-        return Change.Object
-    end) do
+type Change = {Object: Object, Property: PropertyTypes.PropertyIdentifier, Value: buffer}
+
+-- Named, as Itself is: written inline in the loop header, the solver read the
+-- function's return as the loop's and refused it.
+const function ObjectOfChange(Change: Change): Object
+    return Change.Object
+end
+
+function Objects.AnnounceChanged(Changes: {Change})
+    for Scene, ByReach in Group(Changes, ObjectOfChange) do
         for Key, Entries in ByReach do
             const Reach = Key :: Types.Reach
             const Hearing = Audience.Hearing(Scene, Reach)
@@ -771,7 +777,9 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
         Inst.Parent = Instance_.Folder
     end
 
-    setmetatable(Obj, Methods)
+    -- Through any: the solver retypes a table passed to setmetatable as the
+    -- metatable pair, which has none of the fields set above.
+    setmetatable(Obj :: any, Methods)
     Obj.Copy = Instance_
 
     Workspace[Obj.RuntimeId] = Obj
@@ -910,7 +918,8 @@ const function Construct(
         end
     end
 
-    const Obj = {}
+    -- Built a field at a time and handed out as any, as Enter takes it.
+    const Obj: any = {}
     Obj.RuntimeId = RuntimeId
     Obj.PersistentId = Persistent
     Obj.Scene = Instance_.Scene
@@ -1247,7 +1256,7 @@ const MAX_LOCKS = 1024
 -- Evict and Grant all take a Player or a user id -- so releasing what somebody
 -- holds works from either.
 const function UserIdOf(Who: any): number?
-    if typeof(Who) == "Instance" and Who:IsA("Player") then
+    if typeof(Who) == "Instance" and (Who :: Instance):IsA("Player") then
         return (Who :: Player).UserId
     end
 
@@ -1465,7 +1474,7 @@ Network.Unlock.OnInvoke = function(Plr: Player, Ids: {RuntimeId}): boolean
         return false
     end
 
-    const List = {}
+    const List: {Object} = {}
     for _, Identifier in Ids do
         const Obj = Workspace[Identifier]
         if Obj and not Obj.Destroyed then

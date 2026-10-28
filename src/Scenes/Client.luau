@@ -312,7 +312,7 @@ const function __instance_serialize(self: SceneInstance): buffer
     -- the same reason the server sorts: hash order would make two identical
     -- copies serialize differently, which rules out diffing, merging or
     -- deduplicating anything.
-    table.sort(List, function(A, B)
+    table.sort(List, function(A: {LocalId: number}, B: {LocalId: number})
         return A.LocalId < B.LocalId
     end)
 

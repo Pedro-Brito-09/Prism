@@ -148,7 +148,7 @@ const function GetManifest<T>(self: Database<T>, Force: boolean?): Manifest
         return self.Manifest
     end
 
-    const Success, Stored = Try(ATTEMPTS, self.DataStore.GetAsync, self.DataStore, MANIFEST_KEY)
+    const Success, Stored = Try(ATTEMPTS, self.DataStore.GetAsync, self.DataStore, MANIFEST_KEY, nil)
     if not Success then
         -- A stale manifest still addresses every existing shard correctly; only
         -- a very recent seal would be missing from it.
@@ -180,7 +180,7 @@ end
 -- opens. Idempotent, and by index, because several creates can meet the same
 -- sealed shard and each of them writes what it found.
 const function Seal<T>(self: Database<T>, Index: number, Boundary: number)
-    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, MANIFEST_KEY, function(Old)
+    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, MANIFEST_KEY, function(Old: any): any
         const Count = if type(Old) == "table" then math.max(1, Old.Count or 1) else 1
         const Boundaries = if type(Old) == "table" then (Old.Boundaries or {}) else {}
 
@@ -282,7 +282,7 @@ const function GetShard<T>(self: Database<T>, Index: number): ({Metadata}, numbe
         return Cached.Records, Cached.LastId
     end
 
-    const Success, Packed = Try(ATTEMPTS, self.DataStore.GetAsync, self.DataStore, ShardKey(self, Index))
+    const Success, Packed = Try(ATTEMPTS, self.DataStore.GetAsync, self.DataStore, ShardKey(self, Index), nil)
     if not Success then
         if Cached then
             return Cached.Records, Cached.LastId

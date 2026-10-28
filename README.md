@@ -1868,14 +1868,12 @@ It fails when a file grows a diagnostic it did not have before, rather than
 when any diagnostic exists at all. `.analyze-baseline.txt` records the count
 per file, and `scripts/analyze.sh --update-baseline` rewrites it.
 
-That is a ratchet rather than a clean bill of health, and deliberately. Most of
-what is left is the default type solver reading code written for the new one:
-`type function` and `read` fields are new-solver features, `for _, X in List or
-{}` is a union the old solver will not iterate, and `pcall(fn)` binding two
-results is flagged whenever `fn` returns nothing. None of those are runtime
-faults, and the new solver reports far more problems than the default one, so
-switching would cost more than it bought. Real bugs still get caught,
-without the standing noise having to be cleared first.
+It runs the new type solver (`LuauSolverV2`), the one the code is written for:
+`type function` and `read` fields are new-solver features, and the default
+solver reports them as errors that are not. Under it `src/` is clean. What the
+baseline still holds is the three unresolved `require`s in the suites described
+above, so the ratchet is what lets the check pass without pretending those
+away.
 
 `scripts/analyze.sh --raw` prints everything, baseline or not.
 

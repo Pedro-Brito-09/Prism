@@ -302,7 +302,7 @@ const function Ordered(Entries: {Entry}, Forward: boolean): {Entry}
         return Entries
     end
 
-    const Reversed = table.create(#Entries)
+    const Reversed = table.create(#Entries) :: {Entry}
     for Index = #Entries, 1, -1 do
         table.insert(Reversed, Entries[Index])
     end
@@ -315,7 +315,9 @@ const function ApplyLocal(Step: Step, Forward: boolean): boolean
     if Action then
         const Thread = coroutine.running()
         Custom[Thread] = true
-        const Ok, Err = pcall(if Forward then Action.Redo else Action.Undo)
+        -- Widened so pcall's error message is in the type: an action returns
+        -- nothing, and pcall of one types as the boolean alone.
+        const Ok, Err = pcall((if Forward then Action.Redo else Action.Undo) :: () -> ...any)
         Custom[Thread] = nil
 
         if not Ok then

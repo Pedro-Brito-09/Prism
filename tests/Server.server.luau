@@ -106,7 +106,7 @@ end)
 
 T:Describe("Codecs")
 
-const function RoundTrip(Codec, Value, What: string)
+const function RoundTrip(Codec: any, Value: any, What: string): any
     const Extras = {}
     const Size = Codec.Measure(Value)
     const Buf = buffer.create(math.max(Size, 1))
@@ -2475,11 +2475,11 @@ T:Test("the same edit always produces the same bytes", function()
     -- Written in id order rather than hash order, so one edit can be compared
     -- against another rather than only replayed. The two tables hold the same
     -- pairs, inserted in opposite orders.
-    const First = {}
+    const First: {[number]: any} = {}
     First[TitleId] = "Same"
     First[HealthId] = 10
 
-    const Second = {}
+    const Second: {[number]: any} = {}
     Second[HealthId] = 10
     Second[TitleId] = "Same"
 
@@ -3157,7 +3157,7 @@ T:Test("a pack past the object cap is refused", function()
     const Ghost = Pusher()
     Permissions:Grant(Ghost, "TestBulk")
 
-    const Entries = table.create(4097)
+    const Entries = table.create(4097) :: {any}
     for Index = 1, 4097 do
         Entries[Index] = {Registry = BareId, LocalId = Index, Properties = {}}
     end

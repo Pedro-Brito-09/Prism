@@ -263,7 +263,8 @@ function Shared.Layout(
     Ids: {PropertyIdentifier},
     IncludeHidden: boolean?
 ): {Types.Section}
-    const Entries: {{Ref: PropertyRegistry<any>, Display: Types.Display, Index: number}} = {}
+    type Entry = {Ref: PropertyRegistry<any>, Display: Types.Display, Index: number}
+    const Entries: {Entry} = {}
 
     for Index, Id in Ids do
         const Ref = Registry[Id]
@@ -279,7 +280,7 @@ function Shared.Layout(
         table.insert(Entries, {Ref = Ref, Display = Display, Index = Index})
     end
 
-    table.sort(Entries, function(A, B)
+    table.sort(Entries, function(A: Entry, B: Entry)
         if A.Display.Order ~= B.Display.Order then
             return A.Display.Order < B.Display.Order
         end

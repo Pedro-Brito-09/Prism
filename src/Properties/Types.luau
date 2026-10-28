@@ -105,9 +105,17 @@ type PropertyConstraints = {
     Table: TableConstraints,
 }
 
+-- A key that is not one known property type -- `any`, a union, a generic not
+-- yet narrowed -- answers `any` rather than `never`. Answering `never` made
+-- Property<any> collapse to never, and every `if not Prop then return end`
+-- left the solver believing Prop could only be nil.
 type function GetFromMap(Map, Key)
-    if not Map:is("table") or not Key:is("singleton") then
+    if not Map:is("table") then
         return types.never
+    end
+
+    if not Key:is("singleton") then
+        return types.any
     end
 
     local Property = Map:readproperty(Key)
@@ -350,42 +358,47 @@ function Types:IsValid<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraints
     end
 
     if Constraints then
+        -- Narrowed by hand, as Value is: comparing Type to a literal does not
+        -- narrow T, so ConstraintsFor<T> stays unresolved inside the branch.
         if Type == "Text" then
             const TypedValue = (Value :: any) :: string
-            return #TypedValue >= (Constraints.MinLength or 0)
+            const TypedConstraints = (Constraints :: any) :: TextConstraints
+            return #TypedValue >= (TypedConstraints.MinLength or 0)
         elseif Type == "Enum" then
             const TypedValue = (Value :: any) :: EnumItem
-            if TypedValue.EnumType ~= Constraints.Enum then
+            const TypedConstraints = (Constraints :: any) :: EnumConstraints
+            if TypedValue.EnumType ~= TypedConstraints.Enum then
                 return false
             end
 
-            if Constraints.Whitelist and not (table.find(Constraints.Whitelist, TypedValue) or table.find(Constraints.Whitelist, TypedValue.Name)) then
+            if TypedConstraints.Whitelist and not (table.find(TypedConstraints.Whitelist, TypedValue) or table.find(TypedConstraints.Whitelist, TypedValue.Name)) then
                 return false
             end
 
-            if Constraints.Blacklist and (table.find(Constraints.Blacklist, TypedValue) or table.find(Constraints.Blacklist, TypedValue.Name)) then
+            if TypedConstraints.Blacklist and (table.find(TypedConstraints.Blacklist, TypedValue) or table.find(TypedConstraints.Blacklist, TypedValue.Name)) then
                 return false
             end
         elseif Type == "CustomEnum" then
             const TypedValue = (Value :: any) :: CustomEnum.RegisteredOption<any>
+            const TypedConstraints = (Constraints :: any) :: CustomEnumConstraints
 
             -- The client resolves this constraint from the enum name the server
             -- sent, and gets nil when that enum was never registered locally.
             -- Nothing can be validated against an enum this peer does not know,
             -- so reject rather than indexing nil.
-            if not Constraints.CustomEnum then
+            if not TypedConstraints.CustomEnum then
                 return false
             end
 
-            if TypedValue.Parent ~= Constraints.CustomEnum.Name then
+            if TypedValue.Parent ~= TypedConstraints.CustomEnum.Name then
                 return false
             end
 
-            if Constraints.Whitelist and not (table.find(Constraints.Whitelist, TypedValue) or table.find(Constraints.Whitelist, TypedValue.Id)) then
+            if TypedConstraints.Whitelist and not (table.find(TypedConstraints.Whitelist, TypedValue) or table.find(TypedConstraints.Whitelist, TypedValue.Id)) then
                 return false
             end
 
-            if Constraints.Blacklist and (table.find(Constraints.Blacklist, TypedValue) or table.find(Constraints.Blacklist, TypedValue.Id)) then
+            if TypedConstraints.Blacklist and (table.find(TypedConstraints.Blacklist, TypedValue) or table.find(TypedConstraints.Blacklist, TypedValue.Id)) then
                 return false
             end
         end
@@ -403,69 +416,74 @@ function Types:FixValue<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraint
         return Value
     end
     
+    -- Every branch hands its result back as any: the solver cannot narrow T
+    -- from the comparison, so it cannot see that a Color3 is ValueFor<"Color">.
     if Type == "Text" then
         const TypedValue = (Value :: any) :: string
-        return Constraints.MaxLength and string.sub(TypedValue, 1, Constraints.MaxLength) or TypedValue
+        const TypedConstraints = (Constraints :: any) :: TextConstraints
+        return (TypedConstraints.MaxLength and string.sub(TypedValue, 1, TypedConstraints.MaxLength) or TypedValue) :: any
     elseif Type == "Number" then
-        return FixNumber(Value, Constraints)
+        return FixNumber((Value :: any) :: number, (Constraints :: any) :: NumberConstraints) :: any
     elseif Type == "Color" then
         local TypedValue = (Value :: any) :: Color3
+        const TypedConstraints = (Constraints :: any) :: ColorConstraints
         TypedValue = Color3.fromRGB(
             Types:FixValue("Number", Codecs.ColorByte(TypedValue.R), {
-                MinValue = Constraints.R and Constraints.R.MinValue and math.clamp(Constraints.R.MinValue, 0, 255) or 0,
-                MaxValue = Constraints.R and Constraints.R.MaxValue and math.clamp(Constraints.R.MaxValue, 0, 255) or 255,
-                AllowDecimals = if Constraints.R then Constraints.R.AllowDecimals else true,
-                Precision = if Constraints.R then Constraints.R.Precision else nil,
+                MinValue = TypedConstraints.R and TypedConstraints.R.MinValue and math.clamp(TypedConstraints.R.MinValue, 0, 255) or 0,
+                MaxValue = TypedConstraints.R and TypedConstraints.R.MaxValue and math.clamp(TypedConstraints.R.MaxValue, 0, 255) or 255,
+                AllowDecimals = if TypedConstraints.R then TypedConstraints.R.AllowDecimals else true,
+                Precision = if TypedConstraints.R then TypedConstraints.R.Precision else nil,
             }),
 
             Types:FixValue("Number", Codecs.ColorByte(TypedValue.G), {
-                MinValue = Constraints.G and Constraints.G.MinValue and math.clamp(Constraints.G.MinValue, 0, 255) or 0,
-                MaxValue = Constraints.G and Constraints.G.MaxValue and math.clamp(Constraints.G.MaxValue, 0, 255) or 255,
-                AllowDecimals = if Constraints.G then Constraints.G.AllowDecimals else true,
-                Precision = if Constraints.G then Constraints.G.Precision else nil,
+                MinValue = TypedConstraints.G and TypedConstraints.G.MinValue and math.clamp(TypedConstraints.G.MinValue, 0, 255) or 0,
+                MaxValue = TypedConstraints.G and TypedConstraints.G.MaxValue and math.clamp(TypedConstraints.G.MaxValue, 0, 255) or 255,
+                AllowDecimals = if TypedConstraints.G then TypedConstraints.G.AllowDecimals else true,
+                Precision = if TypedConstraints.G then TypedConstraints.G.Precision else nil,
             }),
             
             Types:FixValue("Number", Codecs.ColorByte(TypedValue.B), {
-                MinValue = Constraints.B and Constraints.B.MinValue and math.clamp(Constraints.B.MinValue, 0, 255) or 0,
-                MaxValue = Constraints.B and Constraints.B.MaxValue and math.clamp(Constraints.B.MaxValue, 0, 255) or 255,
-                AllowDecimals = if Constraints.B then Constraints.B.AllowDecimals else true,
-                Precision = if Constraints.B then Constraints.B.Precision else nil,
+                MinValue = TypedConstraints.B and TypedConstraints.B.MinValue and math.clamp(TypedConstraints.B.MinValue, 0, 255) or 0,
+                MaxValue = TypedConstraints.B and TypedConstraints.B.MaxValue and math.clamp(TypedConstraints.B.MaxValue, 0, 255) or 255,
+                AllowDecimals = if TypedConstraints.B then TypedConstraints.B.AllowDecimals else true,
+                Precision = if TypedConstraints.B then TypedConstraints.B.Precision else nil,
             })
         )
 
-        return TypedValue
+        return TypedValue :: any
     elseif Type == "Vector" then
         local TypedValue = (Value :: any) :: Vector3
+        const TypedConstraints = (Constraints :: any) :: VectorConstraints
         TypedValue = Vector3.new(
             Types:FixValue("Number", TypedValue.X, {
-                MinValue = Constraints.X and Constraints.X.MinValue and math.clamp(Constraints.X.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
-                MaxValue = Constraints.X and Constraints.X.MaxValue and math.clamp(Constraints.X.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
-                AllowDecimals = if Constraints.X then Constraints.X.AllowDecimals else true,
-                Precision = if Constraints.X then Constraints.X.Precision else nil,
+                MinValue = TypedConstraints.X and TypedConstraints.X.MinValue and math.clamp(TypedConstraints.X.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
+                MaxValue = TypedConstraints.X and TypedConstraints.X.MaxValue and math.clamp(TypedConstraints.X.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
+                AllowDecimals = if TypedConstraints.X then TypedConstraints.X.AllowDecimals else true,
+                Precision = if TypedConstraints.X then TypedConstraints.X.Precision else nil,
             }),
 
             Types:FixValue("Number", TypedValue.Y, {
-                MinValue = Constraints.Y and Constraints.Y.MinValue and math.clamp(Constraints.Y.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
-                MaxValue = Constraints.Y and Constraints.Y.MaxValue and math.clamp(Constraints.Y.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
-                AllowDecimals = if Constraints.Y then Constraints.Y.AllowDecimals else true,
-                Precision = if Constraints.Y then Constraints.Y.Precision else nil,
+                MinValue = TypedConstraints.Y and TypedConstraints.Y.MinValue and math.clamp(TypedConstraints.Y.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
+                MaxValue = TypedConstraints.Y and TypedConstraints.Y.MaxValue and math.clamp(TypedConstraints.Y.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
+                AllowDecimals = if TypedConstraints.Y then TypedConstraints.Y.AllowDecimals else true,
+                Precision = if TypedConstraints.Y then TypedConstraints.Y.Precision else nil,
             }),
             
             Types:FixValue("Number", TypedValue.Z, {
-                MinValue = Constraints.Z and Constraints.Z.MinValue and math.clamp(Constraints.Z.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
-                MaxValue = Constraints.Z and Constraints.Z.MaxValue and math.clamp(Constraints.Z.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
-                AllowDecimals = if Constraints.Z then Constraints.Z.AllowDecimals else true,
-                Precision = if Constraints.Z then Constraints.Z.Precision else nil,
+                MinValue = TypedConstraints.Z and TypedConstraints.Z.MinValue and math.clamp(TypedConstraints.Z.MinValue, -F32_MAX, F32_MAX) or -F32_MAX,
+                MaxValue = TypedConstraints.Z and TypedConstraints.Z.MaxValue and math.clamp(TypedConstraints.Z.MaxValue, -F32_MAX, F32_MAX) or F32_MAX,
+                AllowDecimals = if TypedConstraints.Z then TypedConstraints.Z.AllowDecimals else true,
+                Precision = if TypedConstraints.Z then TypedConstraints.Z.Precision else nil,
             })
         )
 
-        return TypedValue
+        return TypedValue :: any
     elseif Type == "Table" then
         const List = (Value :: any) :: {any}
         const TableConstraints = (Constraints :: any) :: TableConstraints
         const Length = math.min(#List, TableConstraints.MaxItems or Types.MAX_TABLE_ITEMS)
 
-        const Fixed = table.create(Length)
+        const Fixed = table.create(Length) :: {any}
         local Same = Length == #List
 
         for Index = 1, Length do
@@ -514,17 +532,19 @@ function Types:Equals(Type: PropertyType, Left: any, Right: any): boolean
     return true
 end
 
-local ReverseIds;
+local ReverseIds: {[number]: PropertyType}? = nil
 function Types:GetTypeFromId(Id: number): PropertyType?
     if not ReverseIds then
-        const Ids = {}
-        for i, v in Types.Ids do
+        const Ids: {[number]: PropertyType} = {}
+        -- Through a cast: Ids is a literal with named fields and no indexer,
+        -- which the solver will not iterate.
+        for i, v in Types.Ids :: {[PropertyType]: number} do
             Ids[v] = i
         end
         ReverseIds = Ids
     end
 
-    return ReverseIds[Id]
+    return (ReverseIds :: {[number]: PropertyType})[Id]
 end
 
 function Types:GetTypeId(Type: PropertyType): number?
@@ -538,22 +558,23 @@ end
 -- run, to the older and broader of the two. Iterating Types.Map directly left
 -- it to hash order, which meant a plain 5 answered Number or Object depending
 -- on nothing at all.
-local ReverseMap;
+local ReverseMap: {[string]: PropertyType}? = nil
 function Types:GetTypeFromValue(Value: any): PropertyType?
     const TypeOf = typeof(Value)
     if not ReverseMap then
-        const Names = {}
-        for Name in Types.Map do
+        const Names: {PropertyType} = {}
+        -- Through a cast, as in GetTypeFromId: Map has no indexer to iterate.
+        for Name in Types.Map :: {[PropertyType]: string} do
             table.insert(Names, Name)
         end
 
-        table.sort(Names, function(Left: string, Right: string): boolean
-            return Types.Ids[Left] < Types.Ids[Right]
+        table.sort(Names, function(Left: PropertyType, Right: PropertyType): boolean
+            return (Types.Ids[Left] :: number) < (Types.Ids[Right] :: number)
         end)
 
-        const Map = {}
+        const Map: {[string]: PropertyType} = {}
         for _, Name in Names do
-            const Luau = Types.Map[Name]
+            const Luau = (Types.Map :: {[PropertyType]: string})[Name]
             if Map[Luau] == nil then
                 Map[Luau] = Name
             end
@@ -562,7 +583,7 @@ function Types:GetTypeFromValue(Value: any): PropertyType?
         ReverseMap = Map
     end
 
-    return ReverseMap[TypeOf]
+    return (ReverseMap :: {[string]: PropertyType})[TypeOf]
 end
 
 return Types
