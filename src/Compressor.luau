@@ -1846,20 +1846,13 @@ end
 -- Metadata packs
 --=============================================================================
 
--- A record's properties ride as columns from 2 on, property id plus two, so
--- nothing else a record carries can be taken for a property. A group is every
--- record carrying the same columns in the same order: a record's properties
--- are read back by position as well as by id, and the order is the one a
--- record was built in.
---
--- Columns 0 and 1 held a saved and a published version number that nothing
--- ever set. They are retired rather than reused: a shard written before still
--- carries them, and a new meaning in either slot would read those numbers as
--- something they are not. The reader skips them. Column 2 is the Guids of the
--- scenes a record links, as a Table of String; no property ever wrote there,
--- because property ids start at 1.
-const METADATA_SCENES = 2
-const METADATA_FIRST_PROPERTY = 2
+-- A record's properties ride as columns numbered by property id, and the Guids
+-- of the scenes it links as column 0, a Table of String -- no property can be
+-- taken for it, because property ids start at 1. A group is every record
+-- carrying the same columns in the same order: a record's properties are read
+-- back by position as well as by id, and the order is the one a record was
+-- built in.
+const METADATA_SCENES = 0
 const SCENES_CONSTRAINTS = {Of = "String"}
 
 -- Returns the pack and the size of its body before compression, which is what a
@@ -1883,7 +1876,7 @@ function Compressor:CompressMetadatas(LastId: number, Metadatas: {DatabaseTypes.
                 continue
             end
 
-            const Column = Prop.Parent + METADATA_FIRST_PROPERTY
+            const Column = Prop.Parent
             if Fields[Column] then
                 Logger:Warn(`Record {Metadata.Id} carries property {Prop.Parent} twice. The second is not saved.`)
                 continue
@@ -1938,11 +1931,11 @@ function Compressor:DecompressMetadatas(CompressedMetadatas: buffer): (number, {
         -- bookkeeping rather than anybody's level, and has nowhere to hold it.
         for _, Column in Order do
             const Tagged = Fields[Column]
-            if Column <= METADATA_SCENES or not Tagged then
+            if Column == METADATA_SCENES or not Tagged then
                 continue
             end
 
-            const PropertyId, Value, Raw = Decode(Column - METADATA_FIRST_PROPERTY, Tagged, Shared)
+            const PropertyId, Value, Raw = Decode(Column, Tagged, Shared)
             if PropertyId and not Raw then
                 -- Through any: Properties is the client's or the server's, and
                 -- the analyser will not call a union of the two.

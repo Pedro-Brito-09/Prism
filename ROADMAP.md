@@ -127,13 +127,14 @@ rather than guessed.
 
       `SavedVersion` and `PublishedVersion` came off records. Nothing ever set
       them, and a scene's draft and published packs say what was saved and
-      what went live. Their columns, 0 and 1, are retired rather than reused:
-      a shard written before still carries them, the reader skips them, and a
-      new meaning in either slot would read those numbers as something else.
-      The scenes go in column 2 as a `Table` of `String`, a column no property
-      ever wrote, since property ids start at 1 and sit at id plus two. A
-      record linking nothing writes nothing there. Existing shards read as
-      before.
+      what went live. The record layout was renumbered with them: the scenes
+      are column 0, a `Table` of `String`, and a property is the column of its
+      own id, as in a scene pack -- property ids start at 1, so neither can be
+      taken for the other. A record linking nothing writes nothing in column
+      0. No backwards compatibility, since nothing had shipped: a shard
+      written before reads as nonsense -- its published version as property 1,
+      every property as the id two above its own -- which the database suite
+      never sees, because it wipes its keys before it runs.
 
 - [x] **A scene is saved under a Guid, as a draft and a published pack.**
       `Scene:Save(store)` took a key from the game, so what a level was saved
