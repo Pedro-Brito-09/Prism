@@ -50,8 +50,8 @@ function CustomEnum:Register<T>(Name: string, Options: EnumOptions<T>): CustomEn
         return nil
     end
 
-    const ById = {}
-    const Valid = {}
+    const ById: {[OptionId]: RegisteredOption<T>} = {}
+    const Valid: {RegisteredOption<T>} = {}
 
     for Value, Id in Options do
         if type(Id) ~= "number" or Id ~= math.floor(Id) then
@@ -70,7 +70,7 @@ function CustomEnum:Register<T>(Name: string, Options: EnumOptions<T>): CustomEn
             continue
         end
 
-        const Option = {
+        const Option: RegisteredOption<T> = {
             __type = "CustomEnumOption",
             Id = Id,
             Value = Value,
@@ -83,7 +83,7 @@ function CustomEnum:Register<T>(Name: string, Options: EnumOptions<T>): CustomEn
 
     -- Options is built by iterating a dictionary, so without this the array
     -- order changes between runs.
-    table.sort(Valid, function(A, B)
+    table.sort(Valid, function(A: RegisteredOption<T>, B: RegisteredOption<T>)
         return A.Id < B.Id
     end)
 

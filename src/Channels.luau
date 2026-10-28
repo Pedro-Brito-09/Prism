@@ -217,8 +217,8 @@ const Channels: {Channel} = {
         -- client could spam.
         Name = "Scenes.Commit",
         Args = {Codecs.String, Codecs.Buffer}, -- Name, Compressor:CompressScene
-        -- Cast: the default solver types a list by its first codec and refuses
-        -- the rest, the same noise Transactions.Apply carries in the baseline.
+        -- Cast: a list literal is typed by its first codec, which would refuse
+        -- the rest.
         Returns = {Codecs.Bool, Codecs.Varint, Codecs.String} :: {Codecs.Codec<any>}, -- accepted, SceneId, reason ("" when accepted)
     },
 

@@ -202,8 +202,8 @@ function Shared.factory(
                 -- the items pointing outside the group still have something to
                 -- say what they are.
                 if Prop.Type == "Table" then
-                    const Names = table.create(#Value)
-                    const Kept = table.create(#Value)
+                    const Names = table.create(#Value) :: {number}
+                    const Kept = table.create(#Value) :: {number}
                     local Any = false
 
                     for Index, Item in Value do
@@ -366,13 +366,13 @@ function Shared.factory(
         -- is refused where the objects are still both in hand to be named.
         local Held = Value
         if PropertyTypes.HoldsReferences(Prop) then
-            const Target, Why = Objects.Reference(Obj.InstanceId, Prop, Value)
-            if Target == nil then
+            const Pointed, Why = Objects.Reference(Obj.InstanceId, Prop, Value)
+            if Pointed == nil then
                 Reject(self, `{Obj.Name}.{Prop.Name} cannot point there: {Why}.`)
                 return self
             end
 
-            Held = Target
+            Held = Pointed
         end
 
         -- Checked here as well as at the far end, and not because the far end

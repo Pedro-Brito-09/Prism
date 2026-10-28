@@ -238,7 +238,7 @@ const function Plan(Transaction: Transaction): LocalPlan?
 
         for PropertyId, Names in Entry.References do
             if type(Names) == "table" then
-                const List = table.create(#Names)
+                const List = table.create(#Names) :: {number}
                 for Index, Operation in Names do
                     if Operation == 0 then
                         List[Index] = 0
@@ -325,7 +325,7 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
                 -- entry names a create, the held id where it does not.
                 if type(Names) == "table" then
                     const Held = if type(Prop.Value) == "table" then Prop.Value else {}
-                    const List = table.create(#Names)
+                    const List = table.create(#Names) :: {number}
 
                     for Item, Entry in Names do
                         const Points = if Entry ~= 0 then Created[Entry] else nil
@@ -446,7 +446,7 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
         end
     end
 
-    const Ids = table.create(#Created)
+    const Ids = table.create(#Created) :: {number}
     for Index, Obj in Created do
         Ids[Index] = Obj.RuntimeId
     end

@@ -42,9 +42,9 @@ Read this before picking anything up. It is how every item under Done landed.
   anything whose signature changed. That is what the two scripts now do, and
   they found three bugs the moment they were pointed at the code.
 - **The analyser is a ratchet, not a clean bill of health.** It fails when a
-  file grows a diagnostic it did not have before. What stands is mostly the
-  default type solver reading code written for the new one; see the Type
-  checking section of the README. Do not clear the baseline by weakening the
+  file grows a diagnostic it did not have before. It runs the new type solver,
+  `src/` is clean under it, and what stands is the suites' unresolved
+  `require("./Prism")`; see the Type checking section of the README. Do not clear the baseline by weakening the
   code -- if a diagnostic is deliberate, run `--update-baseline` and say why.
 - **New channels go at the end of `src/Channels.luau`, never reordered**, and
   never reuse the slot of a removed one during a live rollout.

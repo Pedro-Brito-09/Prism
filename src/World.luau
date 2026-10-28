@@ -62,22 +62,21 @@ const function GetRoot(): Instance
     end
 
     if IS_SERVER then
-        local Found = workspace:FindFirstChild(ROOT_NAME)
-        if not Found then
-            const Folder = Instance.new("Folder")
-            Folder.Name = ROOT_NAME
-            Folder.Parent = workspace
-            Found = Folder
+        const Existing = workspace:FindFirstChild(ROOT_NAME)
+        if Existing then
+            Root = Existing
+            return Existing
         end
 
-        Root = Found
-        return Found
+        const Folder = Instance.new("Folder")
+        Folder.Name = ROOT_NAME
+        Folder.Parent = workspace
+        Root = Folder
+        return Folder
     end
 
     const Found = workspace:WaitForChild(ROOT_NAME, WAIT_TIMEOUT)
-    if not Found then
-        Logger:Error(`Waited {WAIT_TIMEOUT}s for workspace.{ROOT_NAME}, which the server creates. Is Prism required on the server?`)
-    end
+        or Logger:Error(`Waited {WAIT_TIMEOUT}s for workspace.{ROOT_NAME}, which the server creates. Is Prism required on the server?`)
 
     Root = Found
     return Found

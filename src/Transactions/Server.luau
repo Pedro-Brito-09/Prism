@@ -489,14 +489,14 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             return nil, "a reference names a create going into another copy."
         end
 
-        return Names
+        return Names, nil
     end
 
     for _, Reference in Pending do
         local Names: number | {number}
 
         if type(Reference.Operation) == "table" then
-            const Resolved = table.create(#Reference.Operation)
+            const Resolved = table.create(#Reference.Operation) :: {number}
             for Index, Operation in Reference.Operation do
                 if Operation == 0 then
                     Resolved[Index] = 0
@@ -844,7 +844,7 @@ function Transactions.Apply(
         end
     end
 
-    const Identifiers = table.create(#Created)
+    const Identifiers = table.create(#Created) :: {number}
     for Index, Obj in Created do
         Identifiers[Index] = Obj.RuntimeId
     end

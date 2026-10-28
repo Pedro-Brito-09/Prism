@@ -5,6 +5,8 @@
 const Harness = {}
 Harness.__index = Harness
 
+-- Methods are written with self as a Suite rather than with a colon, which
+-- would leave self to be inferred from whatever each body happens to read.
 export type Suite = {
     Passed: number,
     Failed: number,
@@ -35,12 +37,12 @@ const function Show(Value: any): string
     return tostring(Value)
 end
 
-function Harness:Describe(Name: string)
+function Harness.Describe(self: Suite, Name: string)
     self.Group = Name
     print(`\n-- {Name}`)
 end
 
-function Harness:Test(Name: string, Fn: () -> ())
+function Harness.Test(self: Suite, Name: string, Fn: () -> ())
     self.Current = Name
     self.Errors = {}
     self.SkipReason = nil
@@ -74,33 +76,33 @@ function Harness:Test(Name: string, Fn: () -> ())
     end
 end
 
-function Harness:Fail(Message: string)
+function Harness.Fail(self: Suite, Message: string)
     table.insert(self.Errors, Message)
 end
 
-function Harness:Skip(Reason: string)
+function Harness.Skip(self: Suite, Reason: string)
     self.SkipReason = Reason
 end
 
-function Harness:Eq(Actual: any, Expected: any, What: string?)
+function Harness.Eq(self: Suite, Actual: any, Expected: any, What: string?)
     if Actual ~= Expected then
         self:Fail(`{What or "value"}: expected {Show(Expected)}, got {Show(Actual)}`)
     end
 end
 
-function Harness:Ok(Value: any, What: string?)
+function Harness.Ok(self: Suite, Value: any, What: string?)
     if not Value then
         self:Fail(`{What or "value"}: expected truthy, got {Show(Value)}`)
     end
 end
 
-function Harness:Throws(Fn: () -> (), What: string?)
+function Harness.Throws(self: Suite, Fn: () -> (), What: string?)
     if (pcall(Fn)) then
         self:Fail(`{What or "call"}: expected an error, none raised`)
     end
 end
 
-function Harness:Eventually(Check: () -> any, Timeout: number?, What: string?, Interval: number?): any
+function Harness.Eventually(self: Suite, Check: () -> any, Timeout: number?, What: string?, Interval: number?): any
     const Deadline = os.clock() + (Timeout or 5)
     local Last = "false"
 
@@ -118,7 +120,7 @@ function Harness:Eventually(Check: () -> any, Timeout: number?, What: string?, I
     return nil
 end
 
-function Harness:Report(): boolean
+function Harness.Report(self: Suite): boolean
     const Total = self.Passed + self.Failed + self.Skipped
     print(`\n{string.rep("=", 56)}`)
     print(`  {self.Passed}/{Total} passed, {self.Failed} failed, {self.Skipped} skipped`)
