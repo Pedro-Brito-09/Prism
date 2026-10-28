@@ -1847,13 +1847,15 @@ end
 --=============================================================================
 
 -- A record's properties ride as columns numbered by property id, and the Guids
--- of the scenes it links as column 0, a Table of String -- no property can be
+-- of the scenes it links as column 0, a Table of Text -- no property can be
 -- taken for it, because property ids start at 1. A group is every record
 -- carrying the same columns in the same order: a record's properties are read
 -- back by position as well as by id, and the order is the one a record was
 -- built in.
 const METADATA_SCENES = 0
-const SCENES_CONSTRAINTS = {Of = "String"}
+-- Text, the name Prism gives a string. It read "String", which is no type, so
+-- every record linking a scene threw when its shard was written.
+const SCENES_CONSTRAINTS = {Of = "Text"}
 
 -- Returns the pack and the size of its body before compression, which is what a
 -- caller measures a shard by: rewriting it decodes and encodes all of that.

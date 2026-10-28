@@ -104,6 +104,15 @@ rather than guessed.
 
 ## Done
 
+- [x] **A record that links a scene can be saved.** The Guids of the scenes a
+      record links were written as a Table whose constraints named `String`
+      as its item type, and Prism has no `String` -- the string type is
+      `Text` -- so the compressor threw on every record linking a scene, and
+      `db:Link` failed on the shard write. Three server tests had failed
+      since record scene links landed: two metadata round trips and the
+      database's edits and deletes. They pass with `Of = "Text"`, and every
+      suite is green again: server 254/254, client 75/75.
+
 - [x] **A link is two fields on its property.** Measured on the real
       34,918-object level: 330,259 of its 495,279 properties drive a part,
       and each link was an `OnChange` listener -- a link table, the closure
