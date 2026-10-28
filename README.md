@@ -137,7 +137,8 @@ Save on the server when the player asks to.
 ```lua
 -- server
 room:Commit()
-Level:Save(DataStore, "Level 1")
+Level:Save(DataStore)     -- the draft, under Level.Guid
+Level:Publish(DataStore)  -- what players get
 ```
 
 `roomCopyId` is the id of the copy the server loaded. A client hears of a copy
@@ -803,20 +804,60 @@ holds them in between.
 
 ### Saving
 
-`instance:Commit()` writes a copy back into its scene; `Scene:Save(store, key)`
-writes the committed pack to a DataStore key, and `Scenes.fromDataStore` reads
-it back.
+`instance:Commit()` writes a copy back into its scene. Saving writes what the
+scene last committed to a DataStore, under the scene's **Guid**.
 
 ```lua
 -- server
 room:Commit()
-Rooms:Save(DataStore, key)                               -- false if every retry failed
+Rooms:Save(DataStore)                 -- the draft; false if every retry failed
+Rooms:Publish(DataStore)              -- what players get
+local id = Rooms:Backup(DataStore)    -- a copy nothing overwrites; nil on failure
 
-Prism.Scenes.fromDataStore({Name = "Rooms"}, DataStore, key)   -- registered, nothing live
+local guid = Rooms.Guid               -- keep this wherever your game lists its levels
+
+Prism.Scenes.fromDataStore(DataStore, guid, {Name = "Rooms"})                -- the draft
+Prism.Scenes.fromDataStore(DataStore, guid, {Name = "Rooms"}, "Published")
 ```
 
-A key that holds nothing yet comes back as an empty scene; `nil` means the key
-couldn't be read or doesn't hold a pack.
+Every server scene gets a Guid when it is registered: 22 characters, made by
+Prism, never by the game. `Scene.Id` cannot do this job — it is claimed per
+server in registration order, so it names a different scene on the next
+server, and it is a u16 because it rides on the wire. `fromDataStore` registers
+the scene under the Guid it was saved with, so saving it again writes the same
+keys; `fromBuffer` and a client's push make a new scene with a new Guid,
+because a pack carries none. Clients get the Guid with the scene's name, and
+`Scenes:GetByGuid` finds one on either side.
+
+| key | written by | history |
+|---|---|---|
+| `<Guid>:Draft` | `Save` | the DataStore's own versions, 30 days |
+| `<Guid>:Published` | `Publish` | the DataStore's own versions, 30 days |
+| `<Guid>:Backup:<id>` | `Backup` | kept until the game removes it |
+
+`Publish` writes the scene as it is, not the stored draft, so a scene published
+without saving goes live with its unsaved edits. When to back up is the game's
+call — after a publish, once a day, before something risky. A backup's id is
+the moment it was taken, in unix milliseconds. Prism never deletes one.
+
+```lua
+Prism.Scenes:ListVersions(DataStore, guid, "Draft", 20)    -- {{Version, Time}}, newest first
+Prism.Scenes:ListBackups(DataStore, guid, 20)              -- {{Backup, Time}}, newest first
+
+Prism.Scenes.fromDataStore(DataStore, guid, config, {Draft = version})
+Prism.Scenes.fromDataStore(DataStore, guid, config, {Published = version})
+Prism.Scenes.fromDataStore(DataStore, guid, config, {Backup = id})
+```
+
+A listing's entries are what `fromDataStore` takes back: `Version` goes in as
+`{Draft = version}` or `{Published = version}`, and `Backup` as `{Backup = id}`.
+Every call that reads a stored scene starts with the store and the Guid.
+
+`fromDataStore` returns `nil`, with a warning, when the Guid is not one Prism
+made, when the source names more or less than one pack, when a scene is
+already registered under it, when the key couldn't be
+read, or when nothing is stored there. A new level is `Scenes.new`; reading an
+empty key as an empty scene would let any string shaped like a Guid become one.
 
 `Scene:Serialize()` hands you the pack itself, to store wherever you like, and
 `Scenes.fromBuffer(config, pack)` reads one. Store it as the **buffer**, never
@@ -870,6 +911,10 @@ remapped together.
 A local id is never handed out twice within a scene, for the same reason a
 property id is never recycled — a reference still holding it would name a
 different object. The scene's counter rides along in the pack.
+
+The scene id in the high half is the session's, not the saved scene's: a pack
+never holds it. What names a saved scene across servers is its Guid; see
+Saving.
 
 ### Loading and unloading are one packet
 
@@ -1527,11 +1572,11 @@ The sections above explain each one.
 | | `:OnAdded(fn)`, `:OnRemoved(fn)`, `.OnRetired(fn)` | S C |
 | | `.Suspend(object)`, `.Revive(object)`, `.Dispose(object)`, `.Retire(...)` | S C |
 | an object | `:Set(property, value, clientSided?)`, `:Get(property)`, `:GetProperty(property)`, `:OnChange(property, fn)`, `:Destroy()` | S C |
-| `Scenes` | `.new(config)`, `.fromBuffer(config, pack)`, `:Get(name)`, `:GetById(id)`, `:GetRegistered()` | S C |
-| | `.fromDataStore(config, store, key)`, `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
+| `Scenes` | `.new(config)`, `.fromBuffer(config, pack)`, `:Get(name)`, `:GetById(id)`, `:GetByGuid(guid)`, `:GetRegistered()` | S C |
+| | `.fromDataStore(store, guid, config, source?)`, `:ListVersions(store, guid, which, limit?)`, `:ListBackups(store, guid, limit?)`, `:SetPushRole(role)`, `:GetDefault()`, `:GetInstance(copyId)` | S |
 | | `:GetLocal(name)`, `:GetOwned()`, `:GetFolder(copyId)`, `:GetInstances(sceneId)`, `:GetInstanceScene(copyId)`, `:GetObjects(copyId)`, `:OnCopyAdded(fn)`, `:OnCopyRemoved(fn)` | C |
 | a scene | `:Load(parent?, options?)`, `:Unload()`, `:Serialize()`, `:GetInstances()`, `:Destroy()` | S C |
-| | `:Save(store, key)`, `:Open(options?)`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
+| | `.Guid`, `:Save(store)`, `:Publish(store)`, `:Backup(store)`, `:Open(options?)`, `:Admit(who)`, `:Evict(who)`, `:Admits(who)`, `:SetPrivate(private)`, `:IsPublic()`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability(who, name)`, `:RevokeCapability(who, name)` | S |
 | | `:Push(name)` → `ok, sceneId, reason` | C |
 | a copy | `:Create(type, values?)`, `:Place(pack)`, `:Find(localId)`, `:GetObjects()`, `:Serialize()`, `:Commit()`, `:Unload()`, `:Suspend()`, `:Revive()`, `:Dispose()` | S C |
 | `Transactions` | `.new()`, then `:Create`, `:Duplicate`, `:DuplicateGroup`, `:Place`, `:Set`, `:Destroy`, `:Lock`, `:Unlock`, `:Load`, `:Unload`, `:Commit()` | S C |

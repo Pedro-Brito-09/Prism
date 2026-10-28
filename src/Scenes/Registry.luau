@@ -11,6 +11,10 @@ return {
     ById = {} :: {[number]: any},
     ByName = {} :: {[string]: any},
 
+    -- By the id a scene is saved under, which outlives the session where the
+    -- other two do not.
+    ByGuid = {} :: {[string]: any},
+
     -- Every live copy across every scene, keyed by its own id. Kept flat rather
     -- than reached through the scene holding it because a caller naming a copy
     -- -- a transaction says which copy each object it creates belongs in --
