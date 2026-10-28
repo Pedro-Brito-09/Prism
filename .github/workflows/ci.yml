@@ -31,9 +31,14 @@ jobs:
       - name: Tests that do not need Roblox
         run: bash scripts/test-pure.sh
 
-      # The models in dist/ are what a place inserts, so a push that changes the
-      # source without rebuilding them would ship the old code.
-      - name: Models are current
-        run: |
-          node scripts/build.js
-          git diff --exit-code -- dist || { echo "dist/ is stale: run node scripts/build.js and commit it."; exit 1; }
+      # dist/ is not committed: a release builds its own models from the tag.
+      # Built here as well so a push that breaks the build fails, and kept as
+      # an artifact so any push can be tried in Studio without tagging it.
+      - name: Build models
+        run: node scripts/build.js
+
+      - name: Upload models
+        uses: actions/upload-artifact@v7
+        with:
+          name: Prism-${{ github.sha }}
+          path: dist/*.rbxmx
