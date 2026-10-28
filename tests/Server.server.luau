@@ -754,10 +754,10 @@ T:Test("metadata round trips", function()
     const Plays = Properties.new(PlaysId)
     Plays:Set(1767000000) -- past f32, the regression case
 
+    const Linked = {string.rep("a", 22), string.rep("b", 22)}
     const Record = {
         Id = 7,
-        SavedVersion = 2,
-        PublishedVersion = 1,
+        Scenes = Linked,
         Title,
         Plays,
     }
@@ -765,13 +765,14 @@ T:Test("metadata round trips", function()
     const _, Records = Compressor:DecompressMetadatas((Compressor:CompressMetadatas(7, {Record :: any})))
     const Back = Records[1]
     T:Eq(Back.Id, 7, "id")
-    T:Eq(Back.SavedVersion, 2, "saved version")
-    T:Eq(Back.PublishedVersion, 1, "published version")
-    T:Eq(#Back, 2, "property count")
+    T:Eq(#Back.Scenes, 2, "linked scenes")
+    T:Eq(Back.Scenes[1], Linked[1], "in link order")
+    T:Eq(Back.Scenes[2], Linked[2], "both of them")
+    T:Eq(#Back, 2, "property count, the scenes not among them")
 
-    -- Indexed rather than iterated: the record carries Id, SavedVersion and
-    -- PublishedVersion beside the array of properties, and a generic for walks
-    -- those numbers too and then tries to index them.
+    -- Indexed rather than iterated: the record carries Id and Scenes beside the
+    -- array of properties, and a generic for walks those too and then tries to
+    -- index them as properties.
     for Index = 1, #Back do
         const Prop = Back[Index]
         if Prop.Parent == TitleId then
@@ -786,7 +787,7 @@ T:Test("metadata packs round trip and preserve LastId", function()
     const function Build(Id: number, Name: string)
         const Title = Properties.new(TitleId)
         Title:Set(Name)
-        return {Id = Id, SavedVersion = 0, PublishedVersion = 0, Title}
+        return {Id = Id, Scenes = {}, Title}
     end
 
     const Records = {Build(1, "One"), Build(2, "Two"), Build(3, "Three")}
@@ -798,8 +799,8 @@ T:Test("metadata packs round trip and preserve LastId", function()
     T:Eq(Back[3][1].Value, "Three", "third record value")
 end)
 
-const function Record(Id: number, Values: {{any}}, Saved: number?): any
-    const Out: any = {Id = Id, SavedVersion = Saved or 0, PublishedVersion = 0}
+const function Record(Id: number, Values: {{any}}, Scenes: {string}?): any
+    const Out: any = {Id = Id, Scenes = Scenes or {}}
     for _, Pair in Values do
         const Prop = Properties.new(Pair[1])
         Prop:Set(Pair[2])
@@ -811,7 +812,7 @@ end
 
 T:Test("a metadata pack keeps each record's properties in their order", function()
     const Records = {
-        Record(1, {{TitleId, "A"}, {PlaysId, 5}}, 3),
+        Record(1, {{TitleId, "A"}, {PlaysId, 5}}, {string.rep("c", 22)}),
         Record(2, {{PlaysId, 9}, {TitleId, "B"}}),
         Record(3, {{TitleId, "C"}}),
         Record(5, {{TitleId, "E"}, {PlaysId, 0}}),
@@ -820,7 +821,8 @@ T:Test("a metadata pack keeps each record's properties in their order", function
     const LastId, Back = Compressor:DecompressMetadatas((Compressor:CompressMetadatas(5, Records)))
     T:Eq(LastId, 5, "last id")
     T:Eq(#Back, 4, "every record")
-    T:Eq(Back[1].SavedVersion, 3, "a version")
+    T:Eq(Back[1].Scenes[1], string.rep("c", 22), "a linked scene")
+    T:Eq(#Back[2].Scenes, 0, "and a record linking none has an empty list")
     T:Eq(Back[1][1].Parent, TitleId, "first property first")
     T:Eq(Back[2][1].Parent, PlaysId, "a record built in another order keeps it")
     T:Eq(Back[2][2].Value, "B", "with its values")
@@ -5262,7 +5264,7 @@ T:Test("survives a compressed record", function()
     Title:Set("Encoded")
 
     const Packed = Compressor:CompressMetadatas(1, {
-        {Id = 1, SavedVersion = 0, PublishedVersion = 0, Title} :: any,
+        {Id = 1, Scenes = {}, Title} :: any,
     })
 
     const _, Back = Compressor:DecompressMetadatas(Encoding.Decode(Encoding.Encode(Packed)))
@@ -5532,6 +5534,36 @@ if RUN_DATABASE then
 
         T:Ok(not db:Edit(999999, {[TitleId] = "x"}), "editing a missing id fails")
         T:Ok(not db:Edit(Created[2], {[99999] = "x"}), "unregistered property fails")
+
+        -- Done here rather than in a test of its own: the next one deletes a
+        -- record and checks the counter, and every write costs a request.
+        const Room = Scenes.new({Name = "TestLinkedRoom"}) :: any
+        const Hall = Scenes.new({Name = "TestLinkedHall"}) :: any
+
+        T:Ok(db:Link(Created[2], Room.Guid), "linked")
+        T:Ok(db:Link(Created[2], Hall.Guid), "a second scene linked")
+        T:Ok(db:Link(Created[2], Room.Guid), "linking one already there is fine")
+        db:Refresh()
+
+        const Linked = db:GetById(Created[2])
+        T:Eq(Linked and #Linked.Scenes, 2, "both, once each")
+        T:Eq(Linked and Linked.Scenes[1], Room.Guid, "in link order")
+        T:Throws(function()
+            table.insert((Linked :: any).Scenes, "x")
+        end, "and frozen like the rest of a record")
+
+        T:Ok(db:Unlink(Created[2], Room.Guid), "unlinked")
+        T:Ok(not db:Unlink(Created[2], Room.Guid), "unlinking one not there fails")
+        T:Ok(not db:Link(Created[2], "Level 1"), "a string that is not a Guid is refused")
+        T:Ok(not db:Link(999999, Room.Guid), "linking to a missing id fails")
+        db:Refresh()
+
+        const After = db:GetById(Created[2])
+        T:Eq(After and #After.Scenes, 1, "one left")
+        T:Eq(After and After.Scenes[1], Hall.Guid, "the other one")
+
+        Room:Destroy()
+        Hall:Destroy()
 
         T:Ok(db:Delete(Created[3]), "delete accepted")
         db:Refresh()

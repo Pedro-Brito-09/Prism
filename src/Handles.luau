@@ -47,4 +47,18 @@ function Handles.Local(Persistent: PersistentId): LocalId
     return Persistent % SCALE
 end
 
+-- The identity a scene is saved under, which none of the above is: a scene id
+-- is claimed per server in registration order. 128 random bits as base64url
+-- without padding. Scenes/Server makes them; this is what one looks like, for
+-- every place that takes one back.
+Handles.GUID_LENGTH = 22
+
+-- Only Prism makes Guids, so anything else handed in as one is a mistake --
+-- reading a key that does not hold a Prism scene would hand a scene an
+-- identity Prism never gave it, and a record linking one would point at
+-- nothing Prism could ever have saved.
+function Handles.IsGuid(Text: any): boolean
+    return type(Text) == "string" and #Text == Handles.GUID_LENGTH and string.match(Text, "^[%w%-_]+$") ~= nil
+end
+
 return Handles

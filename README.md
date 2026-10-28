@@ -1471,6 +1471,28 @@ db:GetById(id)
 db:Delete(id)
 ```
 
+### Linking scenes
+
+A record is about a level; the level itself is one or more scenes, saved under
+their own Guids (see [Saving](#saving)). A record keeps the Guids of the scenes
+it is about.
+
+```lua
+db:Link(id, lobby.Guid)          -- true when the record holds it
+db:Link(id, arena.Guid)
+db:Unlink(id, lobby.Guid)        -- false when it was not linked
+
+local record = db:GetById(id)
+record.Scenes                    -- {guid, ...}, in link order; {} when none
+Prism.Scenes.fromDataStore(DataStore, record.Scenes[1], {Name = "Arena"})
+```
+
+The Guids are a set: linking one already there writes nothing. A record links
+at most **64**, because every create in a shard re-encodes the whole shard. Only
+a Prism Guid is accepted; nothing checks that the scene was ever saved. Each
+call is one shard write, like `Edit`, and `record.Scenes` is frozen like the
+rest of a record you read.
+
 ### Browsing
 
 A cache declares its order. `IdOrdered` says the order matches shard order,
@@ -1589,7 +1611,7 @@ The sections above explain each one.
 | `Permissions` | `:Register(name, role)`, `:Grant(who, role)`, `:Revoke(who)`, `:GrantCapability`, `:RevokeCapability`, `:Get(who)` | S |
 | | `:Can(...)`, `:Has(...)` | S C (server: the player first) |
 | | `:Get()`, `:GetOn(scene)`, `:OnChange(fn)` | C |
-| `Database` | `.new(config)`, then `:Create`, `:Edit`, `:Delete`, `:GetById`, `:Get(cache, page)`, `:Find(fn, count)`, `:RegisterCache(name, config)` | S |
+| `Database` | `.new(config)`, then `:Create`, `:Edit`, `:Delete`, `:Link(id, guid)`, `:Unlink(id, guid)`, `:GetById`, `:Get(cache, page)`, `:Find(fn, count)`, `:RegisterCache(name, config)` | S |
 | `Networking` | `:Get(name)`, then `:Fire`, `:FireAll`, `:Invoke`, `.OnInvoke` | S C |
 
 ## Storage format

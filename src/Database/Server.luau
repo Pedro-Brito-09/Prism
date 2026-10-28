@@ -44,6 +44,7 @@ const PropertyTypes = require("../Properties/Types")
 const Properties = require("../Properties/Server")
 const Compressor = require("../Compressor")
 const Encoding = require("../Encoding")
+const Handles = require("../Handles")
 const Logger = require("../Logger")
 const Types = require("./Types")
 const Try = require("../Try")
@@ -270,6 +271,7 @@ const function FreezeRecords(Records: {Metadata})
             end
         end
 
+        table.freeze(Record.Scenes)
         table.freeze(Record)
     end
 end
@@ -602,8 +604,7 @@ end
 const function BuildMetadata<T>(self: Database<T>, Id: number): Metadata
     const New = {
         Id = Id,
-        SavedVersion = 0,
-        PublishedVersion = 0,
+        Scenes = {},
     }
 
     for _, Template in self.InitialMetadata do
@@ -829,6 +830,102 @@ const function __delete<T>(self: Database<T>, Id: number): boolean
     return Found and Success
 end
 
+-- How many scenes one record links. Every create in a shard decodes and
+-- re-encodes the whole of it inside a transform that cannot yield, so what a
+-- record may carry is a cost on every other record's create as well.
+const MAX_LINKED_SCENES = 64
+
+-- Link and Unlink are one write with the change decided inside the transform,
+-- from the shard as it stands on that attempt: UpdateAsync can retry, and a
+-- list read before it could add a Guid twice or drop one another server added.
+-- Change returns whether the list moved, and a reason when it was refused.
+const function Relink<T>(self: Database<T>, Id: number, Change: ({string}) -> (boolean, string?)): (boolean, boolean, string?)
+    const Index = LocateShard(self, Id)
+    local Found = false
+    local Dirty = false
+    local Refused: string? = nil
+
+    const Success = Try(ATTEMPTS, self.DataStore.UpdateAsync, self.DataStore, ShardKey(self, Index), function(Old: any, KeyInfo: any): ...any
+        Found = false
+        Dirty = false
+        Refused = nil
+        if not Old then
+            return nil
+        end
+
+        const Records, LastId, Ok = DecodeShard(Old)
+        if not Ok then
+            return nil
+        end
+
+        for _, Record in Records do
+            if Record.Id == Id then
+                Found = true
+                Dirty, Refused = Change(Record.Scenes)
+                break
+            end
+        end
+
+        if not Dirty then
+            return nil
+        end
+
+        -- The metadata goes back with it: it is what says the shard is sealed.
+        return Compressor:CompressMetadatas(LastId, Records), UserIdsOf(KeyInfo), MetadataOf(KeyInfo)
+    end)
+
+    if Dirty and Success then
+        AfterWrite(self)
+    end
+
+    if Refused then
+        Logger:Warn(Refused)
+    end
+
+    return Found and Success, Dirty, Refused
+end
+
+const function __link<T>(self: Database<T>, Id: number, Guid: string): boolean
+    if not Handles.IsGuid(Guid) then
+        Logger:Warn(`{Guid} is not a scene Guid. Only Prism makes them; read one off Scene.Guid.`)
+        return false
+    end
+
+    const Ok, _, Refused = Relink(self, Id, function(Scenes: {string}): (boolean, string?)
+        if table.find(Scenes, Guid) then
+            return false, nil
+        end
+
+        if #Scenes >= MAX_LINKED_SCENES then
+            return false, `Record {Id} of {self.Key} already links {MAX_LINKED_SCENES} scenes.`
+        end
+
+        table.insert(Scenes, Guid)
+        return true, nil
+    end)
+
+    return Ok and not Refused
+end
+
+const function __unlink<T>(self: Database<T>, Id: number, Guid: string): boolean
+    if not Handles.IsGuid(Guid) then
+        Logger:Warn(`{Guid} is not a scene Guid.`)
+        return false
+    end
+
+    const Ok, Dirty = Relink(self, Id, function(Scenes: {string}): (boolean, string?)
+        const Position = table.find(Scenes, Guid)
+        if not Position then
+            return false, nil
+        end
+
+        table.remove(Scenes, Position)
+        return true, nil
+    end)
+
+    return Ok and Dirty
+end
+
 const function __refresh<T>(self: Database<T>)
     DropLocal(self)
     self.Manifest = nil
@@ -872,6 +969,8 @@ function Database.new<T>(Config: {
     db.Find = __find
     db.Edit = __edit
     db.Delete = __delete
+    db.Link = __link
+    db.Unlink = __unlink
     db.Refresh = __refresh
 
     return db :: any
