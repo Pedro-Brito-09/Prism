@@ -679,8 +679,8 @@ same session:
 | 1/30 | 7.2 s | 8.7 s | 134-137 | 0.54-0.61 s |
 | `math.huge` | 4.2-4.4 s | 5.1-5.5 s | 1 | 4.2-4.4 s |
 
-About 15-20% less at every budget, nearly all of it what a link used to
-build. Most of what is left is the engine's: cloning, parenting and writing
+About 15-20% less at every budget, most of it likely what a link used to
+build, which was about a fifth of a load's own work. Most of what is left is the engine's: cloning, parenting and writing
 each part.
 
 The longest frame is never shorter than reading the pack, which happens in one
