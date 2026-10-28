@@ -26,9 +26,13 @@ Read this before picking anything up. It is how every item under Done landed.
   client half. A server change the client should observe gets a fixture on the
   server — the existing ones are triggered by the client writing a marker
   (`"EvictPulse"`, `"UnregisterPulse"`, ...) on the editable fixture.
-  Before an item is ticked, insert `dist/PrismTests.rbxmx` into an empty place
-  and Play with one player; both suites end with a pass count. A fix lands with
-  a test that fails without it.
+  Before an item is ticked, run `node scripts/build.js`, insert
+  `dist/PrismTests.rbxmx` into an empty place and Play with one player; both
+  suites end with a pass count. A fix lands with a test that fails without it.
+- **A release is a tag.** `git tag v1.2.0 && git push origin v1.2.0` runs the
+  checks, builds both models and publishes them as that release. `dist/` is
+  not committed, so there is no model to forget to rebuild. Ask Pedro before
+  pushing a tag.
 - **Run the checks before syncing into Studio.** `scripts/analyze.sh` type
   checks every file and `node scripts/check-channels.js` checks that each
   channel is fired with the number of arguments it declares. Both fetch what
@@ -94,7 +98,7 @@ safety -- the tests use `Scene:Load()` without checking the `SceneInstance?` it
 returns. Pedro's call was no: it means a baseline dominated by noise. `src/` is checked either way; a typo in the tests
 shows up when they are run. Revisit if the suites start failing for reasons a
 checker would have caught. `default.project.json` is gone now that the models
-in `dist/` are the product, but `scripts/build.js` already knows the mapping
+`scripts/build.js` writes are the product, but `scripts/build.js` already knows the mapping
 from files to instances and could write `sourcemap.json` itself, so Rojo is no
 longer needed for it.
 
@@ -107,6 +111,23 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **Releases build the models; `dist/` is gone.** The models were
+      committed, and CI failed any push whose `dist/` did not match the
+      source. Three merges in a row changed `src/` without rebuilding, so
+      `main` shipped the old `Prism.rbxmx` while CI went red on every push.
+      Decided: build only in CI. `dist/` is deleted and ignored;
+      `node scripts/build.js` still writes it locally for Studio.
+
+      Pushing a `v*` tag runs `.github/workflows/release.yml`: the same
+      checks CI runs -- CI only runs on branches, so a tag would otherwise
+      skip them -- then the build, then `gh release create` with both models
+      attached and GitHub's generated notes. `gh` is on every runner, so no
+      third party action holds write access, and the workflow asks for
+      `contents: write` alone. CI's "Models are current" step became a build
+      and an upload, so a broken build still fails a push and every push's
+      models can be downloaded from its run. The README's install link points
+      at the latest release.
 
 - [x] **A record links the scenes it is about.** `db:Link(id, guid)` and
       `db:Unlink(id, guid)`, and `record.Scenes`, the Guids in link order. A

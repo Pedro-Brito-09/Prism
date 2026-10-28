@@ -52,8 +52,10 @@ an older one fails to parse the modules rather than failing at runtime.
 
 ### Installing
 
-Insert [`dist/Prism.rbxmx`](dist/Prism.rbxmx) into ReplicatedStorage: drag it
-into Studio, or right-click ReplicatedStorage → **Insert from File**. It is one
+Download `Prism.rbxmx` from the
+[latest release](https://github.com/Pedro-Brito-09/Prism/releases/latest) and
+insert it into ReplicatedStorage: drag it into Studio, or right-click
+ReplicatedStorage → **Insert from File**. It is one
 ModuleScript called `Prism`, with nothing to move and nothing to set. Require it
 from a server script and a client script; it resolves the server or client half
 of each subsystem for you.
@@ -66,8 +68,11 @@ It can live anywhere **both sides can see**; ReplicatedStorage is the usual
 place. To update, delete the old `Prism` and insert the new one.
 
 The source is `src/` (`init.luau` is the module itself), and
-`node scripts/build.js` rebuilds the models in `dist/` from it. CI fails a push
-that changes the source without rebuilding them.
+`node scripts/build.js` builds the models into `dist/` from it, for trying a
+change in Studio. `dist/` is not committed. Pushing a tag that starts with `v`
+— `git tag v1.2.0 && git push origin v1.2.0` — runs the checks, builds both
+models and publishes them as that release. Every push also keeps its built
+models as a CI artifact, on the run's page under **Actions**.
 
 Require it on the server before any client does: the client waits for the
 server to say it is ready, and warns if it never does.
@@ -1770,8 +1775,9 @@ it runs.
 
 The tests run the unit suite on the server and the replication, permissions,
 optimistic-edit, transaction and lifecycle suite on one client. Insert
-[`dist/PrismTests.rbxmx`](dist/PrismTests.rbxmx) into ReplicatedStorage in an
-empty place. It brings its own copy of Prism:
+`PrismTests.rbxmx` — from a release, or from `dist/` after
+`node scripts/build.js` — into ReplicatedStorage in an empty place. It brings
+its own copy of Prism:
 
 ```text
 ReplicatedStorage

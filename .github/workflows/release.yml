@@ -1,0 +1,47 @@
+name: Release
+
+# A version is a tag: git tag v1.2.0 && git push origin v1.2.0. CI runs on
+# branch pushes only, so the checks run again here -- a tag on code that does
+# not pass makes no release.
+on:
+  push:
+    tags: ["v*"]
+
+# Creating a release and attaching files to it, and nothing else.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and release
+    # Pinned for the same reason as CI: the toolchain is a prebuilt binary that
+    # has only ever run on this image.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache toolchain
+        uses: actions/cache@v6
+        with:
+          path: .tooling
+          key: tooling-luau-lsp-1.69.0-luau-0.738
+
+      - name: Type check
+        run: bash scripts/analyze.sh
+
+      - name: Channel arity
+        run: node scripts/check-channels.js
+
+      - name: Tests that do not need Roblox
+        run: bash scripts/test-pure.sh
+
+      - name: Build models
+        run: node scripts/build.js
+
+      # gh is on every GitHub runner, so no third party action is trusted with
+      # write access. The notes are GitHub's own list of what changed since the
+      # previous tag.
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/Prism.rbxmx dist/PrismTests.rbxmx --title "$GITHUB_REF_NAME" --generate-notes
