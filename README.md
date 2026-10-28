@@ -687,17 +687,19 @@ so `math.huge` sends them all in the same stall that built them.
 Measured on 2026-10-22 and 2026-10-23 on the same 34,918-object level (20,287
 blocks with parts, 14,631 attributes, 495,279 properties: 14.2 an object),
 loaded with the default budget on a Studio server with up to three players.
+The client column was measured again on 2026-10-28, with one player, after a
+client stopped keeping a value for every property that arrived.
 
 **Memory.** Lua heap, read with `gcinfo()` after allocating garbage until the
 collector had run, since an idle VM barely collects:
 
 | | Server | Each client |
 |---|---|---|
-| Prism required, nothing loaded | 3.4-4.4 MB | 7.4-8.1 MB |
-| Level loaded | 320 MB | 342 MB |
-| Per object | about 9.1 KB | about 9.6 KB |
-| Per property | about 640 bytes | about 690 bytes |
-| After unloading | 4.4 MB | 26-32 MB |
+| Prism required, nothing loaded | 3.4-4.4 MB | 7.4-9.9 MB |
+| Level loaded | 320 MB | 312 MB |
+| Per object | about 9.1 KB | about 8.7 KB |
+| Per property | about 640 bytes | about 610 bytes |
+| After unloading | 4.4 MB | 12.1-12.5 MB |
 
 Most of it is properties. A property holds only its `Value` and its
 `DefaultValue`, and reads everything else -- its name, type, constraints and
@@ -716,10 +718,16 @@ Building or loading the level allocates far more than it keeps: the server's
 heap read 451 MB of garbage straight after the level was built, and fell to
 4 MB once the collector ran.
 
-An unload gives the server everything back. A client keeps about 20 MB of
-Lua heap and the level's 8 MB of instances after the copy is gone, the same
-after two loads and unloads as after one, so it does not grow. What holds it
-has not been traced. The server holds on to anything still in a player's undo
+An unload gives the server everything back, and a client all but about
+2.5 MB of it. Every object, property and part of the level is collected on a
+client once the collector has caught up. What stays is room in the client's
+tables of objects by runtime id and of parts: a Luau table keeps that room
+after its keys are gone, weak or not, and the next load reuses it, so a
+second load and unload read the same. It used to keep about 20 MB, because
+the value the server last confirmed was kept for every property as it
+arrived: 495,279 entries and 16 MB of hash. It is kept now only for a
+property this client edits, and `Objects:CountConfirmed()` says how many
+that is. The server holds on to anything still in a player's undo
 history: after the edit bursts below, 44 MB of edited objects stayed until
 `History:Clear` let them go.
 
@@ -1595,7 +1603,7 @@ The sections above explain each one.
 | | `:Duplicate(object, copy?)`, `:DuplicateGroup(objects, copy?)` | S C (client: scenes it owns) |
 | | `:Lock(objects)`, `:Unlock(objects)`, `:GetLock(object)`, `:IsLocked(object)` | S C (server: `:Lock(objects, holder)`) |
 | | `:GetHolder(object)`, `.OnPlayerEdited(fn)` | S |
-| | `:OnLockChanged(fn)`, `:OnEdited(fn)`, `:FromInstance(instance)` | C |
+| | `:OnLockChanged(fn)`, `:OnEdited(fn)`, `:FromInstance(instance)`, `:CountConfirmed()` | C |
 | | `:OnAdded(fn)`, `:OnRemoved(fn)`, `.OnRetired(fn)` | S C |
 | | `.Suspend(object)`, `.Revive(object)`, `.Dispose(object)`, `.Retire(...)` | S C |
 | an object | `:Set(property, value, clientSided?)`, `:Get(property)`, `:GetProperty(property)`, `:OnChange(property, fn)`, `:Destroy()` | S C |

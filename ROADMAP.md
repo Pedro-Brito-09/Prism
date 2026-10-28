@@ -84,14 +84,6 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-- [ ] **What a client keeps after an unload.** After the real 34,918-object
-      level is unloaded, a client keeps about 20 MB of Lua heap and the level's 8 MB of
-      instances, even on a client that only watched the load and edited
-      nothing. It stays the same after a second load and unload, so it does
-      not grow, but something still holds the parts. The server gives
-      everything back. Find what holds them, and add a test that fails while
-      it does.
-
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
 safety -- the tests use `Scene:Load()` without checking the `SceneInstance?` it
@@ -111,6 +103,41 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **A client gives back what a level took.** After the real
+      34,918-object level was unloaded, a client kept about 20 MB of Lua heap
+      for good, edited or not. Nothing held the level: weak probes on every
+      object, property and part found all of them collected once the
+      collector had caught up, which an idle client takes a while to do, so
+      the parts thought held were not. What stayed was room in tables. A
+      Luau table keeps the room its keys took after they are gone, whether
+      they were removed or a weak table's collector cleared them, and only
+      gives it back when inserts make it rehash. `Objects/Client` kept the
+      value the server last confirmed for every property as it arrived:
+      495,279 entries, 2^19 slots of 32 bytes, 16 MB, on a level that was
+      gone.
+
+      `Confirmed` is now held only for a property this client edits, from
+      just before the edit shows, and every PropertyChanged keeps an entry
+      current once there is one. Until then the value on screen is the
+      server's -- a set and a preview are the only two things that show
+      anything else, and both hold first -- so a rollback reads the
+      property's own value when there is no entry. A nil value is held as a
+      sentinel, or it would read as no entry and be held again over whatever
+      is on screen by then. On the same level a client now reads 312 MB
+      loaded, not 342, and 12.1-12.5 MB after unloading against 9.9 MB
+      before the load, the same after a second load and unload.
+
+      Left as it is: the 2.5 MB still kept is room in the tables of objects
+      by runtime id and of parts, which scale with objects rather than
+      properties and are reused by the next load. `GetWorkspace` hands its
+      table to callers, so it cannot be swapped for a smaller one.
+      `Objects:CountConfirmed()` says how many properties are held. A client
+      test checks it is 0 once the fixtures have arrived and before anything
+      is edited; it read 20,035 without the fix. These suites ran in the
+      game's own place with its scripts parked, not in an empty one: client
+      75/75 and server 250/253, the same three failing in Compressor records
+      and Database without the change, which a client module cannot reach.
 
 - [x] **Releases build the models; `dist/` is gone.** The models were
       committed, and CI failed any push whose `dist/` did not match the
