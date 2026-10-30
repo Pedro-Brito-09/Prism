@@ -36,7 +36,15 @@ const function ToRegistryPayload(Registry: PropertyRegistry<any>): any
 
     local Copy
 
-    if Registry.Type == "CustomEnum" then
+    if Registry.Type == "Enum" then
+        -- A Roblox Enum cannot cross a remote as itself. Sent as is, the field
+        -- arrived missing, so the client checked every value against a nil enum
+        -- and refused it: an Enum property could not be written from a client at
+        -- all. The name crosses and is resolved back there, as a CustomEnum's
+        -- is. Whitelists and blacklists hold EnumItems, which do cross.
+        Copy = table.clone(Constraints)
+        Copy.Enum = if Constraints.Enum then tostring(Constraints.Enum) else nil
+    elseif Registry.Type == "CustomEnum" then
         Copy = table.clone(Constraints)
         Copy.CustomEnum = if Constraints.CustomEnum then Constraints.CustomEnum.Name else nil
     elseif Registry.Type == "Table" and Constraints.Of == "CustomEnum" and Constraints.Item then

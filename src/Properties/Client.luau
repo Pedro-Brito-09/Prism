@@ -84,6 +84,21 @@ const function Register(Payload: any)
         table.freeze(Payload.DefaultValue)
     end
 
+    -- The Enum the server sent by name, back to the Enum itself. Without this
+    -- the field is nil here and `EnumType ~= Constraints.Enum` is true of every
+    -- value, so the client refused them all before anything was sent.
+    const Own = Payload.Constraints
+    if Payload.Type == "Enum" and Own and type(Own.Enum) == "string" then
+        const Named = Own.Enum
+        const Resolved = (Enum :: any)[Named]
+        if Resolved then
+            Own.Enum = Resolved
+        else
+            Logger:Warn(`Property {Payload.Id} constrains to Enum.{Named}, which this client does not know. Its values will be refused.`)
+            Own.Enum = nil
+        end
+    end
+
     if Constraints and type(Constraints.CustomEnum) == "string" then
         const Name = Constraints.CustomEnum
         const Resolved = CustomEnum:GetEnum(Name)

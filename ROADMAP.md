@@ -105,6 +105,12 @@ rather than guessed.
 
 ## Done
 
+- [x] **The server's `Lock` and `Unlock` take one object.** The client and a
+      transaction take one object or a list; the server took only a list and
+      walked a lone object as a list of its own fields, which errored. The
+      README's own door example did exactly that. Both now take either, told
+      apart the way the client does, by `RuntimeId`.
+
 - [x] **Objects and properties hold only what is theirs.** Measured on the
       real 34,918-object level after links stopped being listeners. A
       table's slots come in powers of two, so a field over the line costs a
