@@ -432,11 +432,11 @@ refresh it when a hold comes or goes.
 A transaction can take and release them too, in the same list as the edit they
 are for — see Transactions.
 
-**The server can hold a lock itself.** On the server, `Objects:Lock(list,
-holder)` takes a Player, a user id, or any other value naming who holds it — a
-string like `"DoorAnimator"`, a module, a table. That lets a system keep players
-off an object while it works on it, such as animating a door open, with no
-player involved:
+**The server can hold a lock itself.** On the server, `Objects:Lock(objects,
+holder)` takes one object or a list, as on the client, and a Player, a user id,
+or any other value naming who holds it — a string like `"DoorAnimator"`, a
+module, a table. That lets a system keep players off an object while it works on
+it, such as animating a door open, with no player involved:
 
 ```lua
 -- server
@@ -456,9 +456,9 @@ leave somebody holding objects they can no longer touch, and nobody else able to
 touch them either.
 
 The server's own edits ignore locks. The server can take locks on a player's
-behalf with `Objects:Lock(list, player)`, which is refused the same way if
+behalf with `Objects:Lock(objects, player)`, which is refused the same way if
 someone else holds any of them, and release anyone's with
-`Objects:Unlock(list)`.
+`Objects:Unlock(objects)`.
 
 Who holds what is presence as well as a lock. It's told only to the players the
 object's scene admits, because who is editing a private level is part of the
