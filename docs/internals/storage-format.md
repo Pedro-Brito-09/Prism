@@ -74,7 +74,7 @@ are most of what is left.
 Reading that pack back takes about a third of a second. Loading it takes
 longer, and not because of the pack: building 34,918 objects and 20,287 parts
 takes about 4 seconds, which a load spreads over frames so the server keeps
-running. See [How fast a load goes](/internals/performance#how-fast-a-load-goes).
+running. See [Performance](/internals/performance#loading).
 
 Property ids are **never recycled**, because they are written into saved data —
 reusing one for a different property would silently reinterpret every record

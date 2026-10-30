@@ -85,6 +85,32 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
+- [ ] **Measure again what the performance page dropped.** The 2026-10-28 pass
+      re-measured loading and memory only, so `docs/internals/performance.md`
+      now shows only those. These were last measured on 2026-10-22 and
+      2026-10-23, before the work on links and objects, and came off the page
+      until they are run on the current code. All on the real 34,918-object
+      level, loaded with the default budget, with the results added to the
+      page:
+
+      - **Idle frames**, server and client, with the level loaded against
+        nothing loaded: average, p99 and heartbeat work.
+      - **A drag burst**, three players: one `Set` a frame each for 5 s, under
+        a role with `Rate = 120`. Server and client frame p99 and max, how many
+        edits landed, how many were refused, and whether every client held
+        them all.
+      - **A bulk burst**, three players: one 1,000-set transaction each,
+        together, under a role with a `Rate` high enough for it. Frame times,
+        commit round trip, and how long until every client held the others'
+        edits.
+      - **What the undo history holds** on the server after those bursts,
+        before and after `History:Clear`.
+      - **Garbage from a build**: the server's heap straight after the level
+        is built, and after the collector has run.
+      - **The parts' own memory** on a client, by the `Instances` memory tag.
+      - **A shared field read**: the time through `__index` against a field of
+        the table's own.
+
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
 safety -- the tests use `Scene:Load()` without checking the `SceneInstance?` it
