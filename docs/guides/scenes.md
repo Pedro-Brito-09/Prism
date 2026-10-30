@@ -76,7 +76,7 @@ left alone.
 
 A load builds objects for at most 1/120 of a second each frame, then waits for
 the next, so the server keeps running while a large level loads. That makes
-the load take about three times as long as the building does.
+the load take about four times as long as the building does.
 
 `Budget` changes that per load, in seconds a frame. A game that loads behind a
 loading screen can afford more, and `math.huge` builds everything without
@@ -95,7 +95,7 @@ them: they go out in chunks of 50, as many chunks a frame as the budget allows,
 so `math.huge` sends them all in the same stall that built them.
 
 The measured numbers, on a real 34,918-object level, are under
-[Performance](/internals/performance#how-fast-a-load-goes).
+[Performance](/internals/performance#loading).
 
 ## Placing a pack into a copy
 
