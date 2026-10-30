@@ -131,6 +131,22 @@ rather than guessed.
 
 ## Done
 
+- [ ] **Inserted scenes update from their source.** Awaiting its run in Studio.
+      Committing a copy of a scene updates every copy inserted from it, like
+      publishing a package. Each is compared with the new pack by local id, which
+      only works because an id is the same across commits and never handed out
+      twice: the same id is the same object, so values are set in place, what was
+      added is built, what went is destroyed, and references and untouched parts
+      hold. Rebuilding the copy was simpler and would have put every part through
+      a destroy. An id whose type changed is a removal and an add.
+
+      Whole, inside the commit, because a half updated copy is neither version.
+      Not measured on a large source. Copies of the scene's own stay as they are:
+      they may be somebody's work. A copy set aside catches up on `Revive`, by
+      `Applied`, which holds the pack it last read. Other servers read the latest
+      on load; pushing to a running server is not built, and would need
+      `MessagingService` and a fetch.
+
 - [ ] **Inserting scenes.** Awaiting its run in Studio. `Scene:Insert(source,
       origin)` puts a scene in another, any number of times, each at its own
       origin. Loading a copy loads a copy of the source per insert, inside it,

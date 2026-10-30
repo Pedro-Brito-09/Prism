@@ -1501,6 +1501,31 @@ T:Test("an address through an insert resolves here as it does there", function()
     end
 end)
 
+T:Test("an update to a source reaches its inserts here", function()
+    if not Editable or not DoorId or not TitleId then
+        T:Ok(false, "no editable fixture")
+        return
+    end
+
+    const Before = WaitFor("the inserted door", function()
+        return FindLiveObject(DoorId :: number, TitleId :: number, "FixtureHallDoor")
+    end)
+
+    if not Before then
+        T:Ok(false, "fixture never arrived")
+        return
+    end
+
+    -- The server edits and commits the source when the fixture carries the marker.
+    T:Ok(Editable:Set(TitleId, "UpdatePulse"), "asked the server to commit a change")
+
+    T:Eventually(function()
+        return Before:Get(TitleId) == "FixtureHallDoorUpdated"
+    end, 5, "the same object took the new value")
+
+    Editable:Set(TitleId, EDITABLE_MARKER)
+end)
+
 T:Test("a replicated address resolves through the scene it names", function()
     if not DoorId or not ButtonId or not TargetId or not TitleId then
         T:Ok(false, "not registered")
