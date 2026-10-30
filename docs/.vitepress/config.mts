@@ -64,6 +64,7 @@ export default defineConfig({
             { text: "Dragging", link: "/guides/dragging" },
             { text: "References", link: "/guides/references" },
             { text: "Local space", link: "/guides/local-space" },
+            { text: "Inserting a scene", link: "/guides/inserting" },
           ],
         },
         {

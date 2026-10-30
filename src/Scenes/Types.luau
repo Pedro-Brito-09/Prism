@@ -74,6 +74,22 @@ export type LoadOptions = {
     -- Where the copy's local space sits. The default leaves every value where
     -- it says it is. Only a link marked SceneSpace follows it; see Objects/Shared.
     Origin: CFrame?,
+
+    -- Server only. Where to fetch a scene this one inserts when nobody has
+    -- registered it, which it then is, under its Guid for a name. Source is which
+    -- of its packs, "Published" unless given. Left out, an insert whose scene is
+    -- not registered warns and is skipped.
+    Store: DataStore?,
+    Source: SceneSource?,
+}
+
+-- One scene inserted into another, as Scene:GetInserts lists them: which scene,
+-- and where it sits in the local space of the scene it is inserted in. Id is what
+-- an address names it by, and is never handed out twice.
+export type Insert = {
+    Id: number,
+    Guid: string,
+    Origin: CFrame,
 }
 
 -- One live copy of a scene. Load makes them and every one is equal: there is no
@@ -120,6 +136,13 @@ export type SceneInstance = {
 
     -- Server only, and nil at the default. Read it through GetOrigin.
     Origin: CFrame?,
+
+    -- Server only. The copies inserted here, by insert id, each an ordinary copy
+    -- of its source held read only: its objects are the source's to change. Host
+    -- and InsertId say the same from the other end, on a copy that is one.
+    Inserted: {[number]: SceneInstance},
+    Host: SceneInstance?,
+    InsertId: number?,
 
     -- The one crossing between the two identities, and deliberately scoped to a
     -- copy: a persistent id names an object here, but names one in every other
@@ -235,6 +258,15 @@ export type ServerScene = Scene & {
     -- long as the game keeps it. Returns the backup's id -- when it was taken,
     -- in unix milliseconds -- or nil when every attempt failed.
     Backup: (self: ServerScene, Store: DataStore) -> number?,
+
+    -- Another scene placed in this one, at an origin in this scene's local space,
+    -- as many times as you like. Takes effect in every live copy and goes straight
+    -- into the pack, without a commit. Returns the insert's id, or nil when the
+    -- scene is not registered here or this would put a scene inside itself.
+    Insert: (self: ServerScene, Source: ServerScene, Origin: CFrame?) -> number?,
+    RemoveInsert: (self: ServerScene, Id: number) -> boolean,
+    MoveInsert: (self: ServerScene, Id: number, Origin: CFrame) -> boolean,
+    GetInserts: (self: ServerScene) -> {Insert},
 
     -- Whether the scene is anybody's to see. A private scene is told to the
     -- players it admits and to nobody else; a public one is everybody's, and

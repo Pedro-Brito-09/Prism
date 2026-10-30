@@ -204,6 +204,10 @@ Network.InstanceMoved:Connect(function(Instance_: SceneInstanceId, Origin: CFram
     Objects.MoveInstance(Instance_, Origin)
 end)
 
+Network.InstanceHosted:Connect(function(Instance_: SceneInstanceId, Host: SceneInstanceId, Insert: number)
+    Objects.HostInstance(Instance_, Host, Insert)
+end)
+
 Network.InstancesReplayed:Connect(function(Instances: {SceneInstanceId}, Scenes_: {SceneIdentifier}, Opened: {boolean})
     for Index, Instance_ in Instances do
         AddInstance(Instance_, Scenes_[Index], Opened[Index] == true)

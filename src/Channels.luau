@@ -329,6 +329,14 @@ const Channels: {Channel} = {
         Name = "Scenes.InstanceMoved",
         Args = {Codecs.u32, Codecs.CFrame}, -- InstanceId, Origin
     },
+
+    {
+        -- A copy that is a scene inserted into another, after InstanceAdded and
+        -- ahead of its objects. A client needs the tree to read an address the
+        -- way the server does, so one room's button finds that room's hallway.
+        Name = "Scenes.InstanceHosted",
+        Args = {Codecs.u32, Codecs.u32, Codecs.Varint}, -- InstanceId, Host, Insert
+    },
 }
 
 const ById: {Channel} = Channels

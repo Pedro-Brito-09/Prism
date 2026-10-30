@@ -65,30 +65,52 @@ end
 -- nothing there, and a scene id means nothing on the next server, so it takes
 -- the Guid: the one name for a scene that outlives the session. Text, so it
 -- saves, compares and rides a packet as it is.
-function Handles.Address(Guid: string, Local: LocalId): string
+--
+-- Every scene inserted into another shares its source's Guid, so an object in
+-- one goes by the scene it was inserted into, and the insert ids down to it:
+-- "<Guid>/<Insert>:<LocalId>", a slash each for scenes inserted inside scenes.
+function Handles.Address(Guid: string, Local: LocalId, Path: {number}?): string
+    if Path then
+        return `{Guid}/{table.concat(Path, "/")}:{Local}`
+    end
+
     return `{Guid}:{Local}`
 end
 
--- The two halves of an address, or nil for anything that is not exactly what
--- Address would have written: a second spelling of one target would read as a
--- change of target. Local id zero is refused for the same reason, since "points
--- at nothing" already has a spelling.
-function Handles.ParseAddress(Text: any): (string?, LocalId?)
+-- The parts of an address, or nil for anything that is not exactly what Address
+-- would have written: a second spelling of one target would read as a change of
+-- target. Local id zero is refused for the same reason, since "points at
+-- nothing" already has a spelling. Path is nil for an address with no inserts.
+function Handles.ParseAddress(Text: any): (string?, LocalId?, {number}?)
     if type(Text) ~= "string" then
-        return nil, nil
+        return nil, nil, nil
     end
 
-    const Guid, Digits = string.match(Text, "^(.*):(%d+)$")
+    const Guid, Inserts, Digits = string.match(Text, "^([^/:]*)([/%d]*):(%d+)$")
     if not Handles.IsGuid(Guid) then
-        return nil, nil
+        return nil, nil, nil
     end
 
     const Local = tonumber(Digits)
-    if not Local or Local < 1 or Local > Handles.MAX_LOCAL or Handles.Address(Guid :: string, Local) ~= Text then
-        return nil, nil
+    if not Local or Local < 1 or Local > Handles.MAX_LOCAL then
+        return nil, nil, nil
     end
 
-    return Guid, Local
+    local Path: {number}? = nil
+    if Inserts ~= "" then
+        const Found = {}
+        for Id in string.gmatch(Inserts :: string, "/(%d+)") do
+            table.insert(Found, tonumber(Id) :: number)
+        end
+
+        Path = Found
+    end
+
+    if Handles.Address(Guid :: string, Local, Path) ~= Text then
+        return nil, nil, nil
+    end
+
+    return Guid, Local, Path
 end
 
 return Handles

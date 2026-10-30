@@ -79,6 +79,13 @@ const GuidScenes: {[string]: Types.SceneIdentifier} = {}
 -- flight, and everything in a copy it draws. See Objects/Shared.
 const Origins: {[Types.SceneInstanceId]: CFrame} = {}
 
+-- Which copy each inserted copy sits inside, both ways round, as the server says.
+-- An address through an insert starts from the copy reading it, so the client has
+-- to be able to walk the same tree. Ids only: nothing here needs the host to be
+-- a copy this player has been told of.
+const Hosts: {[Types.SceneInstanceId]: {Host: Types.SceneInstanceId, Insert: number}} = {}
+const Hosted: {[Types.SceneInstanceId]: {[number]: Types.SceneInstanceId}} = {}
+
 -- Every object appearing here and going, whichever way it came: replicated
 -- from the server, built in a scene this client owns, or drawn for a copy the
 -- server opened. UI used to poll GetWorkspace to notice any of it.
@@ -310,51 +317,72 @@ end
 -- side, so the index above is kept for every object the client holds however it
 -- arrived -- replicated, drawn, or built in a scene this client owns.
 --
--- An address says for itself where it points, and answers only for a scene with
--- one live copy here. See Objects/Shared.
-const function OnlyCopy(Scene: Types.SceneIdentifier): Types.SceneInstanceId?
-    local Only: Types.SceneInstanceId? = nil
-    for Live, Of in InstanceScene do
-        if Of ~= Scene then
-            continue
+-- What an address needs to know of the world, on this side. See Objects/Shared.
+const World: Shared.AddressWorld = {
+    SceneOfGuid = function(Guid: string): Types.SceneIdentifier?
+        return GuidScenes[Guid]
+    end,
+
+    -- A scene this client owns has no Guid, so nothing outside its own copies
+    -- can name it.
+    GuidOf = function(Scene: Types.SceneIdentifier): string?
+        return SceneGuids[Scene]
+    end,
+
+    SceneOf = function(Copy: Types.SceneInstanceId): Types.SceneIdentifier?
+        return InstanceScene[Copy]
+    end,
+
+    -- A scene's one copy of its own: a copy inserted into another scene is not
+    -- one, however many there are.
+    OnlyCopy = function(Scene: Types.SceneIdentifier): Types.SceneInstanceId?
+        local Only: Types.SceneInstanceId? = nil
+        for Live, Of in InstanceScene do
+            if Of ~= Scene or Hosts[Live] then
+                continue
+            end
+
+            if Only then
+                return nil
+            end
+
+            Only = Live
         end
 
-        if Only then
-            return nil
+        return Only
+    end,
+
+    HostOf = function(Copy: Types.SceneInstanceId): (Types.SceneInstanceId?, number?)
+        const Entry = Hosts[Copy]
+        if Entry then
+            return Entry.Host, Entry.Insert
         end
 
-        Only = Live
-    end
+        return nil, nil
+    end,
 
-    return Only
-end
+    Inserted = function(Copy: Types.SceneInstanceId, Insert: number): Types.SceneInstanceId?
+        const Inside = Hosted[Copy]
+        return if Inside then Inside[Insert] else nil
+    end,
+
+    Local = function(Copy: Types.SceneInstanceId, Id: number): Object?
+        const ByLocal = LocalIds[Copy]
+        return if ByLocal then ByLocal[Id] else nil
+    end,
+}
 
 const function Find(Copy: Types.SceneInstanceId, Local: number | string): Object?
     if type(Local) == "string" then
-        const Guid, Id = Handles.ParseAddress(Local)
-        const Scene = if Guid then GuidScenes[Guid] else nil
-        const Only = if Scene then OnlyCopy(Scene) else nil
-        const Held = if Only then LocalIds[Only] else nil
-        return if Held then Held[Id :: number] else nil
+        return Shared.Locate(World, Copy, Local)
     end
 
-    const ByLocal = LocalIds[Copy]
-    return if ByLocal then ByLocal[Local] else nil
+    return World.Local(Copy, Local)
 end
 
--- What to store to point at an object in another scene. A scene this client
--- owns has no Guid, so nothing outside its own copies can name it.
-const function Address(Target: Object): (string?, string?)
-    const Guid = SceneGuids[Target.Scene]
-    if not Guid then
-        return nil, `{Target.Name} is in a scene with no Guid, and only a saved scene can be pointed at from another`
-    end
-
-    if not OnlyCopy(Target.Scene) then
-        return nil, `{Target.Name} is in a scene loaded more than once, and a reference could not say which copy it means`
-    end
-
-    return Handles.Address(Guid, Target.LocalId), nil
+-- What to store to point at an object in another scene.
+const function Address(Target: Object, Copy: Types.SceneInstanceId): (string?, string?)
+    return Shared.AddressOf(World, Target, Copy)
 end
 
 -- Every optimistic set takes a ticket, and only the newest outstanding one for
@@ -1404,11 +1432,36 @@ function Objects.MoveInstance(Live: Types.SceneInstanceId, Origin: CFrame)
     end
 end
 
+-- Told by Scenes/Client when the server says a copy is inserted in another.
+function Objects.HostInstance(Live: Types.SceneInstanceId, Host: Types.SceneInstanceId, Insert: number)
+    Hosts[Live] = {Host = Host, Insert = Insert}
+
+    local Inside = Hosted[Host]
+    if not Inside then
+        Inside = {}
+        Hosted[Host] = Inside
+    end
+
+    Inside[Insert] = Live
+end
+
 function Objects.DropInstance(Live: Types.SceneInstanceId)
     InstanceScene[Live] = nil
     DrawInto[Live] = nil
     LocalCopies[Live] = nil
     Origins[Live] = nil
+
+    const Entry = Hosts[Live]
+    if Entry then
+        Hosts[Live] = nil
+
+        const Inside = Hosted[Entry.Host]
+        if Inside and Inside[Entry.Insert] == Live then
+            Inside[Entry.Insert] = nil
+        end
+    end
+
+    Hosted[Live] = nil
 
     const Held = ByInstance[Live]
     if not Held then
