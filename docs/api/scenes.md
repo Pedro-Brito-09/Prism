@@ -58,7 +58,7 @@ A `source` is `"Draft"` (the default), `"Published"`, `{Draft = version}`,
 |---|---|---|---|
 | `.Id`, `.Name` | S C | | `Id` is per server; don't store it |
 | `.Guid` | S | `string` | What it is saved under |
-| `:Load(parent?, options?)` | S C | copy? | `options` is `{Budget = seconds}` |
+| `:Load(parent?, options?)` | S C | copy? | `options` is `{Budget = seconds, Origin = cframe}` |
 | `:Unload()` | S C | | Every copy |
 | `:Serialize()` | S C | `buffer` | The committed pack, not what a copy holds |
 | `:GetInstances()` | S C | `{copy}` | |
@@ -90,7 +90,10 @@ A refused push's `reason` is `NoPushRight`, `TooLarge`, `TooManyObjects`, `BadNa
 | `.Opened` | `boolean` | |
 | `.Unknown` | `{any}` | Objects of unregistered types, kept for saving |
 | `:Create(type, values?)` | object? | |
-| `:Place(pack)` | `{object}?` | Into this copy, with new ids |
+| `:Place(pack, at?)` | `{object}?` | Into this copy, with new ids, moved by `at` |
+| `:GetOrigin()` | `CFrame` | Where its [local space](/guides/local-space) sits |
+| `:SetOrigin(cframe)` | `boolean` | Moves the whole copy; not an edit, not saved |
+| `:ToWorld(value)`, `:ToLocal(value)` | any | A `CFrame` or position, between local and world |
 | `:Find(localId)` | object? | The one crossing between [the two identities](/concepts/identity) |
 | `:GetObjects()` | `{object}` | |
 | `:Serialize()` | `buffer` | What this copy holds right now |

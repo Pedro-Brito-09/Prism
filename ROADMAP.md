@@ -131,6 +131,28 @@ rather than guessed.
 
 ## Done
 
+- [ ] **Local space.** Awaiting its run in Studio. Every copy has an origin, from
+      `Load`'s `Origin` or `SetOrigin`, and values stay relative to it. A link
+      marked `SceneSpace` writes `Origin * value` to its target. The flag is on
+      the link, not the property, because whether a target is world space is a
+      fact about the target, and one property can drive a part on one type and
+      an attachment on another. It was a constraint for about a day of design:
+      that could not say so.
+
+      Moving a copy changes no value and sends one packet, `Scenes.InstanceMoved`,
+      for what a client writes itself; parts the server built move as parts do.
+      It is not an edit and is never committed. `Get` is local and
+      `ToWorld`/`ToLocal` cross over, on a copy or by copy id through `Scenes`,
+      which is what a client has for a copy it did not make. Pivoting a `Model`
+      was the alternative and does not work: the next `Set` writes the part back
+      to where the value says.
+
+      An origin sits on a property only when it drives a marked link in a moved
+      copy, so a copy at the default costs nothing but a boolean read off the
+      shape on a set. A moved one costs a third slot on each such property, which
+      crosses a table doubling; not yet measured on the real level. `Place` takes
+      `At`, which does change values, since what it makes belongs to the copy.
+
 - [ ] **References into other scenes.** Awaiting its run in Studio. An `Object`
       property can point at an object in another scene, with no new property
       type: a target in the same copy is stored as a local id, as before, and

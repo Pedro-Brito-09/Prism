@@ -200,11 +200,13 @@ export type Transaction = {
     -- A saved pack placed into a live copy: one create per object in it, with
     -- the references inside the pack rewritten to name those creates. Checked
     -- as creates are, so placing a prefab needs create rights and nothing more,
-    -- and undone as one step because it is one transaction.
+    -- and undone as one step because it is one transaction. At moves what is
+    -- placed, as it does on a copy.
     Place: (
         self: Transaction,
         Pack: buffer,
-        Instance: ObjectTypes.SceneInstanceId?
+        Instance: ObjectTypes.SceneInstanceId?,
+        At: CFrame?
     ) -> Transaction,
 
     -- Whether the whole list applied, and the runtime ids of what it created, in

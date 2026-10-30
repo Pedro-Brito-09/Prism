@@ -21,7 +21,7 @@ is shown with a `?`.
 | `:Destroy(object)` | |
 | `:Duplicate(object, copyId?)` | A create holding the object's values as they are now |
 | `:DuplicateGroup(objects, copyId?)` | The same, with references between them remapped |
-| `:Place(pack, copyId?)` | One create per object in the pack |
+| `:Place(pack, copyId?, at?)` | One create per object in the pack, moved by `at` |
 | `:Lock(objects)`, `:Unlock(objects)` | One or a list, all or none |
 | `:Load(sceneId)` | Needs create rights on that scene |
 | `:Unload(copyId)` | Needs destroy rights. Withdraws the copy, so it can be undone |

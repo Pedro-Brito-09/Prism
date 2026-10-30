@@ -18,7 +18,7 @@
 | `Name` | `string` | |
 | `Properties` | `{id}` | Property ids |
 | `Instance` | `Instance?` | The template to clone |
-| `Links` | `{link}?` | `{Property, Type = "Property" \| "Attribute", Name, Descendant?}` |
+| `Links` | `{link}?` | `{Property, Type = "Property" \| "Attribute", Name, Descendant?, SceneSpace?}`; see [Local space](/guides/local-space) |
 | `Replicate` | `string?` | `"Everyone"` (default) or `"Admitted"` |
 
 ## Finding and making objects

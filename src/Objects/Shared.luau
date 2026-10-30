@@ -172,6 +172,13 @@ const ATTRIBUTE_TYPES: {[string]: true} = {
     Font = true,
 }
 
+-- Members holding a Vector3 that is not a position. The rest cannot be told
+-- apart from the type, so a Size marked SceneSpace is the marker's to get right.
+const NOT_SPATIAL: {[string]: true} = {
+    Orientation = true,
+    Rotation = true,
+}
+
 -- Links are checked once, against the template, when the type is registered on
 -- the server. A client receives them already checked, beside the template they
 -- were checked against. Every clone has the same class and the same members, so the answer never
@@ -272,7 +279,19 @@ const function ValidateLinks(
         end
 
         Seen[Link.Property] = true
-        table.insert(Valid, Link)
+
+        -- The flag goes and the link stays: it still drives what it drives, at
+        -- the value it holds. Multiplying anything else by a CFrame throws, and
+        -- an Orientation is three angles, which a CFrame would read as a point
+        -- and turn into nonsense without a word.
+        local Kept = Link
+        if Link.SceneSpace and ((Registry.Type ~= "CFrame" and Registry.Type ~= "Vector") or NOT_SPATIAL[Link.Name]) then
+            Logger:Warn(`Object {Name} marks its link to {Link.Name} as SceneSpace, which only a position or a CFrame can be. Flag dropped.`)
+            Kept = table.clone(Link)
+            Kept.SceneSpace = nil
+        end
+
+        table.insert(Valid, Kept)
     end
 
     return if #Valid > 0 then Valid else nil
@@ -293,11 +312,16 @@ end
 -- built and replicated does: a client wiring one used to write every value
 -- back onto it, the same value it held, 330,259 writes on a real level and a
 -- fifth of the time an arriving object took.
+--
+-- Origin is that of the copy holding the object, nil at the default. A SceneSpace
+-- link in a moved copy starts from the default when the object holds no value:
+-- left to the template, the part would sit where the template does.
 const function BuildLinks(
     Target: Instance?,
     Links: {Types.InstanceLinkRegistry}?,
     Props: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
-    Settled: boolean?
+    Settled: boolean?,
+    Origin: CFrame?
 ): {Types.InstanceLinkRegistry}?
     if not Links or not Target then
         return nil
@@ -319,16 +343,109 @@ const function BuildLinks(
             continue
         end
 
-        if not Settled and Prop.Value ~= nil and not pcall(PropertyShared.Drive, Link, Inst, Prop.Value) then
+        const InSpace = if Link.SceneSpace then Origin else nil
+        const Value = if InSpace and Prop.Value == nil then Prop.DefaultValue else Prop.Value
+        const Written = if InSpace and Value ~= nil then InSpace * Value else Value
+
+        if not Settled and Written ~= nil and not pcall(PropertyShared.Drive, Link, Inst, Written) then
             Logger:Warn(`Failed to apply link {Link.Name} on {Inst.ClassName}. Link dropped.`)
             continue
         end
 
         PropertyShared.Link(Prop, Link, Inst)
+        if InSpace then
+            Prop.Origin = InSpace
+        end
+
         Count += 1
     end
 
     return if Count > 0 then Links else nil
+end
+
+--=============================================================================
+-- Origins
+--=============================================================================
+
+-- Every copy has a local space, and its origin is where that space sits in the
+-- world. Values are written, read and saved relative to it, and only a SceneSpace
+-- link ever sees the world: Origin * value, on the way to the instance. So a
+-- pack holds no positions of any copy in particular, two copies of one room can
+-- stand apart, and moving a whole copy changes no object's value and sends
+-- nothing per object.
+--
+-- Pivoting a Model of your own moves the parts and not the values, so the next
+-- set writes the part straight back to where the value says. This is the same
+-- move with the value on its side.
+--
+-- Nil stands for the default, in the properties and on the copy alike, so a copy
+-- that is never moved reads nothing extra and holds nothing extra.
+
+-- The origin to keep for one asked for: nil for the default, which it is the
+-- same as.
+const function NormalOrigin(Origin: CFrame?): CFrame?
+    return if Origin == CFrame.identity then nil else Origin
+end
+
+-- The origin a load asked for, or the default. A wrong one is said rather than
+-- obeyed, like a wrong Budget.
+const function OriginOf(Options: any?): CFrame?
+    const Origin = Options and Options.Origin
+    if Origin == nil then
+        return nil
+    end
+
+    if typeof(Origin) ~= "CFrame" then
+        Logger:Warn(`A load's Origin is a CFrame; got a {typeof(Origin)}. Using the default.`)
+        return nil
+    end
+
+    return NormalOrigin(Origin)
+end
+
+-- Moves one object's SceneSpace links to a new origin. Nothing else about the
+-- object changes, which is why nothing about it is sent.
+const function ApplyOrigin(Obj: Types.Object, Origin: CFrame?)
+    const Links = Obj.Links
+    if not Links then
+        return
+    end
+
+    for _, Link in Links do
+        if not Link.SceneSpace then
+            continue
+        end
+
+        const Prop = Obj.Properties[Link.Property]
+        if Prop and Prop.Link == Link then
+            PropertyShared.SetOrigin(Prop, Origin)
+        end
+    end
+end
+
+-- A saved object's values moved by At, for a pack placed somewhere of its own.
+-- Written into the table it is given, which is the placing path's own. The
+-- default stands in for a value the pack left out, since that is the value the
+-- object would otherwise take, wherever it was placed.
+const function Shift(Registry: any, Values: {[PropertyTypes.PropertyIdentifier]: any}, At: CFrame?)
+    if not At or not Registry.Links then
+        return
+    end
+
+    for _, Link in Registry.Links do
+        if not Link.SceneSpace then
+            continue
+        end
+
+        const Property = Properties:GetRegistry(Link.Property)
+        const Held = if Values[Link.Property] ~= nil
+            then Values[Link.Property]
+            else if Property then Property.DefaultValue else nil
+
+        if Held ~= nil then
+            Values[Link.Property] = At * Held
+        end
+    end
 end
 
 --=============================================================================
@@ -763,6 +880,10 @@ return {
     ValidateLinks = ValidateLinks,
     BuildLinks = BuildLinks,
     ReleaseLinks = ReleaseLinks,
+    NormalOrigin = NormalOrigin,
+    OriginOf = OriginOf,
+    ApplyOrigin = ApplyOrigin,
+    Shift = Shift,
     Snapshot = Snapshot,
     Leftovers = Leftovers,
 

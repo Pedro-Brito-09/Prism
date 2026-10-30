@@ -188,6 +188,13 @@ export type Section = {
 export type Drive = {
     Type: "Property" | "Attribute",
     Name: string,
+
+    -- The target wants a world value, so what it is written is the value placed
+    -- by the origin of the copy holding the object. On the link and not on the
+    -- property, because whether a member is world space is a fact about the
+    -- member: one property can drive a part's CFrame on one type and an
+    -- attachment's, already relative to its part, on another.
+    SceneSpace: boolean?,
 }
 
 export type Property<T = PropertyType> = {
@@ -209,6 +216,11 @@ export type Property<T = PropertyType> = {
     -- rather than through a listener; see Properties/Shared.
     Drives: Instance?,
     Link: Drive?,
+
+    -- The origin of the copy holding the object, on a property driving a
+    -- SceneSpace link in a copy that has been moved, and on no other: a copy
+    -- at the default origin pays nothing for the feature. See Objects/Shared.
+    Origin: CFrame?,
 
     -- Returns (Accepted, Changed). Accepted is false when the value failed
     -- validation; Changed is false when it was accepted but equal to the

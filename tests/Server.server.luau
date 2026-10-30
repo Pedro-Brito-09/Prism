@@ -5115,6 +5115,165 @@ end)
 -- Holds and copies as operations
 --=============================================================================
 
+T:Describe("Local space")
+
+const BlockTemplate = Instance.new("Part")
+BlockTemplate.Name = "PrismBlockTemplate"
+BlockTemplate.Anchored = true
+BlockTemplate.Parent = ReplicatedStorage
+
+const SpotId = Properties:Register({
+    Name = "TestSpot",
+    Type = "CFrame",
+    DefaultValue = CFrame.new(0, 7, 0),
+}) :: number
+
+const BulkId = Properties:Register({
+    Name = "TestBulk",
+    Type = "Vector",
+    DefaultValue = Vector3.new(2, 2, 2),
+}) :: number
+
+-- Registered at load, so the client receives it and checks a moved copy as well.
+const BlockId = Objects:Register({
+    Name = "TestBlock",
+    Properties = {TitleId, SpotId, BulkId},
+    Instance = BlockTemplate,
+    Links = {
+        {Property = SpotId, Type = "Property", Name = "CFrame", SceneSpace = true},
+        {Property = BulkId, Type = "Property", Name = "Size"},
+    },
+}) :: number
+
+const FAR = CFrame.new(5000, 0, 0)
+
+T:Test("an origin moves the part and not the value", function()
+    const Scene = Scenes.new({Name = "SpaceMoved"})
+    const Copy = Scene:Load(nil, {Origin = FAR}) :: any
+
+    const Block = Copy:Create(BlockId, {[SpotId] = CFrame.new(10, 0, 0), [BulkId] = Vector3.new(4, 4, 4)})
+
+    T:Eq(Block:Get(SpotId), CFrame.new(10, 0, 0), "Get stays relative to the copy")
+    T:Eq(Block.Instance.CFrame, CFrame.new(5010, 0, 0), "the part lands in the world")
+    T:Eq(Block.Instance.Size, Vector3.new(4, 4, 4), "a link not marked SceneSpace is left alone")
+
+    Block:Set(SpotId, CFrame.new(20, 0, 0))
+    T:Eq(Block.Instance.CFrame, CFrame.new(5020, 0, 0), "a later set lands there too")
+
+    Scene:Destroy()
+end)
+
+T:Test("a value left at its default is placed as well", function()
+    const Scene = Scenes.new({Name = "SpaceDefault"})
+    const Copy = Scene:Load(nil, {Origin = FAR}) :: any
+
+    const Block = Copy:Create(BlockId)
+    T:Eq(Block.Instance.CFrame, CFrame.new(5000, 7, 0), "not where the template sits")
+
+    Scene:Destroy()
+end)
+
+T:Test("two copies of a scene stand apart", function()
+    const Scene = Scenes.new({Name = "SpaceTwice"})
+    const First = Scene:Load() :: any
+    const Block = First:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
+    First:Commit()
+
+    const Second = Scene:Load(nil, {Origin = FAR}) :: any
+    const Other = Second:Find(Block.LocalId)
+
+    T:Eq(Block.Instance.CFrame, CFrame.new(1, 0, 0), "the first stays where it is")
+    T:Eq(Other.Instance.CFrame, CFrame.new(5001, 0, 0), "the second is far away")
+    T:Eq(Other:Get(SpotId), Block:Get(SpotId), "and both hold the same value")
+
+    Scene:Destroy()
+end)
+
+T:Test("moving a copy changes no value and is not saved", function()
+    const Scene = Scenes.new({Name = "SpaceMoving"})
+    const Copy = Scene:Load() :: any
+    const Block = Copy:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
+    const Before = buffer.tostring(Copy:Serialize())
+
+    T:Ok(Copy:SetOrigin(FAR), "moved")
+    T:Eq(Copy:GetOrigin(), FAR, "and it says so")
+    T:Eq(Block.Instance.CFrame, CFrame.new(5001, 0, 0), "the part went with it")
+    T:Eq(Block:Get(SpotId), CFrame.new(1, 0, 0), "the value did not")
+    T:Eq(buffer.tostring(Copy:Serialize()), Before, "the pack is what it was")
+
+    Copy:Commit()
+    const Back = Scene:Load() :: any
+    T:Eq(Back:Find(Block.LocalId).Instance.CFrame, CFrame.new(1, 0, 0), "a new copy starts at the default")
+
+    T:Ok(Copy:SetOrigin(CFrame.identity), "and back")
+    T:Eq(Block.Instance.CFrame, CFrame.new(1, 0, 0), "the part returned")
+    T:Ok(not Copy:SetOrigin(5 :: any), "something that is not a CFrame is refused")
+
+    Scene:Destroy()
+end)
+
+T:Test("a copy set aside takes a new origin when it comes back", function()
+    const Scene = Scenes.new({Name = "SpaceAside"})
+    const Copy = Scene:Load() :: any
+    const Block = Copy:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
+
+    Copy:Suspend()
+    T:Ok(Copy:SetOrigin(FAR), "moved while away")
+    Copy:Revive()
+
+    T:Eq(Block.Instance.CFrame, CFrame.new(5001, 0, 0), "and it came back there")
+    Scene:Destroy()
+end)
+
+T:Test("a value crosses between local space and the world", function()
+    const Scene = Scenes.new({Name = "SpaceCrossing"})
+    const Copy = Scene:Load(nil, {Origin = FAR}) :: any
+
+    T:Eq(Copy:ToWorld(CFrame.new(1, 0, 0)), CFrame.new(5001, 0, 0), "a CFrame")
+    T:Eq(Copy:ToLocal(CFrame.new(5001, 0, 0)), CFrame.new(1, 0, 0), "and back")
+    T:Eq(Copy:ToWorld(Vector3.new(1, 0, 0)), Vector3.new(5001, 0, 0), "a position")
+    T:Eq(Scenes:ToLocal(Copy.Id, Vector3.new(5001, 0, 0)), Vector3.new(1, 0, 0), "and by copy id")
+    T:Eq(Scenes:GetOrigin(Copy.Id), FAR, "the origin by copy id")
+
+    Scene:Destroy()
+end)
+
+T:Test("placing with At moves what is placed", function()
+    const Source = Scenes.new({Name = "SpacePlaceSource"}) :: any
+    const SourceCopy = Source:Load()
+    const Held = SourceCopy:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
+    SourceCopy:Create(BlockId)
+
+    const Pack = SourceCopy:Serialize()
+    const Scene = Scenes.new({Name = "SpacePlaceTarget"})
+    const Copy = Scene:Load() :: any
+
+    const Made = Copy:Place(Pack, CFrame.new(100, 0, 0)) :: any
+    T:Eq(Made[1]:Get(SpotId), CFrame.new(101, 0, 0), "a value it held")
+    T:Eq(Made[2]:Get(SpotId), CFrame.new(100, 7, 0), "and one it left at the default")
+    T:Eq(Held:Get(SpotId), CFrame.new(1, 0, 0), "the original is untouched")
+
+    Source:Destroy()
+    Scene:Destroy()
+end)
+
+T:Test("SceneSpace is refused on what cannot be placed", function()
+    const Id = Objects:Register({
+        Name = "TestBadSpace",
+        Properties = {TitleId, BulkId},
+        Instance = BlockTemplate,
+        Links = {
+            {Property = TitleId, Type = "Attribute", Name = "Title", SceneSpace = true},
+            {Property = BulkId, Type = "Property", Name = "Orientation", SceneSpace = true},
+        },
+    }) :: number
+
+    const Links = Objects:GetRegistry(Id).Links
+    T:Eq(#Links, 2, "both links stay")
+    T:Eq(Links[1].SceneSpace, nil, "text is not a position")
+    T:Eq(Links[2].SceneSpace, nil, "and angles are not a position")
+end)
+
 T:Describe("Holds and copies as operations")
 
 T:Test("a transaction takes holds, edits, and lets go", function()
@@ -5385,6 +5544,13 @@ ReferenceButton:Set(TargetId, ReferenceDoor)
 const HiddenCopy = Scenes.new({Name = "FixtureHidden", Private = true, Admitted = {1}}):Load()
 const HiddenScenery = HiddenCopy:Create(BareId, {[TitleId] = "FixtureHiddenScenery"})
 HiddenCopy:Create(PrivateId, {[TitleId] = "FixtureHiddenPrivate"})
+
+-- A copy that is not at the default origin, for the client to place what it
+-- writes itself by.
+Scenes.new({Name = "FixtureMoved"}):Load(nil, {Origin = CFrame.new(1000, 0, 0)}):Create(BlockId, {
+    [TitleId] = "FixtureMovedBlock",
+    [SpotId] = CFrame.new(1, 0, 0),
+})
 
 -- Two buttons reaching out of their scene. The client resolves the first by the
 -- Guid it was told along with the public scene's name. It was never told the

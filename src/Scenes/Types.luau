@@ -70,6 +70,10 @@ export type LoadOptions = {
     -- loading screen -- can give more, and math.huge builds everything without
     -- waiting at all.
     Budget: number?,
+
+    -- Where the copy's local space sits. The default leaves every value where
+    -- it says it is. Only a link marked SceneSpace follows it; see Objects/Shared.
+    Origin: CFrame?,
 }
 
 -- One live copy of a scene. Load makes them and every one is equal: there is no
@@ -114,6 +118,9 @@ export type SceneInstance = {
     -- into PlayerGui or into a Model of its own goes back there.
     Parent: Instance?,
 
+    -- Server only, and nil at the default. Read it through GetOrigin.
+    Origin: CFrame?,
+
     -- The one crossing between the two identities, and deliberately scoped to a
     -- copy: a persistent id names an object here, but names one in every other
     -- live copy of the same scene too.
@@ -136,8 +143,9 @@ export type SceneInstance = {
     -- this copy's scene mints, and the references inside the pack are remapped
     -- onto them; a reference pointing at anything the pack did not carry is
     -- dropped, because the id it holds means nothing here. Returns what it made,
-    -- or nil if the pack could not be read.
-    Place: (self: SceneInstance, Pack: buffer) -> {ObjectTypes.Object}?,
+    -- or nil if the pack could not be read. At moves what is placed, within this
+    -- copy's local space, through every SceneSpace link's value.
+    Place: (self: SceneInstance, Pack: buffer, At: CFrame?) -> {ObjectTypes.Object}?,
 
     Find: (self: SceneInstance, Local: Handles.LocalId) -> ObjectTypes.Object?,
     GetObjects: (self: SceneInstance) -> {ObjectTypes.Object},
@@ -149,6 +157,15 @@ export type SceneInstance = {
     -- says it is. Explicit rather than a side effect of unloading, because with
     -- more than one copy live, "save on unload" has to pick one and cannot.
     Commit: (self: SceneInstance) -> (),
+
+    -- The copy's local space. Moving it moves every SceneSpace link and changes
+    -- no value, so it is neither an edit nor anything a commit writes.
+    GetOrigin: (self: SceneInstance) -> CFrame,
+    SetOrigin: (self: SceneInstance, Origin: CFrame) -> boolean,
+
+    -- A CFrame or a position, between this copy's local space and the world.
+    ToWorld: (self: SceneInstance, Value: any) -> any,
+    ToLocal: (self: SceneInstance, Value: any) -> any,
 
     Unload: (self: SceneInstance) -> (),
 

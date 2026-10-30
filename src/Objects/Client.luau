@@ -73,6 +73,12 @@ const LocalScenes: {[Types.SceneIdentifier]: true} = {}
 const SceneGuids: {[Types.SceneIdentifier]: string} = {}
 const GuidScenes: {[string]: Types.SceneIdentifier} = {}
 
+-- Where each moved copy's local space sits, for every copy this client has been
+-- told of or owns. A part the server built holds its world position already;
+-- this is for what the client writes itself, which is a preview, a set in
+-- flight, and everything in a copy it draws. See Objects/Shared.
+const Origins: {[Types.SceneInstanceId]: CFrame} = {}
+
 -- Every object appearing here and going, whichever way it came: replicated
 -- from the server, built in a scene this client owns, or drawn for a copy the
 -- server opened. UI used to poll GetWorkspace to notice any of it.
@@ -851,7 +857,7 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Live: any, Restored: boolean
 
     -- Wired after the values are in place, so a link starts at the object's own
     -- value rather than at the registry default and then being corrected.
-    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties)
+    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties, nil, Origins[Live.Id])
 
     -- Into the copy holding it, exactly as on the server: two copies of one
     -- room have to be able to sit in two places, and the copy's folder is what
@@ -1183,12 +1189,12 @@ const function WireServerPart(Obj: any)
     -- The part holds the server's values already. Only a property this client
     -- is showing something else on -- a set in flight, or a preview, when the
     -- part streams back in -- has anything to write.
-    Obj.Links = Shared.BuildLinks(Obj.Instance, Registry.Links, Obj.Properties, true)
+    Obj.Links = Shared.BuildLinks(Obj.Instance, Registry.Links, Obj.Properties, true, Origins[Obj.InstanceId])
 
     for _, Prop in Obj.Properties do
         const Inst = Prop.Drives
         if Inst and (Pending[Prop] or Previewing[Prop]) then
-            pcall(PropertyShared.Drive, Prop.Link, Inst, Prop.Value)
+            pcall(PropertyShared.Drive, Prop.Link, Inst, PropertyShared.Placed(Prop, Prop.Link :: any, Prop.Value))
         end
     end
 end
@@ -1378,10 +1384,31 @@ function Objects.DisposeInstance(Held: {Object})
     end
 end
 
+-- Where a copy's local space sits. Nil is the default, as everywhere.
+function Objects:GetOrigin(Live: Types.SceneInstanceId): CFrame
+    return Origins[Live] or CFrame.identity
+end
+
+-- Told by Scenes/Client when the server says a copy moved, and by a copy this
+-- client owns when it does. What the client has already drawn or is showing
+-- moves with it, and a part the server built ends up where it was going anyway.
+function Objects.MoveInstance(Live: Types.SceneInstanceId, Origin: CFrame)
+    const Normal = Shared.NormalOrigin(Origin)
+    Origins[Live] = Normal
+
+    const Held = ByInstance[Live]
+    if Held then
+        for _, Obj in Held do
+            Shared.ApplyOrigin(Obj, Normal)
+        end
+    end
+end
+
 function Objects.DropInstance(Live: Types.SceneInstanceId)
     InstanceScene[Live] = nil
     DrawInto[Live] = nil
     LocalCopies[Live] = nil
+    Origins[Live] = nil
 
     const Held = ByInstance[Live]
     if not Held then
@@ -1506,7 +1533,7 @@ const function AddObject(
     -- server: an optimistic set, or a ClientSided preview.
     if Into then
         Obj.Drawn = true
-        Obj.Links = Shared.BuildLinks(Resolved, Registry.Links, Obj.Properties)
+        Obj.Links = Shared.BuildLinks(Resolved, Registry.Links, Obj.Properties, nil, Origins[Obj.InstanceId])
 
         if Resolved then
             Resolved.Parent = Into

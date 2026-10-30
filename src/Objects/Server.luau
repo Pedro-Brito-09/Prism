@@ -790,7 +790,7 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
 
     -- Wired after the values are in place, so a link starts at the object's own
     -- value rather than at the registry default and then being corrected.
-    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties)
+    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties, nil, Instance_.Origin)
 
     -- Into the copy holding it, and nowhere else. Which copy rather than which
     -- scene, because two copies of one room have to be able to sit in two

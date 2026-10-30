@@ -276,7 +276,8 @@ function Shared.factory(
     const function __place(
         self: Transaction,
         Pack: buffer,
-        Live: ObjectTypes.SceneInstanceId?
+        Live: ObjectTypes.SceneInstanceId?,
+        At: CFrame?
     ): Transaction
         const Ok, _, Decompressed = pcall(function()
             return Compressor:DecompressScene(Pack)
@@ -293,6 +294,11 @@ function Shared.factory(
 
         for _, Saved in Decompressed :: {any} do
             const Values, References = ObjectShared.SplitReferences(Saved.Properties)
+
+            const Registry = Objects:GetRegistry(Saved.Registry)
+            if Registry then
+                ObjectShared.Shift(Registry, Values, At)
+            end
 
             const Before = #self.Operations
             __create(self, Saved.Registry, Values, Live)

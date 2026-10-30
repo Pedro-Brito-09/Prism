@@ -64,9 +64,10 @@ five copies and they cannot share a folder.
 
 It is a `Folder`, and that is deliberate: a folder can be parented anywhere, so
 a scene made of `ScreenGui` objects loads into `PlayerGui`, a scene of
-atmospheres into `Lighting`, and a scene you want to move as a unit into a
-`Model` of your own that you pivot. Prism never needs to know what class your
-objects are or where that class belongs.
+atmospheres into `Lighting`, and a scene you want to move as a unit anywhere you
+like, though [an origin](/guides/local-space) is how to do that while its objects
+can still change. Prism never needs to know what class your objects are or where
+that class belongs.
 
 Unloading a copy destroys its folder and everything in it. A default scene
 folder goes with the last of its copies; a parent you supplied is yours and is
