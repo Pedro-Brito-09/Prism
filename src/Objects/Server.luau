@@ -1313,11 +1313,17 @@ const function SameHolder(Held: {UserId: number?, Holder: any}, Who: any): boole
     return Held.Holder == Who
 end
 
-function Objects:Lock(List: {Object}, Who: any): boolean
+-- One object or a list, as on the client and in a transaction.
+const function Named(Refs: Object | {Object}): {Object}
+    return if (Refs :: any).RuntimeId ~= nil then {Refs :: Object} else Refs :: {Object}
+end
+
+function Objects:Lock(Refs: Object | {Object}, Who: any): boolean
     if Who == nil then
         return false
     end
 
+    const List = Named(Refs)
     for _, Obj in List do
         const Held = Locks[Obj.RuntimeId]
         if Obj.Destroyed or (Held and not SameHolder(Held, Who)) then
@@ -1337,11 +1343,11 @@ end
 -- Releases what Who holds among the objects named. With no Who it is the
 -- server releasing anyone's. Answers false if any named object is held by
 -- someone else, which stays theirs; the rest are released regardless.
-function Objects:Unlock(List: {Object}, Who: any?): boolean
+function Objects:Unlock(Refs: Object | {Object}, Who: any?): boolean
     const Released = {}
     local All = true
 
-    for _, Obj in List do
+    for _, Obj in Named(Refs) do
         const Held = Locks[Obj.RuntimeId]
         if not Held then
             continue

@@ -2865,6 +2865,32 @@ T:Test("a hold does not need a player", function()
     Scene:Destroy()
 end)
 
+T:Test("a hold takes one object as well as a list", function()
+    const Scene = Scenes.new({Name = "HolderOneRoom"}) :: any
+    const Copy = Scene:Load()
+    const Door = Copy:Create(BareId)
+
+    -- The client and a transaction both take either. On the server one object
+    -- used to be walked as a list of its own fields.
+    T:Ok(Objects:Lock(Door, "Animator"), "held without a list around it")
+    T:Eq(Objects:GetHolder(Door), "Animator", "by what was named")
+    T:Ok(not Objects:Lock(Door, "Other"), "refused while someone else has it")
+
+    T:Ok(not Objects:Unlock(Door, "Other"), "someone else cannot release it")
+    T:Ok(Objects:IsLocked(Door), "which stays held")
+    T:Ok(Objects:Unlock(Door, "Animator"), "released without a list around it")
+    T:Ok(not Objects:IsLocked(Door), "free")
+
+    Objects:Lock(Door, "Animator")
+    T:Ok(Objects:Unlock(Door), "the server can release anyone's")
+    T:Ok(not Objects:IsLocked(Door), "free again")
+
+    Door:Destroy()
+    T:Ok(not Objects:Lock(Door, "Animator"), "an object that is gone cannot be held")
+
+    Scene:Destroy()
+end)
+
 T:Test("a hold by a user id and by the player it names are one hold", function()
     const Scene = Scenes.new({Name = "HolderIdRoom"}) :: any
     const Copy = Scene:Load()
