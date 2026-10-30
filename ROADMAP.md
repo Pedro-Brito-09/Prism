@@ -131,6 +131,28 @@ rather than guessed.
 
 ## Done
 
+- [ ] **References into other scenes.** Awaiting its run in Studio. An `Object`
+      property can point at an object in another scene, with no new property
+      type: a target in the same copy is stored as a local id, as before, and
+      one elsewhere as an address, `<Guid>:<LocalId>` as text. The Guid because
+      a local id means nothing outside its copy and a scene id nothing on the
+      next server. The two share the `Object` type id on different wire
+      shapes, so the tag tells them apart and packs without an address are
+      unchanged.
+
+      An address is looked up on every read and answers only when its scene has
+      exactly one live copy. Pedro's call over taking the oldest copy: a scene
+      loaded twice reads as `nil` with the address kept, and `Set` with an object
+      in one is refused, which is the refusal `Objects.new` already makes and
+      the reason another copy of the holder's own scene is still refused.
+      `Duplicate`, `DuplicateGroup` and `Place` leave an address alone, and a
+      placing transaction carries it as a plain value rather than a create to
+      fill in. A client resolves against the Guids it has been told, so a private
+      scene it isn't admitted to reads as `nil`, though the value still shows
+      that player the Guid. Its own scenes have no Guid and can't be targets. A
+      scene remade by `fromBuffer` or a push has a new Guid, and references to
+      the original don't follow it.
+
 - [x] **The server's `Lock` and `Unlock` take one object.** The client and a
       transaction take one object or a list; the server took only a list and
       walked a lone object as a list of its own fields, which errored. The

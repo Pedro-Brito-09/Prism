@@ -203,11 +203,14 @@ function Shared.factory(
                 -- say what they are.
                 if Prop.Type == "Table" then
                     const Names = table.create(#Value) :: {number}
-                    const Kept = table.create(#Value) :: {number}
+                    const Kept = table.create(#Value) :: {any}
                     local Any = false
 
                     for Index, Item in Value do
-                        const Pointed = Objects:Resolve(Source.InstanceId, Item)
+                        -- An address keeps pointing where it did, even at a
+                        -- member of the group: its copy is in another scene,
+                        -- and a local id would mean nothing here.
+                        const Pointed = if type(Item) == "number" then Objects:Resolve(Source.InstanceId, Item) else nil
                         const Instead = if Pointed then MadeBy[Pointed] else nil
 
                         Names[Index] = Instead or 0
@@ -229,7 +232,7 @@ function Shared.factory(
 
                 -- Read against the original's copy, which is where the id it
                 -- holds means what it was written to mean.
-                const Pointed = Objects:Resolve(Source.InstanceId, Value)
+                const Pointed = if type(Value) == "number" then Objects:Resolve(Source.InstanceId, Value) else nil
                 if not Pointed then
                     continue
                 end
@@ -268,7 +271,8 @@ function Shared.factory(
     -- written -- so each one names the operation that makes its target instead,
     -- and the far end fills in the id once the creates have run. A reference to
     -- something the pack did not carry is dropped: the id would mean nothing
-    -- there, or worse, would mean something.
+    -- there, or worse, would mean something. An address is neither, and goes
+    -- along as a plain value.
     const function __place(
         self: Transaction,
         Pack: buffer,
@@ -310,15 +314,31 @@ function Shared.factory(
 
             for PropertyId, Saved in Entry.References do
                 -- A list keeps only the items whose target the pack carried,
-                -- each naming the create that makes it.
+                -- each naming the create that makes it, and its addresses. An
+                -- entry of zero keeps what the value holds in that position,
+                -- as a duplicated list's does.
                 local Names: any = nil
                 if type(Saved) == "table" then
                     Names = {}
+                    const Kept = {}
+                    local Any = false
+
                     for _, Item in Saved do
-                        if Placed[Item] then
+                        if type(Item) == "string" then
+                            table.insert(Names, 0)
+                            table.insert(Kept, Item)
+                            Any = true
+                        elseif Placed[Item] then
                             table.insert(Names, Placed[Item])
+                            table.insert(Kept, ObjectShared.NO_TARGET)
                         end
                     end
+
+                    if Any then
+                        Operation.Properties[PropertyId] = table.freeze(Kept)
+                    end
+                elseif type(Saved) == "string" then
+                    Operation.Properties[PropertyId] = Saved
                 else
                     Names = Placed[Saved]
                 end

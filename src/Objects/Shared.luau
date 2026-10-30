@@ -347,11 +347,25 @@ end
 -- through the copy holding the object doing the referring, never through a
 -- scene and never through the workspace.
 --
+-- A target in another scene cannot be named that way, so it is stored as an
+-- address instead: the scene's Guid and the local id, as Handles writes them.
+-- An address is the one thing here that does go through a scene, and a scene
+-- loaded twice has two answers. It names nothing until one copy is left -- the
+-- same refusal to guess that Objects.new makes of a scene loaded twice, and a
+-- portal wired to whichever room loaded first would be worse than one reading
+-- nil. Nothing else about a reference changes: it is resolved on every read, so
+-- it does not matter which scene loads first, and it stays stored while its
+-- target is away.
+--
 -- Each side hands in its own Find, because Shared cannot require the module
 -- that requires it: the server reads the copy's ByLocal, the client its index
--- of the same thing.
+-- of the same thing. Find answers for both kinds of value, and ignores the copy
+-- for an address, which already says where it points. Address goes the other
+-- way, from a live object in another scene to what to store for it, and answers
+-- nil and the reason when there is no saying.
 
-export type Find = (Instance_: Types.SceneInstanceId, Local: number) -> Types.Object?
+export type Find = (Instance_: Types.SceneInstanceId, Local: number | string) -> Types.Object?
+export type Address = (Target: Types.Object) -> (string?, string?)
 
 -- No target. Zero rather than nil, because a property with no value reads as
 -- its default and the format has to write something either way.
@@ -374,7 +388,7 @@ end
 -- that comes back under the local id it had -- a copy loaded again from the
 -- same pack -- is pointed at again by everything that pointed at it.
 const function ResolveReference(Copy: Types.SceneInstanceId, Value: any, Find: Find): Types.Object?
-    if type(Value) ~= "number" or Value == NO_TARGET then
+    if (type(Value) ~= "number" and type(Value) ~= "string") or Value == NO_TARGET then
         return nil
     end
 
@@ -410,9 +424,9 @@ const function ResolveValue(Copy: Types.SceneInstanceId, Prop: PropertyTypes.Pro
 end
 
 -- What to store for a value someone wants to put in an Object property: a live
--- object, a local id, or nil to clear it. Returns nil and a reason when the
--- value cannot be held, so each caller can refuse the way its layer refuses --
--- a setter returns false, a transaction refuses the whole list.
+-- object, a local id, an address, or nil to clear it. Returns nil and a reason
+-- when the value cannot be held, so each caller can refuse the way its layer
+-- refuses -- a setter returns false, a transaction refuses the whole list.
 --
 -- The type constraint is checked here rather than in Properties:IsValid because
 -- this is the first layer that can: a property knows its own value, not which
@@ -433,15 +447,22 @@ const function ReferenceOne(
     Name: string,
     Constraints: any,
     Value: any,
-    Find: Find
-): (number?, string?)
+    Find: Find,
+    Address: Address
+): (any?, string?)
     if Value == nil then
         return NO_TARGET, nil
     end
 
-    local Target: number
+    local Target: any
 
     if type(Value) == "number" then
+        Target = Value
+    elseif type(Value) == "string" then
+        if not PropertyTypes:IsValid("Object", Value) then
+            return nil, `"{Value}" is not an address`
+        end
+
         Target = Value
     elseif type(Value) == "table" and type((Value :: any).RuntimeId) == "number" then
         const Other = Value :: Types.Object
@@ -449,18 +470,23 @@ const function ReferenceOne(
             return nil, `{Other.Name} has been destroyed`
         end
 
-        -- The one hard constraint on a reference. A local id from another copy
-        -- would name whatever happens to hold that id here, and after either
-        -- scene is saved and loaded somewhere else it would name nothing at
-        -- all. Cross-copy and cross-scene references are out of scope for the
-        -- same reason.
-        if Other.InstanceId ~= Copy then
-            return nil, `{Other.Name} is in another copy, and a reference only names objects in the copy holding it`
-        end
+        -- A local id from another copy would name whatever happens to hold that
+        -- id here, and after either scene is saved and loaded somewhere else it
+        -- would name nothing at all. So anything outside this copy goes by
+        -- address, and another copy of this copy's own scene is refused by the
+        -- same rule as any scene loaded twice: there is no saying which it means.
+        if Other.InstanceId == Copy then
+            Target = Other.LocalId
+        else
+            const Named, Why = Address(Other)
+            if not Named then
+                return nil, Why
+            end
 
-        Target = Other.LocalId
+            Target = Named
+        end
     else
-        return nil, `a {typeof(Value)} is neither an object nor a local id`
+        return nil, `a {typeof(Value)} is neither an object, a local id nor an address`
     end
 
     if Target == NO_TARGET then
@@ -484,10 +510,11 @@ const function Reference(
     Copy: Types.SceneInstanceId,
     Prop: PropertyTypes.Property<any>,
     Value: any,
-    Find: Find
+    Find: Find,
+    Address: Address
 ): (any?, string?)
     if Prop.Type ~= "Table" then
-        return ReferenceOne(Copy, Prop.Name, Prop.Constraints, Value, Find)
+        return ReferenceOne(Copy, Prop.Name, Prop.Constraints, Value, Find, Address)
     end
 
     if Value == nil then
@@ -501,14 +528,14 @@ const function Reference(
     end
 
     const Item = Prop.Constraints and Prop.Constraints.Item
-    const List = table.create(#Value) :: {number}
+    const List = table.create(#Value) :: {any}
 
     for Index, Each in Value do
         if type(Index) ~= "number" then
             return nil, "a list has only numbered items"
         end
 
-        const Target, Why = ReferenceOne(Copy, `{Prop.Name}[{Index}]`, Item, Each, Find)
+        const Target, Why = ReferenceOne(Copy, `{Prop.Name}[{Index}]`, Item, Each, Find, Address)
         if Target == nil then
             return nil, Why
         end
@@ -525,8 +552,16 @@ end
 -- answers nil for an id with nothing to stand for it, which leaves an Object
 -- property where it is -- nil comes back, and the caller sets nothing -- and
 -- drops the item from a Table.
+--
+-- An address goes through as it is. It points outside whatever is being moved,
+-- and it means the same thing wherever it is read from, which is the reason it
+-- exists.
 const function Remap(Prop: PropertyTypes.Property<any>, Value: any, Map: (number) -> number?): any?
     if Prop.Type ~= "Table" then
+        if type(Value) == "string" then
+            return Value
+        end
+
         return if type(Value) == "number" then Map(Value) else nil
     end
 
@@ -536,7 +571,7 @@ const function Remap(Prop: PropertyTypes.Property<any>, Value: any, Map: (number
 
     const List = {}
     for _, Item in Value do
-        const Instead = Map(Item)
+        const Instead = if type(Item) == "string" then Item else Map(Item)
         if Instead ~= nil then
             table.insert(List, Instead)
         end
@@ -590,13 +625,14 @@ const function Accept(
     Obj: Types.Object,
     Prop: PropertyTypes.Property<any>,
     Value: any,
-    Find: Find
+    Find: Find,
+    Address: Address
 ): (boolean, any)
     if not PropertyTypes.HoldsReferences(Prop) then
         return true, Value
     end
 
-    const Target, Why = Reference(Obj.InstanceId, Prop, Value, Find)
+    const Target, Why = Reference(Obj.InstanceId, Prop, Value, Find, Address)
     if Target == nil then
         Logger:Warn(`Cannot point {Obj.Name}.{Prop.Name} at that value: {Why}.`)
         return false, nil

@@ -142,6 +142,7 @@ end
 
 const function Register(Payload: SceneRegistry)
     Registered[Payload.Id] = Payload
+    Objects.TrackGuid(Payload.Id, Payload.Guid)
 end
 
 -- Gone on the server. Its copies were dropped by their own packets first, so
@@ -149,6 +150,7 @@ end
 -- scenes would otherwise keep drawing.
 Network.SceneUnregistered:Connect(function(Identifier: SceneIdentifier)
     Registered[Identifier] = nil
+    Objects.TrackGuid(Identifier, nil)
 
     -- Who holds what is told to the admitted, and this player no longer is:
     -- whatever they still have of the scene, they stop being told its locks.

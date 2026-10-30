@@ -258,11 +258,22 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?,
         -- no world to resolve against, and a reference means whatever the copy
         -- reading it says it means -- which is exactly what lets two copies of
         -- one room each point at their own door.
-        Wire = WIRE_VARINT
-        const Target = Value :: number
-        const Size = Varint.Measure(Target)
-        Payload = buffer.create(Size)
-        Varint.Write(Payload, 0, Target)
+        --
+        -- An address, for a target in another scene, is the same type in a
+        -- different wire shape. The tag is what tells them apart on the way
+        -- back, and a local id's bytes are untouched by it.
+        if type(Value) == "string" then
+            const Address = Value :: string
+            const Inner = buffer.create(#Address)
+            buffer.writestring(Inner, 0, Address)
+            Wire, Payload = WIRE_BYTES, BytesBuffer(Inner)
+        else
+            Wire = WIRE_VARINT
+            const Target = Value :: number
+            const Size = Varint.Measure(Target)
+            Payload = buffer.create(Size)
+            Varint.Write(Payload, 0, Target)
+        end
     elseif Type == "Table" then
         -- [varint count][tagged item]... inside one length prefix. Each item
         -- carries its own tag, exactly as a property of its type would be
@@ -407,6 +418,11 @@ function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number
 
         return Registered:GetById(Id) or CustomEnum.UNKNOWN, Consumed, Type
     elseif Type == "Object" then
+        if Wire == WIRE_BYTES then
+            const Length, Read = Varint.Read(Buf, Body)
+            return buffer.readstring(Buf, Body + Read, Length), 1 + Read + Length, Type
+        end
+
         const Value, Read = Varint.Read(Buf, Body)
         return Value, 1 + Read, Type
     elseif Type == "Table" then

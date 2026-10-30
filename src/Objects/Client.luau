@@ -66,6 +66,13 @@ const LocalCopies: {[Types.SceneInstanceId]: true} = {}
 -- no copies yet to read the answer off.
 const LocalScenes: {[Types.SceneIdentifier]: true} = {}
 
+-- The Guids of the server's scenes this client has been told about, both ways
+-- round. An address names a scene by Guid, and this is what it reads against: a
+-- private scene this player is not admitted to is not here, so an address into
+-- it reads as nothing rather than as somebody else's object.
+const SceneGuids: {[Types.SceneIdentifier]: string} = {}
+const GuidScenes: {[string]: Types.SceneIdentifier} = {}
+
 -- Every object appearing here and going, whichever way it came: replicated
 -- from the server, built in a scene this client owns, or drawn for a copy the
 -- server opened. UI used to poll GetWorkspace to notice any of it.
@@ -296,9 +303,52 @@ end
 -- copy's ByLocal for this; a copy the server owns has no such table on this
 -- side, so the index above is kept for every object the client holds however it
 -- arrived -- replicated, drawn, or built in a scene this client owns.
-const function Find(Copy: Types.SceneInstanceId, Local: number): Object?
+--
+-- An address says for itself where it points, and answers only for a scene with
+-- one live copy here. See Objects/Shared.
+const function OnlyCopy(Scene: Types.SceneIdentifier): Types.SceneInstanceId?
+    local Only: Types.SceneInstanceId? = nil
+    for Live, Of in InstanceScene do
+        if Of ~= Scene then
+            continue
+        end
+
+        if Only then
+            return nil
+        end
+
+        Only = Live
+    end
+
+    return Only
+end
+
+const function Find(Copy: Types.SceneInstanceId, Local: number | string): Object?
+    if type(Local) == "string" then
+        const Guid, Id = Handles.ParseAddress(Local)
+        const Scene = if Guid then GuidScenes[Guid] else nil
+        const Only = if Scene then OnlyCopy(Scene) else nil
+        const Held = if Only then LocalIds[Only] else nil
+        return if Held then Held[Id :: number] else nil
+    end
+
     const ByLocal = LocalIds[Copy]
     return if ByLocal then ByLocal[Local] else nil
+end
+
+-- What to store to point at an object in another scene. A scene this client
+-- owns has no Guid, so nothing outside its own copies can name it.
+const function Address(Target: Object): (string?, string?)
+    const Guid = SceneGuids[Target.Scene]
+    if not Guid then
+        return nil, `{Target.Name} is in a scene with no Guid, and only a saved scene can be pointed at from another`
+    end
+
+    if not OnlyCopy(Target.Scene) then
+        return nil, `{Target.Name} is in a scene loaded more than once, and a reference could not say which copy it means`
+    end
+
+    return Handles.Address(Guid, Target.LocalId), nil
 end
 
 -- Every optimistic set takes a ticket, and only the newest outstanding one for
@@ -495,7 +545,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
     -- actually stored before anything is applied or sent. Refused here rather
     -- than by the server, which would cost a round trip to be told what this
     -- side already knows.
-    const Holdable, Val = Shared.Accept(self, Prop, Value, Find)
+    const Holdable, Val = Shared.Accept(self, Prop, Value, Find, Address)
     if not Holdable then
         return false
     end
@@ -694,7 +744,7 @@ const function __local_setter(self: Object, Reference: Types.PropertyReference, 
         return false
     end
 
-    const Holdable, Val = Shared.Accept(self, Prop, Value, Find)
+    const Holdable, Val = Shared.Accept(self, Prop, Value, Find, Address)
     if not Holdable then
         return false
     end
@@ -895,7 +945,7 @@ const function Construct(
             -- reference is read against a copy, and the object carrying it does
             -- not exist yet.
             if PropertyTypes.HoldsReferences(Prop) then
-                const Target, Why = Shared.Reference(Live.Id, Prop, Value, Find)
+                const Target, Why = Shared.Reference(Live.Id, Prop, Value, Find, Address)
                 if Target == nil then
                     Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
                     continue
@@ -1208,23 +1258,23 @@ function Objects:Get(RuntimeId: RuntimeId): Object?
     return Workspace[RuntimeId]
 end
 
--- The object a stored reference names, for a caller holding the raw local id
+-- The object a stored reference names, for a caller holding the raw value
 -- rather than reading it off a property. Scoped to a copy, because that is the
--- only scope a local id answers in.
-function Objects:Resolve(Copy: Types.SceneInstanceId, Local: number): Object?
+-- only scope a local id answers in. An address ignores it.
+function Objects:Resolve(Copy: Types.SceneInstanceId, Local: number | string): Object?
     return Find(Copy, Local)
 end
 
 -- What may be written into an Object property of an object in this copy, as a
--- local id, or nil and the reason it may not. The server's twin, so a
--- transaction built here refuses what the server would refuse -- before the
--- packet rather than after the round trip.
+-- local id or an address, or nil and the reason it may not. The server's twin,
+-- so a transaction built here refuses what the server would refuse -- before
+-- the packet rather than after the round trip.
 function Objects.Reference(
     Copy: Types.SceneInstanceId,
     Prop: PropertyTypes.Property<any>,
     Value: any
-): (number?, string?)
-    return Shared.Reference(Copy, Prop, Value, Find)
+): (any?, string?)
+    return Shared.Reference(Copy, Prop, Value, Find, Address)
 end
 
 -- The two halves of a persistent id, for a caller holding one that did not come
@@ -1278,6 +1328,20 @@ end
 
 function Objects:IsLocalScene(Scene: Types.SceneIdentifier): boolean
     return LocalScenes[Scene] == true
+end
+
+-- Told by Scenes/Client as the server's scenes come and go, for the same reason.
+-- Nil when one goes.
+function Objects.TrackGuid(Scene: Types.SceneIdentifier, Guid: string?)
+    const Was = SceneGuids[Scene]
+    if Was then
+        GuidScenes[Was] = nil
+    end
+
+    SceneGuids[Scene] = Guid
+    if Guid then
+        GuidScenes[Guid] = Scene
+    end
 end
 
 -- Tears down every object of one live copy. Called by Scenes/Client when the

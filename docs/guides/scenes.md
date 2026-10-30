@@ -117,7 +117,9 @@ written in. Place the same prefab five times and you get five independent sets.
 References inside the pack follow it: a door and the button that works it come
 out wired to each other. A reference to anything the pack *didn't* carry is
 dropped rather than carried over, because that id means nothing in the target
-copy — and if it happens to mean something, it means the wrong thing.
+copy — and if it happens to mean something, it means the wrong thing. A
+[reference into another scene](/guides/references#into-another-scene) is the
+exception: it means the same thing from anywhere, so it stays.
 
 A client places through a transaction, which makes it one create per object and
 so needs create rights and nothing more:

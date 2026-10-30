@@ -48,9 +48,10 @@ export type CustomEnumConstraints = {
 
 -- What an Object property may point at, by object type id or registered name.
 -- Unlike every other constraint here, this one cannot be checked from the value
--- alone: the value is a local id, and what it names depends on which copy is
--- asking. Objects/Shared.Reference is where it is enforced, against the copy
--- holding the object being written. IsValid checks the number and nothing more.
+-- alone: the value is a local id or an address, and what it names depends on
+-- which copy is asking and what is loaded. Objects/Shared.Reference is where it
+-- is enforced, against the copy holding the object being written. IsValid checks
+-- the shape of the value and nothing more.
 export type ObjectConstraints = {
     Types: {number | string}?,
 }
@@ -84,8 +85,9 @@ type PropertyValues = {
     Enum: EnumItem,
     CustomEnum: CustomEnum.RegisteredOption<any>,
 
-    -- The target's local id, not the object. See Objects/Shared.
-    Object: number,
+    -- The target's local id, or its address when it is in another scene. Never
+    -- the object. See Objects/Shared.
+    Object: number | string,
 
     -- Frozen. A list changed in place would never pass through Set, so nothing
     -- -- undo, replication, listeners -- would hear that it had changed.
@@ -310,6 +312,14 @@ end
 
 function Types:IsValid<T>(Type: T, Value: ValueFor<T>?, Constraints: ConstraintsFor<T>?): boolean
     const TypeOf = typeof(Value)
+
+    -- A reference into another scene, which is text where the rest are numbers.
+    -- Ahead of the check below, which only knows the one Luau type per property
+    -- type. Like a local id, it is valid whether or not it names anything.
+    if Type == "Object" and TypeOf == "string" then
+        return Handles.ParseAddress(Value) ~= nil
+    end
+
     if TypeOf ~= Types.Map[Type] then
         return false
     end

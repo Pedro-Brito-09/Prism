@@ -336,7 +336,9 @@ T:Test("IsValid checks the underlying type", function()
     T:Ok(not PropertyTypes:IsValid("Number", nil), "nil")
 end)
 
-T:Test("a reference is valid as an id and nothing else", function()
+T:Test("a reference is valid as an id or an address and nothing else", function()
+    T:Ok(PropertyTypes:IsValid("Object", Handles.Address("abcdefghij-_0123456789", 4)), "an address")
+    T:Ok(not PropertyTypes:IsValid("Object", {}), "not a table")
     T:Ok(PropertyTypes:IsValid("Object", 0), "zero is no target")
     T:Ok(PropertyTypes:IsValid("Object", 12), "a local id")
     T:Ok(PropertyTypes:IsValid("Object", Handles.MAX_LOCAL), "the largest one")
@@ -442,6 +444,16 @@ T:Test("a reference round trips as the local id it stores", function()
     -- A varint, so an id a hand built scene actually uses costs one byte and
     -- a reference is no dearer than the number it is.
     T:Eq(buffer.len(Compressor:CompressValue("Object", 4)), 2, "tag + 1")
+end)
+
+T:Test("an address round trips as the same type", function()
+    const Address = Handles.Address("abcdefghij-_0123456789", 70000)
+    T:Eq(ValueRoundTrip("Object", Address, "an address"), Address)
+
+    const Value, Read, Type = Compressor:DecompressValue(Compressor:CompressValue("Object", Address))
+    T:Eq(Value, Address, "reads back as the text it was")
+    T:Eq(Read, 2 + #Address, "tag, length and the text")
+    T:Eq(Type, "Object", "and as an Object, not as Text")
 end)
 
 T:Test("other value types round trip", function()
@@ -3315,7 +3327,7 @@ T:Test("each copy of one scene resolves its own", function()
     Scene:Destroy()
 end)
 
-T:Test("a reference only names objects in the same copy", function()
+T:Test("a reference refuses another copy of its own scene", function()
     const Scene, Here = Room("RefHere")
     const Elsewhere = Scene:Load() :: any
 
@@ -3326,6 +3338,124 @@ T:Test("a reference only names objects in the same copy", function()
     T:Eq(Button:GetProperty(TargetId).Value, 0, "and it still points at nothing")
 
     Scene:Destroy()
+end)
+
+T:Test("a reference reaches into another scene", function()
+    const HereScene, Here = Room("CrossHere")
+    const ThereScene, There = Room("CrossThere")
+
+    const Door = There:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Here:Create(ButtonId)
+
+    T:Ok(Button:Set(TargetId, Door), "takes the object")
+    T:Eq(Button:Get(TargetId), Door, "and hands it back")
+    T:Eq(Button:GetProperty(TargetId).Value, Handles.Address(ThereScene.Guid, Door.LocalId), "storing its address")
+
+    T:Ok(Button:Set(TargetId, Button:GetProperty(TargetId).Value), "takes a raw address too")
+    T:Eq(Objects:Resolve(Here.Id, Button:GetProperty(TargetId).Value), Door, "and Resolve answers for one")
+
+    const Near = Here:Create(DoorId)
+    T:Ok(Button:Set(TargetId, Near), "a target in the same copy goes back to an id")
+    T:Eq(Button:GetProperty(TargetId).Value, Near.LocalId, "the plain local id")
+
+    HereScene:Destroy()
+    ThereScene:Destroy()
+end)
+
+T:Test("an address refuses what a reference refuses", function()
+    const HereScene, Here = Room("CrossRefuses")
+    const ThereScene, There = Room("CrossRefused")
+
+    const Door = There:Create(DoorId)
+    const Other = There:Create(ButtonId)
+    const Button = Here:Create(ButtonId)
+
+    T:Ok(Button:Set(DoorOnlyId, Door), "a door is allowed")
+    T:Ok(not Button:Set(DoorOnlyId, Other), "a button is not, in another scene as in this one")
+    T:Eq(Button:Get(DoorOnlyId), Door, "and the refusal changed nothing")
+
+    T:Ok(not Button:Set(TargetId, "not an address"), "text that is no address is refused")
+
+    -- Nothing to check the constraint against, for the reason a dangling id is
+    -- allowed: scenes load in whatever order they load in.
+    T:Ok(Button:Set(DoorOnlyId, Handles.Address(ThereScene.Guid, 999999)), "a dangling address is allowed")
+    T:Eq(Button:Get(DoorOnlyId), nil, "and reads as nothing")
+
+    Door:Destroy()
+    T:Ok(not Button:Set(TargetId, Door), "a destroyed target is refused")
+
+    HereScene:Destroy()
+    ThereScene:Destroy()
+end)
+
+T:Test("an address names nothing in a scene loaded twice", function()
+    const HereScene, Here = Room("CrossTwiceHere")
+    const ThereScene, There = Room("CrossTwiceThere")
+
+    const Door = There:Create(DoorId)
+    const Button = Here:Create(ButtonId)
+
+    Button:Set(TargetId, Door)
+    const Stored = Button:GetProperty(TargetId).Value
+
+    There:Commit()
+    const Second = ThereScene:Load() :: any
+
+    T:Eq(Button:Get(TargetId), nil, "two copies, and no saying which it means")
+    T:Eq(Button:GetProperty(TargetId).Value, Stored, "the address is kept")
+    T:Ok(not Button:Set(TargetId, Second:Find(Door.LocalId)), "and a new one cannot be taken from either")
+
+    Second:Unload()
+    T:Eq(Button:Get(TargetId), Door, "one copy again, and it reads as it did")
+
+    HereScene:Destroy()
+    ThereScene:Destroy()
+end)
+
+T:Test("an address waits for its scene to come back", function()
+    const HereScene, Here = Room("CrossAwayHere")
+    const ThereScene, There = Room("CrossAwayThere")
+
+    const Door = There:Create(DoorId, {[TitleId] = "Door"})
+    const Button = Here:Create(ButtonId)
+    Button:Set(TargetId, Door)
+    const Stored = Button:GetProperty(TargetId).Value
+
+    There:Commit()
+    There:Unload()
+
+    T:Eq(Button:Get(TargetId), nil, "nothing to read while it is unloaded")
+    T:Eq(Button:GetProperty(TargetId).Value, Stored, "and the address stays")
+
+    const Back = ThereScene:Load() :: any
+    T:Eq(Button:Get(TargetId), Back:Find(Door.LocalId), "the object its local id names in the new copy")
+
+    HereScene:Destroy()
+    ThereScene:Destroy()
+end)
+
+T:Test("an address survives a commit and a reload beside a local id", function()
+    const HereScene = Scenes.new({Name = "CrossSavedHere"})
+    const Here = HereScene:Load() :: any
+    const ThereScene, There = Room("CrossSavedThere")
+
+    -- Both kinds in one column, which cannot be written relative to its rows.
+    const Near = Here:Create(DoorId)
+    const Far = There:Create(DoorId)
+    const Local = Here:Create(ButtonId)
+    const Remote = Here:Create(ButtonId)
+    Local:Set(TargetId, Near)
+    Remote:Set(TargetId, Far)
+
+    Here:Commit()
+    Here:Unload()
+
+    const Back = HereScene:Load() :: any
+    T:Eq(Back:Find(Local.LocalId):Get(TargetId), Back:Find(Near.LocalId), "the local id reads in the new copy")
+    T:Eq(Back:Find(Remote.LocalId):Get(TargetId), Far, "the address reads as it did")
+
+    HereScene:Destroy()
+    ThereScene:Destroy()
 end)
 
 T:Test("a constrained reference refuses what it may not point at", function()
@@ -4525,6 +4655,44 @@ T:Test("a reference the pack did not carry is dropped", function()
     Scene:Destroy()
 end)
 
+T:Test("an address survives duplicating and placing", function()
+    const ThereScene, There = Room("CrossMovedThere")
+    const Door = There:Create(DoorId)
+
+    const Source = Scenes.new({Name = "CrossMovedSource"}) :: any
+    const SourceCopy = Source:Load()
+    const Button = SourceCopy:Create(ButtonId)
+    Button:Set(TargetId, Door)
+    const Stored = Button:GetProperty(TargetId).Value
+
+    const Copies = Objects:DuplicateGroup({Button}) :: any
+    T:Eq(Copies[1]:Get(TargetId), Door, "a duplicate points where the original does")
+
+    const Pack = SourceCopy:Serialize()
+    const Scene, Copy = Room("CrossMovedTarget")
+
+    const Plr = Editor(-6101, Scene)
+    const Made = Copy:Place(Pack) :: any
+    T:Eq(Made[1]:GetProperty(TargetId).Value, Stored, "placing keeps the address")
+    T:Eq(Made[1]:Get(TargetId), Door, "and it reads as the door")
+
+    const Edit = Transactions.new():Place(Pack, Copy.Id)
+    const Applied, Created = Transactions.Apply(Plr, Edit.Operations)
+    T:Ok(Applied, "a placing transaction applied")
+
+    const Placed = Objects:Get(Created[1])
+    T:Ok(Placed, "and made its objects")
+    if Placed then
+        T:Eq(Placed:Get(TargetId), Door, "keeping the address too")
+    end
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+    Source:Destroy()
+    ThereScene:Destroy()
+end)
+
 T:Test("a client places through create rights, as one step", function()
     const Scene, Copy = Room("PlaceTransaction")
     const Plr = Editor(-6100, Scene)
@@ -4652,6 +4820,47 @@ T:Test("a list survives a commit and a reload", function()
     T:Eq(Back:Get(DoorsId)[1], Reloaded:Find(Door.LocalId), "the reference still names the door")
 
     Scene:Destroy()
+end)
+
+T:Test("a list of references can reach into another scene", function()
+    const Scene, Copy = Room("TableCross")
+    const ThereScene, There = Room("TableCrossThere")
+    const Near = Copy:Create(DoorId)
+    const Far = There:Create(DoorId)
+    const Panel = Copy:Create(PanelId)
+
+    T:Ok(Panel:Set(DoorsId, {Near, Far}), "takes one of each")
+
+    const Doors = Panel:Get(DoorsId)
+    T:Eq(Doors[1], Near, "the one in this copy")
+    T:Eq(Doors[2], Far, "and the one elsewhere")
+
+    const Held = Panel:GetProperty(DoorsId).Value
+    T:Eq(Held[1], Near.LocalId, "a local id")
+    T:Eq(Held[2], Handles.Address(ThereScene.Guid, Far.LocalId), "and an address")
+
+    -- A placed list keeps what the pack carried and its addresses, in order,
+    -- through a transaction as well as straight on the copy.
+    const Plr = Editor(-6102, Scene)
+    const Pack = Copy:Serialize()
+    const Edit = Transactions.new():Place(Pack, Copy.Id)
+    const Applied, Created = Transactions.Apply(Plr, Edit.Operations)
+    T:Ok(Applied, "placed through a transaction")
+
+    for _, Id in Created do
+        const Obj = Objects:Get(Id)
+        if Obj and Obj.Registry == PanelId then
+            const Placed = Obj:Get(DoorsId)
+            T:Eq(#Placed, 2, "both items came through")
+            T:Ok(Placed[1] ~= Near, "the first follows the placed door")
+            T:Eq(Placed[2], Far, "and the second is the same object")
+        end
+    end
+
+    History:Clear(Plr)
+    Permissions:Revoke(Plr)
+    Scene:Destroy()
+    ThereScene:Destroy()
 end)
 
 T:Test("a list of references reads as the objects it names", function()
@@ -5174,8 +5383,22 @@ ReferenceButton:Set(TargetId, ReferenceDoor)
 -- name. The player is admitted to the second as they arrive, and evicted from
 -- it when the client writes the evict marker on the editable fixture.
 const HiddenCopy = Scenes.new({Name = "FixtureHidden", Private = true, Admitted = {1}}):Load()
-HiddenCopy:Create(BareId, {[TitleId] = "FixtureHiddenScenery"})
+const HiddenScenery = HiddenCopy:Create(BareId, {[TitleId] = "FixtureHiddenScenery"})
 HiddenCopy:Create(PrivateId, {[TitleId] = "FixtureHiddenPrivate"})
+
+-- Two buttons reaching out of their scene. The client resolves the first by the
+-- Guid it was told along with the public scene's name. It was never told the
+-- second's, so that one reads as nothing even though the object it names is
+-- sitting right there.
+const RemoteDoor = Scenes.new({Name = "FixtureRemote"}):Load():Create(DoorId, {[TitleId] = "FixtureRemoteDoor"})
+
+const RemoteButton = Objects.new(ButtonId)
+RemoteButton:Set(TitleId, "FixtureRemoteButton")
+RemoteButton:Set(TargetId, RemoteDoor)
+
+const HiddenButton = Objects.new(ButtonId)
+HiddenButton:Set(TitleId, "FixtureHiddenButton")
+HiddenButton:Set(TargetId, HiddenScenery)
 
 const AdmittedScene = Scenes.new({Name = "FixtureAdmitted", Private = true, Admitted = {1}})
 const AdmittedCopy = AdmittedScene:Load()

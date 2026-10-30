@@ -59,6 +59,14 @@ Each column is written whichever of these ways comes out smallest:
   after the blocks it takes inputs from writes the same few small numbers on
   every row.
 
+A reference into another scene is an `Object` value on the bytes wire shape,
+holding `<Guid>:<LocalId>` as text, where a local id is a varint. The tag tells
+them apart, so a pack without one is byte for byte what it was. A column holding
+any address has no single distance to write, so it falls back to the column
+encodings every other value can use. A build from before these existed reads an
+`Object` as a varint and would misread one, so a pack holding an address needs a
+build that knows them.
+
 Everything is written column by column, bitmaps and values alike, so similar
 bytes sit together. The pack is then compressed with zstd, at level 19 for
 scenes and 9 for database shards, when that makes it smaller. A reader checks
