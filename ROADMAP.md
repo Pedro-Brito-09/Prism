@@ -17,8 +17,9 @@ Read this before picking anything up. It is how every item under Done landed.
   fixes, `docs/…` for roadmap-only changes. Merge back with `git merge --no-ff`
   and a message of `Merge branch '<branch>'`, then push `main` and the branch.
   Ask Pedro before merging or pushing.
-- **Each item lands with its docs.** `README.md` is the API reference and is
-  updated in the same commit as the code. On this file, the item moves from
+- **Each item lands with its docs.** `docs/` is the guides and the API
+  reference, published as the GitHub Pages site, and is updated in the same
+  commit as the code. On this file, the item moves from
   Queued to the top of Done, rewritten as what was built and the decisions
   taken, not what was planned.
 - **Tests are written and run.** `tests/Server.server.luau` holds server tests
@@ -44,7 +45,7 @@ Read this before picking anything up. It is how every item under Done landed.
 - **The analyser is a ratchet, not a clean bill of health.** It fails when a
   file grows a diagnostic it did not have before. It runs the new type solver,
   `src/` is clean under it, and what stands is the suites' unresolved
-  `require("./Prism")`; see the Type checking section of the README. Do not clear the baseline by weakening the
+  `require("./Prism")`; see `docs/internals/testing.md`. Do not clear the baseline by weakening the
   code -- if a diagnostic is deliberate, run `--update-baseline` and say why.
 - **New channels go at the end of `src/Channels.luau`, never reordered**, and
   never reuse the slot of a removed one during a live rollout.

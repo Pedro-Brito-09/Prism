@@ -12,6 +12,11 @@
 dist/
 sourcemap.json
 
+# The docs site's dependencies and build output.
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
 # Wally.
 Packages/
 ServerPackages/
