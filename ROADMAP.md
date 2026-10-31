@@ -85,31 +85,22 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-- [ ] **Measure again what the performance page dropped.** The 2026-10-28 pass
-      re-measured loading and memory only, so `docs/internals/performance.md`
-      now shows only those. These were last measured on 2026-10-22 and
-      2026-10-23, before the work on links and objects, and came off the page
-      until they are run on the current code. All on the real 34,918-object
-      level, loaded with the default budget, with the results added to the
-      page:
-
-      - **Idle frames**, server and client, with the level loaded against
-        nothing loaded: average, p99 and heartbeat work.
-      - **A drag burst**, three players: one `Set` a frame each for 5 s, under
-        a role with `Rate = 120`. Server and client frame p99 and max, how many
-        edits landed, how many were refused, and whether every client held
-        them all.
-      - **A bulk burst**, three players: one 1,000-set transaction each,
-        together, under a role with a `Rate` high enough for it. Frame times,
-        commit round trip, and how long until every client held the others'
-        edits.
-      - **What the undo history holds** on the server after those bursts,
-        before and after `History:Clear`.
-      - **Garbage from a build**: the server's heap straight after the level
-        is built, and after the collector has run.
-      - **The parts' own memory** on a client, by the `Instances` memory tag.
-      - **A shared field read**: the time through `__index` against a field of
-        the table's own.
+- [ ] **Find what lengthened a bulk commit's frame.** Three players each
+      committing a 1,000-set transaction at once gave the server one frame of
+      78-82 ms as the commits landed, and each client one of 47-52 ms as the
+      others' edits arrived, on 2026-10-31, twice. On 2026-10-23, before the
+      work on links and objects, the same burst's longest frames were 29 ms and
+      20 ms. Building the transaction takes the client 2 ms, so the time is in
+      applying or receiving. Run the burst on the commit before
+      `feat/lighter-links` and on `main`, side by side in the same place, and
+      profile the long frame to see which change it was.
+- [ ] **Find what the server keeps after an edited level unloads.** After the
+      edit bursts and `History:Clear`, unloading the level left the server at
+      11.9 MB against 3.9 MB before it was loaded. With one player and no
+      edits, on 2026-10-28, it got everything back. Could be room left in
+      tables keyed by runtime id, as on a client, or something per player.
+      Load, edit, clear and unload twice: if the second unload reads the
+      same, it is reused room; if it grows, it is a leak.
 
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
@@ -130,6 +121,21 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **What the performance page dropped, measured again.** On 2026-10-31 on
+      the real 34,918-object level, in the game's place with its own scripts
+      taken out, a server and three players. A loaded level costs no frame time
+      and shows no Prism timer. A three-player drag burst landed all 899 edits,
+      none refused, and every client held the others' last values. The undo
+      history held 1.8 MB after the bursts. A build left 194 MB of garbage and
+      settled at 6-8 MB. The parts cost a client 8.6 MB, and a shared field read
+      28 ns against 8 for one of its own. Two results came out worse than
+      before and are queued: the bulk burst's longest frames, and what the
+      server kept after unloading an edited level.
+
+      The bursts had to be scheduled on each peer for a shared server time,
+      because Studio's remote calls run one after another: the first attempt
+      ran the three drags back to back rather than together.
 
 - [x] **Inserted scenes update from their source.**
       Committing a copy of a scene updates every copy inserted from it, like
