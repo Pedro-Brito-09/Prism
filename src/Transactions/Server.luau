@@ -207,6 +207,10 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 if not Live then
                     return Refuse(Plr, `scene copy {Operation.Instance} is not live.`)
                 end
+
+                if Live.Host then
+                    return Refuse(Plr, `scene copy {Operation.Instance} is an inserted scene. Change its source.`)
+                end
             end
 
             -- What the create is checked against: the scene it lands in and
@@ -318,6 +322,10 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
                 return Refuse(Plr, `object {Operation.Target} is not here.`)
             end
 
+            if Objects.IsInserted(Obj) then
+                return Refuse(Plr, `{Obj.Name} is part of an inserted scene. Change its source.`)
+            end
+
             -- Held by someone else. The server's own transactions pass: a lock
             -- is between players, and the server is the one enforcing it.
             if Plr and Objects.LockedAgainst(Obj, Plr) then
@@ -376,6 +384,10 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             const Obj = Objects:Get(Operation.Target)
             if not Obj or Obj.Destroyed or (Plr and not Audience.Sees(Plr, Obj.Scene)) then
                 return Refuse(Plr, `object {Operation.Target} is not here.`)
+            end
+
+            if Objects.IsInserted(Obj) then
+                return Refuse(Plr, `{Obj.Name} is part of an inserted scene. Change its source.`)
             end
 
             if Plr and Objects.LockedAgainst(Obj, Plr) then
@@ -451,6 +463,10 @@ const function BuildPlan(Plr: Player?, Operations: {Operation}): Plan?
             const Live = Scenes:GetInstance(Operation.Instance)
             if not Live or (Plr and not Audience.Sees(Plr, Live.Scene)) then
                 return Refuse(Plr, `scene copy {Operation.Instance} is not live.`)
+            end
+
+            if (Live :: any).Host then
+                return Refuse(Plr, `scene copy {Operation.Instance} is an inserted scene. Remove the insert.`)
             end
 
             -- And taking a copy away is destroying every object in it, read the

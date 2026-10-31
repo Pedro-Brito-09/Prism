@@ -9,6 +9,8 @@ return {
     InstanceAdded = Networking:Get("Scenes.InstanceAdded"),
     InstanceRemoved = Networking:Get("Scenes.InstanceRemoved"),
     InstancesReplayed = Networking:Get("Scenes.InstancesReplayed"),
+    InstanceMoved = Networking:Get("Scenes.InstanceMoved"),
+    InstanceHosted = Networking:Get("Scenes.InstanceHosted"),
 
     Commit = Networking:Get("Scenes.Commit"),
 }

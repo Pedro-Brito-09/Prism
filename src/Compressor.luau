@@ -258,11 +258,22 @@ function Compressor:CompressValue(Type: PropertyTypes.PropertyType, Value: any?,
         -- no world to resolve against, and a reference means whatever the copy
         -- reading it says it means -- which is exactly what lets two copies of
         -- one room each point at their own door.
-        Wire = WIRE_VARINT
-        const Target = Value :: number
-        const Size = Varint.Measure(Target)
-        Payload = buffer.create(Size)
-        Varint.Write(Payload, 0, Target)
+        --
+        -- An address, for a target in another scene, is the same type in a
+        -- different wire shape. The tag is what tells them apart on the way
+        -- back, and a local id's bytes are untouched by it.
+        if type(Value) == "string" then
+            const Address = Value :: string
+            const Inner = buffer.create(#Address)
+            buffer.writestring(Inner, 0, Address)
+            Wire, Payload = WIRE_BYTES, BytesBuffer(Inner)
+        else
+            Wire = WIRE_VARINT
+            const Target = Value :: number
+            const Size = Varint.Measure(Target)
+            Payload = buffer.create(Size)
+            Varint.Write(Payload, 0, Target)
+        end
     elseif Type == "Table" then
         -- [varint count][tagged item]... inside one length prefix. Each item
         -- carries its own tag, exactly as a property of its type would be
@@ -407,6 +418,11 @@ function Compressor:DecompressValue(Buf: buffer, Offset: number?): (any?, number
 
         return Registered:GetById(Id) or CustomEnum.UNKNOWN, Consumed, Type
     elseif Type == "Object" then
+        if Wire == WIRE_BYTES then
+            const Length, Read = Varint.Read(Buf, Body)
+            return buffer.readstring(Buf, Body + Read, Length), 1 + Read + Length, Type
+        end
+
         const Value, Read = Varint.Read(Buf, Body)
         return Value, 1 + Read, Type
     elseif Type == "Table" then
@@ -824,7 +840,12 @@ end
 -- ways no column can see, and zstd does see them.
 
 const PACK_COMPRESSED = 1
-const PACK_FLAGS = PACK_COMPRESSED
+
+-- The header carries the scenes inserted into this one. A flag and not a version,
+-- so a pack with none is byte for byte what it was, and a build from before them
+-- refuses one that has them with a message, by the unknown flag check in ReadPack.
+const PACK_INSERTS = 2
+const PACK_FLAGS = PACK_COMPRESSED + PACK_INSERTS
 
 -- How far a pack may unpack. A client can push a pack, and a few bytes of zstd
 -- can claim a gigabyte.
@@ -1446,7 +1467,72 @@ end
 -- when it is: a pack of a few rows comes out larger under zstd than without
 -- it, and a build that cannot compress at all still writes a pack every build
 -- can read.
-const function WritePack(LastId: number, Groups: {Group}, Level: number): (buffer, number)
+-- The scenes inserted into a scene: the source's Guid, where it sits in this
+-- scene's local space, and an id. Last only climbs and is saved, because an
+-- address names an insert by id, so an id handed out twice would point an old
+-- reference at a new insert, as a local id would.
+--
+-- In the header, outside the compressed payload, so inserting a scene into a
+-- level rewrites a few bytes rather than decompressing and packing it again.
+export type Insert = {Id: number, Guid: string, Origin: CFrame}
+export type Inserts = {Last: number, List: {Insert}}
+
+--   [varint last][varint count]([varint id][varint length][guid][12 f32 origin])...
+const function PutInserts(W: Writer, Inserts: Inserts)
+    PutVarint(W, Inserts.Last)
+    PutVarint(W, #Inserts.List)
+
+    for _, Entry in Inserts.List do
+        PutVarint(W, Entry.Id)
+        PutVarint(W, #Entry.Guid)
+        PutBuffer(W, buffer.fromstring(Entry.Guid))
+
+        const Origin = buffer.create(48)
+        for Index, Component in {Entry.Origin:GetComponents()} do
+            buffer.writef32(Origin, (Index - 1) * 4, Component)
+        end
+
+        PutBuffer(W, Origin)
+    end
+end
+
+const function ReadInsertList(Buf: buffer, Offset: number): (Inserts, number)
+    local At = Offset
+
+    const Last, LastRead = Varint.Read(Buf, At)
+    At += LastRead
+
+    const Count, CountRead = Varint.Read(Buf, At)
+    At += CountRead
+
+    const List: {Insert} = {}
+    for _ = 1, Count do
+        const Id, IdRead = Varint.Read(Buf, At)
+        At += IdRead
+
+        const Length, LengthRead = Varint.Read(Buf, At)
+        At += LengthRead
+
+        const Guid = buffer.readstring(Buf, At, Length)
+        At += Length
+
+        const C = table.create(12) :: {number}
+        for Index = 1, 12 do
+            C[Index] = buffer.readf32(Buf, At + (Index - 1) * 4)
+        end
+        At += 48
+
+        table.insert(List, {
+            Id = Id,
+            Guid = Guid,
+            Origin = CFrame.new(C[1], C[2], C[3], C[4], C[5], C[6], C[7], C[8], C[9], C[10], C[11], C[12]),
+        })
+    end
+
+    return {Last = Last, List = List}, At
+end
+
+const function WritePack(LastId: number, Groups: {Group}, Level: number, Inserts: Inserts?): (buffer, number)
     const Body = NewWriter()
     PutVarint(Body, #Groups)
     for _, Group in Groups do
@@ -1466,10 +1552,22 @@ const function WritePack(LastId: number, Groups: {Group}, Level: number): (buffe
         Flags += PACK_COMPRESSED
     end
 
+    -- Last as well as the list: an emptied scene still has to remember which
+    -- ids it has spent.
+    const Carries = Inserts ~= nil and Inserts.Last > 0
+    if Carries then
+        Flags += PACK_INSERTS
+    end
+
     const Out = NewWriter()
     PutVarint(Out, FORMAT_VERSION)
     PutVarint(Out, Flags)
     PutVarint(Out, LastId)
+
+    if Carries then
+        PutInserts(Out, Inserts :: Inserts)
+    end
+
     PutBuffer(Out, Payload)
     return Finish(Out), Size
 end
@@ -1726,6 +1824,11 @@ const function ReadPack(Pack: buffer, Offset: number, Each: OnRow): number
     const LastId, LastIdRead = Varint.Read(Pack, At)
     At += LastIdRead
 
+    if bit32.band(Flags, PACK_INSERTS) ~= 0 then
+        const _, After = ReadInsertList(Pack, At)
+        At = After
+    end
+
     local Buf = Slice(Pack, At, buffer.len(Pack) - At)
     if bit32.band(Flags, PACK_COMPRESSED) ~= 0 then
         -- Asked before unpacking rather than after. The size is in the zstd
@@ -1972,7 +2075,58 @@ end
 --
 -- A RawObject is an object kept whole -- one whose type this build does not
 -- have -- and goes back in exactly as it was read.
-function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object | DecompressedObject | RawObject}): buffer
+-- A scene pack's header, up to where its payload starts.
+const function ReadSceneHeader(Pack: buffer): (number, number, number, Inserts, number)
+    const Version, VersionRead = Varint.Read(Pack, 0)
+    CheckVersion(Version, "Scene pack")
+
+    const Flags, FlagsRead = Varint.Read(Pack, VersionRead)
+    const LastId, LastIdRead = Varint.Read(Pack, VersionRead + FlagsRead)
+    const At = VersionRead + FlagsRead + LastIdRead
+
+    if bit32.band(Flags, PACK_INSERTS) ~= 0 then
+        const Inserts, After = ReadInsertList(Pack, At)
+        return Version, Flags, LastId, Inserts, After
+    end
+
+    return Version, Flags, LastId, {Last = 0, List = {}}, At
+end
+
+-- The scenes inserted into a pack, read off its header without touching the
+-- payload, so asking costs nothing on a level of any size.
+function Compressor:ReadInserts(Pack: buffer?): Inserts
+    if not Pack then
+        return {Last = 0, List = {}}
+    end
+
+    const _, _, _, Inserts = ReadSceneHeader(Pack)
+    return Inserts
+end
+
+-- The same pack with other inserts in its header. The payload is copied across
+-- as it stands, compressed or not.
+function Compressor:WithInserts(Pack: buffer, Inserts: Inserts): buffer
+    const Version, Flags, LastId, _, Payload = ReadSceneHeader(Pack)
+
+    const Carries = Inserts.Last > 0
+    const Out = NewWriter()
+    PutVarint(Out, Version)
+    PutVarint(Out, if Carries then bit32.bor(Flags, PACK_INSERTS) else bit32.band(Flags, bit32.bnot(PACK_INSERTS)))
+    PutVarint(Out, LastId)
+
+    if Carries then
+        PutInserts(Out, Inserts)
+    end
+
+    PutBuffer(Out, Pack, Payload, buffer.len(Pack) - Payload)
+    return Finish(Out)
+end
+
+function Compressor:CompressScene(
+    LastId: number,
+    Objects: {ObjectTypes.Object | DecompressedObject | RawObject},
+    Inserts: Inserts?
+): buffer
     const ByType: {[number]: {RawObject}} = {}
     for _, Obj in Objects do
         const Raw = if (Obj :: any).__type == "RawObject"
@@ -2001,7 +2155,7 @@ function Compressor:CompressScene(LastId: number, Objects: {ObjectTypes.Object |
         table.insert(Groups, {Key = Registry, Rows = Rows, Order = SortedKeys(Ids)})
     end
 
-    const Pack = WritePack(LastId, Groups, SCENE_COMPRESSION_LEVEL)
+    const Pack = WritePack(LastId, Groups, SCENE_COMPRESSION_LEVEL, Inserts)
     return Pack
 end
 

@@ -137,6 +137,94 @@ rather than guessed.
       because Studio's remote calls run one after another: the first attempt
       ran the three drags back to back rather than together.
 
+- [x] **Inserted scenes update from their source.**
+      Committing a copy of a scene updates every copy inserted from it, like
+      publishing a package. Each is compared with the new pack by local id, which
+      only works because an id is the same across commits and never handed out
+      twice: the same id is the same object, so values are set in place, what was
+      added is built, what went is destroyed, and references and untouched parts
+      hold. Rebuilding the copy was simpler and would have put every part through
+      a destroy. An id whose type changed is a removal and an add.
+
+      Whole, inside the commit, because a half updated copy is neither version.
+      Not measured on a large source. Copies of the scene's own stay as they are:
+      they may be somebody's work. A copy set aside catches up on `Revive`, by
+      `Applied`, which holds the pack it last read. Other servers read the latest
+      on load; pushing to a running server is not built, and would need
+      `MessagingService` and a fetch.
+
+- [x] **Inserting scenes.** `Scene:Insert(source,
+      origin)` puts a scene in another, any number of times, each at its own
+      origin. Loading a copy loads a copy of the source per insert, inside it,
+      and unload, suspend, revive, dispose and moving all follow. An inserted copy
+      is an ordinary copy with a `Host`, read only on the server; the alternative
+      was merging the objects into the host, which would have needed ids rewritten
+      and could never have been updated from the source.
+
+      Inserts live in the pack's header under a flag, outside compression, so
+      they change without a commit and without repacking, a pack with none is
+      unchanged, and an older build refuses one with a message. Ids only climb,
+      and `Last` is saved, for the reason local ids do. Cycles are refused at
+      `Insert`, and skipped at load for a pack that arrived with one. A push
+      drops inserts, because the server rebuilds the pack, and a client must not
+      get to name any scene it likes into a copy the server builds.
+
+      An address through an insert is `<Guid>/<Insert>:<LocalId>`, the Guid being
+      the host's, and starts from the nearest copy of that scene going up from the
+      reader, which is what gives each room its own hallway. Everything addresses
+      need of the world goes through `Shared.AddressWorld`, so the rule is written
+      once for both sides. A plain address ignores inserted copies. One room
+      pointing into another's hallway is refused: it would read as its own.
+      References go inward only, and a source doesn't know where it's used;
+      per-insert overrides are how that would change.
+
+      `Load` takes `Store` and `Source` to fetch what's missing, as public scenes
+      named for their Guid; a private source needs registering by the game first.
+
+- [x] **Local space.** Every copy has an origin, from
+      `Load`'s `Origin` or `SetOrigin`, and values stay relative to it. A link
+      marked `SceneSpace` writes `Origin * value` to its target. The flag is on
+      the link, not the property, because whether a target is world space is a
+      fact about the target, and one property can drive a part on one type and
+      an attachment on another. It was a constraint for about a day of design:
+      that could not say so.
+
+      Moving a copy changes no value and sends one packet, `Scenes.InstanceMoved`,
+      for what a client writes itself; parts the server built move as parts do.
+      It is not an edit and is never committed. `Get` is local and
+      `ToWorld`/`ToLocal` cross over, on a copy or by copy id through `Scenes`,
+      which is what a client has for a copy it did not make. Pivoting a `Model`
+      was the alternative and does not work: the next `Set` writes the part back
+      to where the value says.
+
+      An origin sits on a property only when it drives a marked link in a moved
+      copy, so a copy at the default costs nothing but a boolean read off the
+      shape on a set. A moved one costs a third slot on each such property, which
+      crosses a table doubling; not yet measured on the real level. `Place` takes
+      `At`, which does change values, since what it makes belongs to the copy.
+
+- [x] **References into other scenes.** An `Object`
+      property can point at an object in another scene, with no new property
+      type: a target in the same copy is stored as a local id, as before, and
+      one elsewhere as an address, `<Guid>:<LocalId>` as text. The Guid because
+      a local id means nothing outside its copy and a scene id nothing on the
+      next server. The two share the `Object` type id on different wire
+      shapes, so the tag tells them apart and packs without an address are
+      unchanged.
+
+      An address is looked up on every read and answers only when its scene has
+      exactly one live copy. Pedro's call over taking the oldest copy: a scene
+      loaded twice reads as `nil` with the address kept, and `Set` with an object
+      in one is refused, which is the refusal `Objects.new` already makes and
+      the reason another copy of the holder's own scene is still refused.
+      `Duplicate`, `DuplicateGroup` and `Place` leave an address alone, and a
+      placing transaction carries it as a plain value rather than a create to
+      fill in. A client resolves against the Guids it has been told, so a private
+      scene it isn't admitted to reads as `nil`, though the value still shows
+      that player the Guid. Its own scenes have no Guid and can't be targets. A
+      scene remade by `fromBuffer` or a push has a new Guid, and references to
+      the original don't follow it.
+
 - [x] **The server's `Lock` and `Unlock` take one object.** The client and a
       transaction take one object or a list; the server took only a list and
       walked a lone object as a list of its own fields, which errored. The

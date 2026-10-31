@@ -59,6 +59,14 @@ Each column is written whichever of these ways comes out smallest:
   after the blocks it takes inputs from writes the same few small numbers on
   every row.
 
+A reference into another scene is an `Object` value on the bytes wire shape,
+holding `<Guid>:<LocalId>` as text, where a local id is a varint. The tag tells
+them apart, so a pack without one is byte for byte what it was. A column holding
+any address has no single distance to write, so it falls back to the column
+encodings every other value can use. A build from before these existed reads an
+`Object` as a varint and would misread one, so a pack holding an address needs a
+build that knows them.
+
 Everything is written column by column, bitmaps and values alike, so similar
 bytes sit together. The pack is then compressed with zstd, at level 19 for
 scenes and 9 for database shards, when that makes it smaller. A reader checks
@@ -109,6 +117,12 @@ save (the registry saying something new about it, and the object carrying it
 under the new type), anything unknown in database metadata, and anything a
 **placement** or a transaction's `Duplicate` would have to carry — those build
 fresh objects of known types from known values.
+
+A scene's inserts sit in the pack's header, ahead of the payload and outside its
+compression, under a flag: the last insert id, then each insert's id, Guid and
+origin. Changing them rewrites the header and copies the payload across untouched.
+Without the flag a pack is byte for byte what it was, and a build from before them
+refuses one that has it, as it refuses any flag it doesn't know.
 
 Objects and packs carry a format version, and readers refuse anything newer
 than they understand rather than misreading it. Individual metadata records do

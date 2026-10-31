@@ -70,6 +70,26 @@ export type LoadOptions = {
     -- loading screen -- can give more, and math.huge builds everything without
     -- waiting at all.
     Budget: number?,
+
+    -- Where the copy's local space sits. The default leaves every value where
+    -- it says it is. Only a link marked SceneSpace follows it; see Objects/Shared.
+    Origin: CFrame?,
+
+    -- Server only. Where to fetch a scene this one inserts when nobody has
+    -- registered it, which it then is, under its Guid for a name. Source is which
+    -- of its packs, "Published" unless given. Left out, an insert whose scene is
+    -- not registered warns and is skipped.
+    Store: DataStore?,
+    Source: SceneSource?,
+}
+
+-- One scene inserted into another, as Scene:GetInserts lists them: which scene,
+-- and where it sits in the local space of the scene it is inserted in. Id is what
+-- an address names it by, and is never handed out twice.
+export type Insert = {
+    Id: number,
+    Guid: string,
+    Origin: CFrame,
 }
 
 -- One live copy of a scene. Load makes them and every one is equal: there is no
@@ -114,6 +134,16 @@ export type SceneInstance = {
     -- into PlayerGui or into a Model of its own goes back there.
     Parent: Instance?,
 
+    -- Server only, and nil at the default. Read it through GetOrigin.
+    Origin: CFrame?,
+
+    -- Server only. The copies inserted here, by insert id, each an ordinary copy
+    -- of its source held read only: its objects are the source's to change. Host
+    -- and InsertId say the same from the other end, on a copy that is one.
+    Inserted: {[number]: SceneInstance},
+    Host: SceneInstance?,
+    InsertId: number?,
+
     -- The one crossing between the two identities, and deliberately scoped to a
     -- copy: a persistent id names an object here, but names one in every other
     -- live copy of the same scene too.
@@ -136,8 +166,9 @@ export type SceneInstance = {
     -- this copy's scene mints, and the references inside the pack are remapped
     -- onto them; a reference pointing at anything the pack did not carry is
     -- dropped, because the id it holds means nothing here. Returns what it made,
-    -- or nil if the pack could not be read.
-    Place: (self: SceneInstance, Pack: buffer) -> {ObjectTypes.Object}?,
+    -- or nil if the pack could not be read. At moves what is placed, within this
+    -- copy's local space, through every SceneSpace link's value.
+    Place: (self: SceneInstance, Pack: buffer, At: CFrame?) -> {ObjectTypes.Object}?,
 
     Find: (self: SceneInstance, Local: Handles.LocalId) -> ObjectTypes.Object?,
     GetObjects: (self: SceneInstance) -> {ObjectTypes.Object},
@@ -149,6 +180,15 @@ export type SceneInstance = {
     -- says it is. Explicit rather than a side effect of unloading, because with
     -- more than one copy live, "save on unload" has to pick one and cannot.
     Commit: (self: SceneInstance) -> (),
+
+    -- The copy's local space. Moving it moves every SceneSpace link and changes
+    -- no value, so it is neither an edit nor anything a commit writes.
+    GetOrigin: (self: SceneInstance) -> CFrame,
+    SetOrigin: (self: SceneInstance, Origin: CFrame) -> boolean,
+
+    -- A CFrame or a position, between this copy's local space and the world.
+    ToWorld: (self: SceneInstance, Value: any) -> any,
+    ToLocal: (self: SceneInstance, Value: any) -> any,
 
     Unload: (self: SceneInstance) -> (),
 
@@ -218,6 +258,15 @@ export type ServerScene = Scene & {
     -- long as the game keeps it. Returns the backup's id -- when it was taken,
     -- in unix milliseconds -- or nil when every attempt failed.
     Backup: (self: ServerScene, Store: DataStore) -> number?,
+
+    -- Another scene placed in this one, at an origin in this scene's local space,
+    -- as many times as you like. Takes effect in every live copy and goes straight
+    -- into the pack, without a commit. Returns the insert's id, or nil when the
+    -- scene is not registered here or this would put a scene inside itself.
+    Insert: (self: ServerScene, Source: ServerScene, Origin: CFrame?) -> number?,
+    RemoveInsert: (self: ServerScene, Id: number) -> boolean,
+    MoveInsert: (self: ServerScene, Id: number, Origin: CFrame) -> boolean,
+    GetInserts: (self: ServerScene) -> {Insert},
 
     -- Whether the scene is anybody's to see. A private scene is told to the
     -- players it admits and to nobody else; a public one is everybody's, and

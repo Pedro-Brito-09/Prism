@@ -34,6 +34,11 @@ paused in it.
   the server and every other player never see it. In a scene the client owns
   the shown value is the value, so committing that scene saves it.
 
+A gizmo works in the world and a value is relative to its copy, so in a copy that
+has been moved, cross over first with
+`Prism.Scenes:ToLocal(crate.InstanceId, pointer)`; see
+[Local space](/guides/local-space#working-in-the-world).
+
 The argument is ignored on the server, where every set is already the real one.
 It works the same on an object in a scene the client owns, where nothing is sent
 either way but the history still records the drag as one step.

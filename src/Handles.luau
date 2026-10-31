@@ -61,4 +61,58 @@ function Handles.IsGuid(Text: any): boolean
     return type(Text) == "string" and #Text == Handles.GUID_LENGTH and string.match(Text, "^[%w%-_]+$") ~= nil
 end
 
+-- What a reference to an object in another scene stores. A local id alone means
+-- nothing there, and a scene id means nothing on the next server, so it takes
+-- the Guid: the one name for a scene that outlives the session. Text, so it
+-- saves, compares and rides a packet as it is.
+--
+-- Every scene inserted into another shares its source's Guid, so an object in
+-- one goes by the scene it was inserted into, and the insert ids down to it:
+-- "<Guid>/<Insert>:<LocalId>", a slash each for scenes inserted inside scenes.
+function Handles.Address(Guid: string, Local: LocalId, Path: {number}?): string
+    if Path then
+        return `{Guid}/{table.concat(Path, "/")}:{Local}`
+    end
+
+    return `{Guid}:{Local}`
+end
+
+-- The parts of an address, or nil for anything that is not exactly what Address
+-- would have written: a second spelling of one target would read as a change of
+-- target. Local id zero is refused for the same reason, since "points at
+-- nothing" already has a spelling. Path is nil for an address with no inserts.
+function Handles.ParseAddress(Text: any): (string?, LocalId?, {number}?)
+    if type(Text) ~= "string" then
+        return nil, nil, nil
+    end
+
+    const Guid, Inserts, Digits = string.match(Text, "^([^/:]*)([/%d]*):(%d+)$")
+    if not Handles.IsGuid(Guid) then
+        return nil, nil, nil
+    end
+
+    const Local = tonumber(Digits)
+    if not Local or Local < 1 or Local > Handles.MAX_LOCAL then
+        return nil, nil, nil
+    end
+
+    local Path: {number}? = nil
+    if Inserts ~= "" then
+        const Found = {}
+        for Id in string.gmatch(Inserts :: string, "/(%d+)") do
+            table.insert(Found, tonumber(Id) :: number)
+        end
+
+        -- A slash with no id after it finds nothing, and Address would write an
+        -- empty path straight back as that slash.
+        Path = if #Found > 0 then Found else nil
+    end
+
+    if Handles.Address(Guid :: string, Local, Path) ~= Text then
+        return nil, nil, nil
+    end
+
+    return Guid, Local, Path
+end
+
 return Handles

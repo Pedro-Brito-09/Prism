@@ -37,7 +37,8 @@ A value that fails a rejecting constraint is refused — `Set` returns `false` �
 and one outside a clamping constraint is brought into range.
 
 `Object` is a reference to another object — a button's door, a path node's next
-node. It's stored as a local id, so it's saved and duplicated like one; see
+node. It's stored as a local id, so it's saved and duplicated like one, or as an
+address when the target is in another scene; see
 [References](/guides/references) for what that buys you and what it rules out.
 
 A `Table` is a list, every item one type and held to that type's constraints:

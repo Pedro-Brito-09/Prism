@@ -325,7 +325,7 @@ const function ApplyLocal(Transaction: Transaction): (boolean, {number})
                 -- entry names a create, the held id where it does not.
                 if type(Names) == "table" then
                     const Held = if type(Prop.Value) == "table" then Prop.Value else {}
-                    const List = table.create(#Names) :: {number}
+                    const List = table.create(#Names) :: {any}
 
                     for Item, Entry in Names do
                         const Points = if Entry ~= 0 then Created[Entry] else nil

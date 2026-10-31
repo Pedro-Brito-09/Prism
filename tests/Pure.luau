@@ -97,6 +97,61 @@ for _, pair in {{1, 1}, {1, 4294967295}, {65535, 1}, {65535, 4294967295}, {4096,
     ok(joined == scene * 2 ^ 32 + id, `Join({scene},{id}) is not Scene*2^32+Local`)
 end
 
+-- An address: a reference into another scene. Both halves come back, and only
+-- what Address itself would write is one, since a second spelling of the same
+-- target would read as a change of target.
+do
+    local guid = "abcdefghij-_0123456789"
+    ok(Handles.IsGuid(guid), "the guid under test should be one")
+
+    for _, id in {1, 127, 70000, Handles.MAX_LOCAL} do
+        local address = Handles.Address(guid, id)
+        local gotGuid, gotLocal = Handles.ParseAddress(address)
+        ok(gotGuid == guid, `ParseAddress({address}) guid gave {gotGuid}`)
+        ok(gotLocal == id, `ParseAddress({address}) local gave {gotLocal}`)
+        ok(PropertyTypes:IsValid("Object", address), `{address} should be a valid Object value`)
+    end
+
+    for _, bad in {
+        guid,
+        `{guid}:`,
+        `{guid}:0`,
+        `{guid}:007`,
+        `{guid}:1.5`,
+        `{guid}:-1`,
+        `{guid}:{Handles.MAX_LOCAL + 1}`,
+        `{guid}:1:2`,
+        `short:1`,
+        `:1`,
+        "",
+    } do
+        ok(Handles.ParseAddress(bad) == nil, `ParseAddress should refuse "{bad}"`)
+        ok(not PropertyTypes:IsValid("Object", bad), `"{bad}" should not be a valid Object value`)
+    end
+
+    -- Through inserts: a slash each, in order from the outermost.
+    for _, path in {{3}, {3, 12}, {1, 2, 4}} do
+        local address = Handles.Address(guid, 9, path)
+        local gotGuid, gotLocal, gotPath = Handles.ParseAddress(address)
+        ok(gotGuid == guid and gotLocal == 9, `ParseAddress({address}) lost its ends`)
+        ok(gotPath ~= nil and #gotPath == #path, `ParseAddress({address}) path length`)
+        for index, id in path do
+            ok(gotPath ~= nil and gotPath[index] == id, `ParseAddress({address}) path item {index}`)
+        end
+        ok(PropertyTypes:IsValid("Object", address), `{address} should be a valid Object value`)
+    end
+
+    local _, _, noPath = Handles.ParseAddress(Handles.Address(guid, 9))
+    ok(noPath == nil, "an address with no inserts has no path")
+
+    for _, bad in {`{guid}/:1`, `{guid}//2:1`, `{guid}/2/:1`, `{guid}/02:1`, `{guid}2:1`} do
+        ok(Handles.ParseAddress(bad) == nil, `ParseAddress should refuse "{bad}"`)
+    end
+
+    ok(Handles.ParseAddress(4) == nil, "a number is not an address")
+    ok(PropertyTypes:IsValid("Object", 4), "a local id is still a valid Object value")
+end
+
 
 -- Recycling pool: ids come back after release.
 do

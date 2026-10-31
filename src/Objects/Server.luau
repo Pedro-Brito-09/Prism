@@ -101,11 +101,117 @@ const function ReachOf(Obj: Object): Types.Reach
     return if Registry then Registry.Replicate else "Admitted"
 end
 
+-- What an address needs to know of the world, on this side. See Objects/Shared.
+const World: Shared.AddressWorld = {
+    SceneOfGuid = function(Guid: string): Types.SceneIdentifier?
+        const Scene = SceneRegistry.ByGuid[Guid]
+        return if Scene then Scene.Id else nil
+    end,
+
+    GuidOf = function(Scene: Types.SceneIdentifier): string?
+        const Found = SceneRegistry.ById[Scene]
+        return if Found then Found.Guid else nil
+    end,
+
+    SceneOf = function(Copy: Types.SceneInstanceId): Types.SceneIdentifier?
+        const Live = SceneRegistry.Instances[Copy]
+        return if Live then Live.Scene else nil
+    end,
+
+    -- A scene's one copy of its own: a copy inserted into another scene is not
+    -- one, however many there are.
+    OnlyCopy = function(Scene: Types.SceneIdentifier): Types.SceneInstanceId?
+        const Found = SceneRegistry.ById[Scene]
+        if not Found then
+            return nil
+        end
+
+        local Only: Types.SceneInstanceId? = nil
+        for Id, Live in Found.Instances do
+            if Live.Host then
+                continue
+            end
+
+            if Only then
+                return nil
+            end
+
+            Only = Id
+        end
+
+        return Only
+    end,
+
+    HostOf = function(Copy: Types.SceneInstanceId): (Types.SceneInstanceId?, number?)
+        const Live = SceneRegistry.Instances[Copy]
+        if Live and Live.Host then
+            return Live.Host.Id, Live.InsertId
+        end
+
+        return nil, nil
+    end,
+
+    Inserted = function(Copy: Types.SceneInstanceId, Insert: number): Types.SceneInstanceId?
+        const Live = SceneRegistry.Instances[Copy]
+        const Inside = if Live then Live.Inserted[Insert] else nil
+        return if Inside then Inside.Id else nil
+    end,
+
+    Local = function(Copy: Types.SceneInstanceId, Id: number): Object?
+        const Live = SceneRegistry.Instances[Copy]
+        return if Live then Live.ByLocal[Id] else nil
+    end,
+}
+
 -- One object in one copy, by the id a reference stores. The crossing between
--- the two identities, and scoped to a copy for the reason Find is.
-const function Find(Copy: Types.SceneInstanceId, Local: number): Object?
-    const Live = SceneRegistry.Instances[Copy]
-    return if Live then Live.ByLocal[Local] else nil
+-- the two identities, and scoped to a copy for the reason Find is. An address
+-- starts from the copy as well, when it names a scene inserted there.
+const function Find(Copy: Types.SceneInstanceId, Local: number | string): Object?
+    if type(Local) == "string" then
+        return Shared.Locate(World, Copy, Local)
+    end
+
+    return World.Local(Copy, Local)
+end
+
+-- What to store to point at an object in another scene.
+const function Address(Target: Object, Copy: Types.SceneInstanceId): (string?, string?)
+    return Shared.AddressOf(World, Target, Copy)
+end
+
+-- Whether an object belongs to a scene inserted into another. Those are its
+-- source scene's to change, so nothing but an update touches them.
+function Objects.IsInserted(Obj: Object): boolean
+    const Live = SceneRegistry.Instances[Obj.InstanceId]
+    return Live ~= nil and Live.Host ~= nil
+end
+
+-- One inserted object brought to what its source now says. The property itself
+-- rather than the object's Set, which refuses here, and only what differs: an
+-- update to one door in a hallway is one packet, not one per property of every
+-- object in it. A value the pack left out is the default, so a property reset
+-- in the source resets here.
+function Objects.Update(Obj: Object, Saved: any)
+    for PropertyId, Prop in Obj.Properties do
+        const Wanted = if Saved.Properties[PropertyId] ~= nil then Saved.Properties[PropertyId] else Prop.DefaultValue
+        const Held = if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+
+        if PropertyTypes:Equals(Prop.Type, Held, Wanted) then
+            continue
+        end
+
+        const _, Changed = Prop:Set(Wanted)
+        if not Changed then
+            continue
+        end
+
+        const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
+        if Compressed then
+            Audience.Fire(Network.PropertyChanged, Obj.Scene, ReachOf(Obj), Obj.RuntimeId, Prop.Parent, Compressed)
+        end
+    end
+
+    Obj.Unknown = Shared.Leftovers(Obj, Saved)
 end
 
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
@@ -134,9 +240,14 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
         return false
     end
 
+    if Objects.IsInserted(self) then
+        Logger:Warn(`{self.Name} is part of an inserted scene. Change its source scene and commit that.`)
+        return false
+    end
+
     -- Takes the target object as readily as its id, which is the counterpart
     -- to Get handing one back.
-    const Allowed, Val = Shared.Accept(self, Prop, Value, Find)
+    const Allowed, Val = Shared.Accept(self, Prop, Value, Find, Address)
     if not Allowed then
         return false
     end
@@ -242,7 +353,17 @@ const function Teardown(self: Object, Announce: boolean)
 end
 
 const function __destroy(self: Object)
+    if Objects.IsInserted(self) then
+        Logger:Warn(`{self.Name} is part of an inserted scene. Change its source scene and commit that.`)
+        return
+    end
+
     Teardown(self, true)
+end
+
+-- The one way an inserted object goes: its source no longer has it.
+function Objects.Remove(Obj: Object)
+    Teardown(Obj, true)
 end
 
 -- Read through __index rather than set on each object: five fields an object
@@ -695,23 +816,24 @@ function Objects:Split(Persistent: Types.PersistentId): (Types.SceneIdentifier, 
     return Handles.Split(Persistent)
 end
 
--- The object a stored reference names, for a caller holding the raw local id
+-- The object a stored reference names, for a caller holding the raw value
 -- rather than reading it off a property. Scoped to a copy, because that is the
--- only scope a local id answers in.
-function Objects:Resolve(Copy: Types.SceneInstanceId, Local: number): Object?
+-- only scope a local id answers in. An address ignores it.
+function Objects:Resolve(Copy: Types.SceneInstanceId, Local: number | string): Object?
     return Find(Copy, Local)
 end
 
 -- What may be written into an Object property of an object in this copy, as a
--- local id, or nil and the reason it may not. Exported so a transaction makes
--- exactly the check Object:Set makes: a reference that means one thing through
--- a set and another through a transaction is worse than either rule alone.
+-- local id or an address, or nil and the reason it may not. Exported so a
+-- transaction makes exactly the check Object:Set makes: a reference that means
+-- one thing through a set and another through a transaction is worse than
+-- either rule alone.
 function Objects.Reference(
     Copy: Types.SceneInstanceId,
     Prop: PropertyTypes.Property<any>,
     Value: any
-): (number?, string?)
-    return Shared.Reference(Copy, Prop, Value, Find)
+): (any?, string?)
+    return Shared.Reference(Copy, Prop, Value, Find, Address)
 end
 
 function Objects:GetRegistered(): {[ObjectIdentifier]: ObjectRegistry}
@@ -760,7 +882,7 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
 
     -- Wired after the values are in place, so a link starts at the object's own
     -- value rather than at the registry default and then being corrected.
-    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties)
+    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties, nil, Instance_.Origin)
 
     -- Into the copy holding it, and nowhere else. Which copy rather than which
     -- scene, because two copies of one room have to be able to sit in two
@@ -904,7 +1026,7 @@ const function Construct(
             -- itself does not exist yet, and does not need to: a reference is
             -- read against the copy, not against whoever holds it.
             if PropertyTypes.HoldsReferences(Prop) then
-                const Target, Why = Shared.Reference(Instance_.Id, Prop, Value, Find)
+                const Target, Why = Shared.Reference(Instance_.Id, Prop, Value, Find, Address)
                 if Target == nil then
                     Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
                     continue
@@ -1096,7 +1218,12 @@ function Objects.new(
     Target: any?,
     Announce: boolean?
 ): Object
-    return Construct(Reference, InitialValues, ResolveInstance(Target), nil, Announce ~= false)
+    const Live = ResolveInstance(Target)
+    if Live and Live.Host then
+        Logger:Error("Tried creating an object in an inserted scene. Change its source scene and commit that.")
+    end
+
+    return Construct(Reference, InitialValues, Live, nil, Announce ~= false)
 end
 
 -- Rebuilds an object under the id it was saved with. Used by a scene loading its
