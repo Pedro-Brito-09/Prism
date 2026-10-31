@@ -107,6 +107,7 @@ const function Reveal(Plr: Player, List: {Scene})
     const CopyIds: {number} = {}
     const CopyScenes: {SceneIdentifier} = {}
     const CopyOpened: {boolean} = {}
+    const Moved: {any} = {}
     const Held: {any} = {}
 
     -- Every object in a scene revealed whole, for its locks: who holds what is
@@ -146,6 +147,10 @@ const function Reveal(Plr: Player, List: {Scene})
                 table.insert(CopyIds, Copy.Id)
                 table.insert(CopyScenes, Scene.Id)
                 table.insert(CopyOpened, Copy.Opened)
+
+                if Copy.Origin then
+                    table.insert(Moved, Copy)
+                end
             end
 
             for _, Obj in Copy.Objects do
@@ -171,6 +176,11 @@ const function Reveal(Plr: Player, List: {Scene})
 
     if #CopyIds > 0 then
         Network.InstancesReplayed:Fire(Plr, CopyIds, CopyScenes, CopyOpened)
+    end
+
+    -- Ahead of the objects, which are placed by it as they arrive.
+    for _, Copy in Moved do
+        Network.InstanceMoved:Fire(Plr, Copy.Id, Copy.Origin)
     end
 
     -- Before anything yields, like the copies: a lock taken from here on is
@@ -282,7 +292,7 @@ end
 -- is dropped rather than carried over. Carrying it would be worse than losing
 -- it -- the id would name whatever in this copy happens to answer to it, and a
 -- pasted button would come up wired to a door it has never met.
-const function __place(self: SceneInstance, Pack: buffer): {ObjectTypes.Object}?
+const function __place(self: SceneInstance, Pack: buffer, At: CFrame?): {ObjectTypes.Object}?
     const Ok, _, Decompressed = pcall(function()
         return Compressor:DecompressScene(Pack)
     end)
@@ -308,6 +318,7 @@ const function __place(self: SceneInstance, Pack: buffer): {ObjectTypes.Object}?
         end
 
         const Values, References = ObjectShared.SplitReferences(Saved.Properties)
+        ObjectShared.Shift(Objects:GetRegistry(Saved.Registry), Values, At)
         const Obj = Objects.new(Saved.Registry, Values, self, false)
 
         table.insert(Made, Obj)
@@ -378,6 +389,52 @@ end
 
 const function __commit(self: SceneInstance)
     self.Owner.Data = __instance_serialize(self)
+end
+
+-- Told to whoever is told of the copy, as InstanceAdded is: one packet for the
+-- copy and nothing for its objects, none of whose values changed.
+const function AnnounceOrigin(self: any)
+    Audience.Fire(
+        Network.InstanceMoved,
+        self.Scene,
+        if self.Opened then "Admitted" else "Everyone",
+        self.Id,
+        self.Origin or CFrame.identity
+    )
+end
+
+const function __get_origin(self: any): CFrame
+    return self.Origin or CFrame.identity
+end
+
+-- The whole copy, at once, and it never reaches the scene: a commit writes values
+-- and an origin is not one, so a moved room saved is the same room. A copy set
+-- aside takes the new origin when it comes back, its links being down until then.
+const function __set_origin(self: any, Origin: CFrame): boolean
+    if typeof(Origin) ~= "CFrame" then
+        Logger:Warn(`A copy's origin is a CFrame; got a {typeof(Origin)}.`)
+        return false
+    end
+
+    self.Origin = ObjectShared.NormalOrigin(Origin)
+
+    for _, Obj in self.Objects do
+        ObjectShared.ApplyOrigin(Obj, self.Origin)
+    end
+
+    if not self.Suspended then
+        AnnounceOrigin(self)
+    end
+
+    return true
+end
+
+const function __to_world(self: any, Value: any): any
+    return if self.Origin then self.Origin * Value else Value
+end
+
+const function __to_local(self: any, Value: any): any
+    return if self.Origin then self.Origin:Inverse() * Value else Value
 end
 
 -- A copy withdrawn from the world rather than unloaded, and kept whole: the
@@ -465,6 +522,10 @@ const function __instance_revive(self: SceneInstance): boolean
         self.Opened
     )
 
+    if self.Origin then
+        AnnounceOrigin(self)
+    end
+
     Objects.AnnounceAll(Objects.ReviveInstance(Held))
     return true
 end
@@ -502,7 +563,7 @@ const function __instance_unload(self: SceneInstance)
     Audience.Fire(Network.InstanceRemoved, self.Scene, if self.Opened then "Admitted" else "Everyone", self.Id)
 end
 
-const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean): SceneInstance
+const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean, Origin: CFrame?): SceneInstance
     InstanceCounter += 1
 
     const Instance_ = {}
@@ -510,6 +571,7 @@ const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean): Sc
     Instance_.Scene = Owner.Id
     Instance_.Owner = Owner
     Instance_.Opened = Opened
+    Instance_.Origin = Origin
 
     -- None for an opened copy. It would hold nothing, and an empty folder named
     -- for the scene, in a workspace every player can see, is exactly the
@@ -527,6 +589,10 @@ const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean): Sc
     Instance_.GetObjects = __instance_objects
     Instance_.Serialize = __instance_serialize
     Instance_.Commit = __commit
+    Instance_.GetOrigin = __get_origin
+    Instance_.SetOrigin = __set_origin
+    Instance_.ToWorld = __to_world
+    Instance_.ToLocal = __to_local
     Instance_.Unload = __instance_unload
     Instance_.Suspend = __instance_suspend
     Instance_.Revive = __instance_revive
@@ -542,6 +608,11 @@ const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean): Sc
     -- copy. It says a copy of some scene exists, and nothing more. An opened
     -- copy only to the admitted, who are the only ones it sends anything to.
     Audience.Fire(Network.InstanceAdded, Owner.Id, if Opened then "Admitted" else "Everyone", Instance_.Id, Owner.Id, Opened)
+
+    if Origin then
+        AnnounceOrigin(Instance_)
+    end
+
     return Instance_ :: any
 end
 
@@ -609,8 +680,8 @@ end
 
 -- Load and Open are one reading of the pack, and differ only in whether the
 -- server builds the parts.
-const function Read(self: Scene, Parent: Instance?, Opened: boolean, Budget: number): any
-    const Instance_ = NewInstance(self, Parent, Opened) :: any
+const function Read(self: Scene, Parent: Instance?, Opened: boolean, Budget: number, Origin: CFrame?): any
+    const Instance_ = NewInstance(self, Parent, Opened, Origin) :: any
 
     const Data = self.Data
     if not Data then
@@ -672,11 +743,11 @@ const function Read(self: Scene, Parent: Instance?, Opened: boolean, Budget: num
 end
 
 const function __load(self: Scene, Parent: Instance?, Options: Types.LoadOptions?): any
-    return Read(self, Parent, false, BudgetOf(Options))
+    return Read(self, Parent, false, BudgetOf(Options), ObjectShared.OriginOf(Options))
 end
 
 const function __open(self: Scene, Options: Types.LoadOptions?): any
-    return Read(self, nil, true, BudgetOf(Options))
+    return Read(self, nil, true, BudgetOf(Options), ObjectShared.OriginOf(Options))
 end
 
 -- Every copy at once. Nothing is written back: with more than one copy live,
@@ -1214,6 +1285,23 @@ end
 -- One live copy by its own id. The id names a copy rather than a scene, so this
 -- answers for a caller holding one off an object or off the wire without having
 -- to know which scene it belongs to first.
+-- Where a live copy's local space sits, and the crossing between it and the
+-- world, by id: the same three a client has, which holds an id rather than a
+-- copy for every copy it did not make itself. A copy that is not here is at the
+-- default.
+function Scenes:GetOrigin(Identifier: ObjectTypes.SceneInstanceId): CFrame
+    const Copy = Registry.Instances[Identifier]
+    return (Copy and Copy.Origin) or CFrame.identity
+end
+
+function Scenes:ToWorld(Identifier: ObjectTypes.SceneInstanceId, Value: any): any
+    return Scenes:GetOrigin(Identifier) * Value
+end
+
+function Scenes:ToLocal(Identifier: ObjectTypes.SceneInstanceId, Value: any): any
+    return Scenes:GetOrigin(Identifier):Inverse() * Value
+end
+
 function Scenes:GetInstance(Identifier: ObjectTypes.SceneInstanceId): SceneInstance?
     return Registry.Instances[Identifier]
 end

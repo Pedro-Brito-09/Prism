@@ -64,9 +64,10 @@ five copies and they cannot share a folder.
 
 It is a `Folder`, and that is deliberate: a folder can be parented anywhere, so
 a scene made of `ScreenGui` objects loads into `PlayerGui`, a scene of
-atmospheres into `Lighting`, and a scene you want to move as a unit into a
-`Model` of your own that you pivot. Prism never needs to know what class your
-objects are or where that class belongs.
+atmospheres into `Lighting`, and a scene you want to move as a unit anywhere you
+like, though [an origin](/guides/local-space) is how to do that while its objects
+can still change. Prism never needs to know what class your objects are or where
+that class belongs.
 
 Unloading a copy destroys its folder and everything in it. A default scene
 folder goes with the last of its copies; a parent you supplied is yours and is
@@ -117,7 +118,9 @@ written in. Place the same prefab five times and you get five independent sets.
 References inside the pack follow it: a door and the button that works it come
 out wired to each other. A reference to anything the pack *didn't* carry is
 dropped rather than carried over, because that id means nothing in the target
-copy — and if it happens to mean something, it means the wrong thing.
+copy — and if it happens to mean something, it means the wrong thing. A
+[reference into another scene](/guides/references#into-another-scene) is the
+exception: it means the same thing from anywhere, so it stays.
 
 A client places through a transaction, which makes it one create per object and
 so needs create rights and nothing more:

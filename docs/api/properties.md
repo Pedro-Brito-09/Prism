@@ -41,7 +41,8 @@
 ## A property
 
 What `object:GetProperty` returns. On a property, `Value` is the raw stored value;
-for an `Object` property that is the target's local id.
+for an `Object` property that is the target's local id, or its `<Guid>:<LocalId>`
+address when it is in another scene.
 
 | Member | | |
 |---|---|---|

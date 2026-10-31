@@ -131,6 +131,50 @@ rather than guessed.
 
 ## Done
 
+- [x] **Local space.** Every copy has an origin, from
+      `Load`'s `Origin` or `SetOrigin`, and values stay relative to it. A link
+      marked `SceneSpace` writes `Origin * value` to its target. The flag is on
+      the link, not the property, because whether a target is world space is a
+      fact about the target, and one property can drive a part on one type and
+      an attachment on another. It was a constraint for about a day of design:
+      that could not say so.
+
+      Moving a copy changes no value and sends one packet, `Scenes.InstanceMoved`,
+      for what a client writes itself; parts the server built move as parts do.
+      It is not an edit and is never committed. `Get` is local and
+      `ToWorld`/`ToLocal` cross over, on a copy or by copy id through `Scenes`,
+      which is what a client has for a copy it did not make. Pivoting a `Model`
+      was the alternative and does not work: the next `Set` writes the part back
+      to where the value says.
+
+      An origin sits on a property only when it drives a marked link in a moved
+      copy, so a copy at the default costs nothing but a boolean read off the
+      shape on a set. A moved one costs a third slot on each such property, which
+      crosses a table doubling; not yet measured on the real level. `Place` takes
+      `At`, which does change values, since what it makes belongs to the copy.
+
+- [x] **References into other scenes.** An `Object`
+      property can point at an object in another scene, with no new property
+      type: a target in the same copy is stored as a local id, as before, and
+      one elsewhere as an address, `<Guid>:<LocalId>` as text. The Guid because
+      a local id means nothing outside its copy and a scene id nothing on the
+      next server. The two share the `Object` type id on different wire
+      shapes, so the tag tells them apart and packs without an address are
+      unchanged.
+
+      An address is looked up on every read and answers only when its scene has
+      exactly one live copy. Pedro's call over taking the oldest copy: a scene
+      loaded twice reads as `nil` with the address kept, and `Set` with an object
+      in one is refused, which is the refusal `Objects.new` already makes and
+      the reason another copy of the holder's own scene is still refused.
+      `Duplicate`, `DuplicateGroup` and `Place` leave an address alone, and a
+      placing transaction carries it as a plain value rather than a create to
+      fill in. A client resolves against the Guids it has been told, so a private
+      scene it isn't admitted to reads as `nil`, though the value still shows
+      that player the Guid. Its own scenes have no Guid and can't be targets. A
+      scene remade by `fromBuffer` or a push has a new Guid, and references to
+      the original don't follow it.
+
 - [x] **The server's `Lock` and `Unlock` take one object.** The client and a
       transaction take one object or a list; the server took only a list and
       walked a lone object as a list of its own fields, which errored. The

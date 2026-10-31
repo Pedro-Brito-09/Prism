@@ -36,4 +36,6 @@ different object. The scene's counter rides along in the pack.
 
 The scene id in the high half is the session's, not the saved scene's: a pack
 never holds it. What names a saved scene across servers is its Guid; see
-[Saving](/guides/saving).
+[Saving](/guides/saving). That is also what a reference into another scene
+stores, an address of `<Guid>:<LocalId>`, and why such a reference needs the
+scene to be live exactly once: see [References](/guides/references#into-another-scene).

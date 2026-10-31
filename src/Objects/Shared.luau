@@ -172,6 +172,13 @@ const ATTRIBUTE_TYPES: {[string]: true} = {
     Font = true,
 }
 
+-- Members holding a Vector3 that is not a position. The rest cannot be told
+-- apart from the type, so a Size marked SceneSpace is the marker's to get right.
+const NOT_SPATIAL: {[string]: true} = {
+    Orientation = true,
+    Rotation = true,
+}
+
 -- Links are checked once, against the template, when the type is registered on
 -- the server. A client receives them already checked, beside the template they
 -- were checked against. Every clone has the same class and the same members, so the answer never
@@ -272,7 +279,19 @@ const function ValidateLinks(
         end
 
         Seen[Link.Property] = true
-        table.insert(Valid, Link)
+
+        -- The flag goes and the link stays: it still drives what it drives, at
+        -- the value it holds. Multiplying anything else by a CFrame throws, and
+        -- an Orientation is three angles, which a CFrame would read as a point
+        -- and turn into nonsense without a word.
+        local Kept = Link
+        if Link.SceneSpace and ((Registry.Type ~= "CFrame" and Registry.Type ~= "Vector") or NOT_SPATIAL[Link.Name]) then
+            Logger:Warn(`Object {Name} marks its link to {Link.Name} as SceneSpace, which only a position or a CFrame can be. Flag dropped.`)
+            Kept = table.clone(Link)
+            Kept.SceneSpace = nil
+        end
+
+        table.insert(Valid, Kept)
     end
 
     return if #Valid > 0 then Valid else nil
@@ -293,11 +312,16 @@ end
 -- built and replicated does: a client wiring one used to write every value
 -- back onto it, the same value it held, 330,259 writes on a real level and a
 -- fifth of the time an arriving object took.
+--
+-- Origin is that of the copy holding the object, nil at the default. A SceneSpace
+-- link in a moved copy starts from the default when the object holds no value:
+-- left to the template, the part would sit where the template does.
 const function BuildLinks(
     Target: Instance?,
     Links: {Types.InstanceLinkRegistry}?,
     Props: {[PropertyTypes.PropertyIdentifier]: PropertyTypes.Property<any>},
-    Settled: boolean?
+    Settled: boolean?,
+    Origin: CFrame?
 ): {Types.InstanceLinkRegistry}?
     if not Links or not Target then
         return nil
@@ -319,16 +343,109 @@ const function BuildLinks(
             continue
         end
 
-        if not Settled and Prop.Value ~= nil and not pcall(PropertyShared.Drive, Link, Inst, Prop.Value) then
+        const InSpace = if Link.SceneSpace then Origin else nil
+        const Value = if InSpace and Prop.Value == nil then Prop.DefaultValue else Prop.Value
+        const Written = if InSpace and Value ~= nil then InSpace * Value else Value
+
+        if not Settled and Written ~= nil and not pcall(PropertyShared.Drive, Link, Inst, Written) then
             Logger:Warn(`Failed to apply link {Link.Name} on {Inst.ClassName}. Link dropped.`)
             continue
         end
 
         PropertyShared.Link(Prop, Link, Inst)
+        if InSpace then
+            Prop.Origin = InSpace
+        end
+
         Count += 1
     end
 
     return if Count > 0 then Links else nil
+end
+
+--=============================================================================
+-- Origins
+--=============================================================================
+
+-- Every copy has a local space, and its origin is where that space sits in the
+-- world. Values are written, read and saved relative to it, and only a SceneSpace
+-- link ever sees the world: Origin * value, on the way to the instance. So a
+-- pack holds no positions of any copy in particular, two copies of one room can
+-- stand apart, and moving a whole copy changes no object's value and sends
+-- nothing per object.
+--
+-- Pivoting a Model of your own moves the parts and not the values, so the next
+-- set writes the part straight back to where the value says. This is the same
+-- move with the value on its side.
+--
+-- Nil stands for the default, in the properties and on the copy alike, so a copy
+-- that is never moved reads nothing extra and holds nothing extra.
+
+-- The origin to keep for one asked for: nil for the default, which it is the
+-- same as.
+const function NormalOrigin(Origin: CFrame?): CFrame?
+    return if Origin == CFrame.identity then nil else Origin
+end
+
+-- The origin a load asked for, or the default. A wrong one is said rather than
+-- obeyed, like a wrong Budget.
+const function OriginOf(Options: any?): CFrame?
+    const Origin = Options and Options.Origin
+    if Origin == nil then
+        return nil
+    end
+
+    if typeof(Origin) ~= "CFrame" then
+        Logger:Warn(`A load's Origin is a CFrame; got a {typeof(Origin)}. Using the default.`)
+        return nil
+    end
+
+    return NormalOrigin(Origin)
+end
+
+-- Moves one object's SceneSpace links to a new origin. Nothing else about the
+-- object changes, which is why nothing about it is sent.
+const function ApplyOrigin(Obj: Types.Object, Origin: CFrame?)
+    const Links = Obj.Links
+    if not Links then
+        return
+    end
+
+    for _, Link in Links do
+        if not Link.SceneSpace then
+            continue
+        end
+
+        const Prop = Obj.Properties[Link.Property]
+        if Prop and Prop.Link == Link then
+            PropertyShared.SetOrigin(Prop, Origin)
+        end
+    end
+end
+
+-- A saved object's values moved by At, for a pack placed somewhere of its own.
+-- Written into the table it is given, which is the placing path's own. The
+-- default stands in for a value the pack left out, since that is the value the
+-- object would otherwise take, wherever it was placed.
+const function Shift(Registry: any, Values: {[PropertyTypes.PropertyIdentifier]: any}, At: CFrame?)
+    if not At or not Registry.Links then
+        return
+    end
+
+    for _, Link in Registry.Links do
+        if not Link.SceneSpace then
+            continue
+        end
+
+        const Property = Properties:GetRegistry(Link.Property)
+        const Held = if Values[Link.Property] ~= nil
+            then Values[Link.Property]
+            else if Property then Property.DefaultValue else nil
+
+        if Held ~= nil then
+            Values[Link.Property] = At * Held
+        end
+    end
 end
 
 --=============================================================================
@@ -347,11 +464,25 @@ end
 -- through the copy holding the object doing the referring, never through a
 -- scene and never through the workspace.
 --
+-- A target in another scene cannot be named that way, so it is stored as an
+-- address instead: the scene's Guid and the local id, as Handles writes them.
+-- An address is the one thing here that does go through a scene, and a scene
+-- loaded twice has two answers. It names nothing until one copy is left -- the
+-- same refusal to guess that Objects.new makes of a scene loaded twice, and a
+-- portal wired to whichever room loaded first would be worse than one reading
+-- nil. Nothing else about a reference changes: it is resolved on every read, so
+-- it does not matter which scene loads first, and it stays stored while its
+-- target is away.
+--
 -- Each side hands in its own Find, because Shared cannot require the module
 -- that requires it: the server reads the copy's ByLocal, the client its index
--- of the same thing.
+-- of the same thing. Find answers for both kinds of value, and ignores the copy
+-- for an address, which already says where it points. Address goes the other
+-- way, from a live object in another scene to what to store for it, and answers
+-- nil and the reason when there is no saying.
 
-export type Find = (Instance_: Types.SceneInstanceId, Local: number) -> Types.Object?
+export type Find = (Instance_: Types.SceneInstanceId, Local: number | string) -> Types.Object?
+export type Address = (Target: Types.Object) -> (string?, string?)
 
 -- No target. Zero rather than nil, because a property with no value reads as
 -- its default and the format has to write something either way.
@@ -374,7 +505,7 @@ end
 -- that comes back under the local id it had -- a copy loaded again from the
 -- same pack -- is pointed at again by everything that pointed at it.
 const function ResolveReference(Copy: Types.SceneInstanceId, Value: any, Find: Find): Types.Object?
-    if type(Value) ~= "number" or Value == NO_TARGET then
+    if (type(Value) ~= "number" and type(Value) ~= "string") or Value == NO_TARGET then
         return nil
     end
 
@@ -410,9 +541,9 @@ const function ResolveValue(Copy: Types.SceneInstanceId, Prop: PropertyTypes.Pro
 end
 
 -- What to store for a value someone wants to put in an Object property: a live
--- object, a local id, or nil to clear it. Returns nil and a reason when the
--- value cannot be held, so each caller can refuse the way its layer refuses --
--- a setter returns false, a transaction refuses the whole list.
+-- object, a local id, an address, or nil to clear it. Returns nil and a reason
+-- when the value cannot be held, so each caller can refuse the way its layer
+-- refuses -- a setter returns false, a transaction refuses the whole list.
 --
 -- The type constraint is checked here rather than in Properties:IsValid because
 -- this is the first layer that can: a property knows its own value, not which
@@ -433,15 +564,22 @@ const function ReferenceOne(
     Name: string,
     Constraints: any,
     Value: any,
-    Find: Find
-): (number?, string?)
+    Find: Find,
+    Address: Address
+): (any?, string?)
     if Value == nil then
         return NO_TARGET, nil
     end
 
-    local Target: number
+    local Target: any
 
     if type(Value) == "number" then
+        Target = Value
+    elseif type(Value) == "string" then
+        if not PropertyTypes:IsValid("Object", Value) then
+            return nil, `"{Value}" is not an address`
+        end
+
         Target = Value
     elseif type(Value) == "table" and type((Value :: any).RuntimeId) == "number" then
         const Other = Value :: Types.Object
@@ -449,18 +587,23 @@ const function ReferenceOne(
             return nil, `{Other.Name} has been destroyed`
         end
 
-        -- The one hard constraint on a reference. A local id from another copy
-        -- would name whatever happens to hold that id here, and after either
-        -- scene is saved and loaded somewhere else it would name nothing at
-        -- all. Cross-copy and cross-scene references are out of scope for the
-        -- same reason.
-        if Other.InstanceId ~= Copy then
-            return nil, `{Other.Name} is in another copy, and a reference only names objects in the copy holding it`
-        end
+        -- A local id from another copy would name whatever happens to hold that
+        -- id here, and after either scene is saved and loaded somewhere else it
+        -- would name nothing at all. So anything outside this copy goes by
+        -- address, and another copy of this copy's own scene is refused by the
+        -- same rule as any scene loaded twice: there is no saying which it means.
+        if Other.InstanceId == Copy then
+            Target = Other.LocalId
+        else
+            const Named, Why = Address(Other)
+            if not Named then
+                return nil, Why
+            end
 
-        Target = Other.LocalId
+            Target = Named
+        end
     else
-        return nil, `a {typeof(Value)} is neither an object nor a local id`
+        return nil, `a {typeof(Value)} is neither an object, a local id nor an address`
     end
 
     if Target == NO_TARGET then
@@ -484,10 +627,11 @@ const function Reference(
     Copy: Types.SceneInstanceId,
     Prop: PropertyTypes.Property<any>,
     Value: any,
-    Find: Find
+    Find: Find,
+    Address: Address
 ): (any?, string?)
     if Prop.Type ~= "Table" then
-        return ReferenceOne(Copy, Prop.Name, Prop.Constraints, Value, Find)
+        return ReferenceOne(Copy, Prop.Name, Prop.Constraints, Value, Find, Address)
     end
 
     if Value == nil then
@@ -501,14 +645,14 @@ const function Reference(
     end
 
     const Item = Prop.Constraints and Prop.Constraints.Item
-    const List = table.create(#Value) :: {number}
+    const List = table.create(#Value) :: {any}
 
     for Index, Each in Value do
         if type(Index) ~= "number" then
             return nil, "a list has only numbered items"
         end
 
-        const Target, Why = ReferenceOne(Copy, `{Prop.Name}[{Index}]`, Item, Each, Find)
+        const Target, Why = ReferenceOne(Copy, `{Prop.Name}[{Index}]`, Item, Each, Find, Address)
         if Target == nil then
             return nil, Why
         end
@@ -525,8 +669,16 @@ end
 -- answers nil for an id with nothing to stand for it, which leaves an Object
 -- property where it is -- nil comes back, and the caller sets nothing -- and
 -- drops the item from a Table.
+--
+-- An address goes through as it is. It points outside whatever is being moved,
+-- and it means the same thing wherever it is read from, which is the reason it
+-- exists.
 const function Remap(Prop: PropertyTypes.Property<any>, Value: any, Map: (number) -> number?): any?
     if Prop.Type ~= "Table" then
+        if type(Value) == "string" then
+            return Value
+        end
+
         return if type(Value) == "number" then Map(Value) else nil
     end
 
@@ -536,7 +688,7 @@ const function Remap(Prop: PropertyTypes.Property<any>, Value: any, Map: (number
 
     const List = {}
     for _, Item in Value do
-        const Instead = Map(Item)
+        const Instead = if type(Item) == "string" then Item else Map(Item)
         if Instead ~= nil then
             table.insert(List, Instead)
         end
@@ -590,13 +742,14 @@ const function Accept(
     Obj: Types.Object,
     Prop: PropertyTypes.Property<any>,
     Value: any,
-    Find: Find
+    Find: Find,
+    Address: Address
 ): (boolean, any)
     if not PropertyTypes.HoldsReferences(Prop) then
         return true, Value
     end
 
-    const Target, Why = Reference(Obj.InstanceId, Prop, Value, Find)
+    const Target, Why = Reference(Obj.InstanceId, Prop, Value, Find, Address)
     if Target == nil then
         Logger:Warn(`Cannot point {Obj.Name}.{Prop.Name} at that value: {Why}.`)
         return false, nil
@@ -727,6 +880,10 @@ return {
     ValidateLinks = ValidateLinks,
     BuildLinks = BuildLinks,
     ReleaseLinks = ReleaseLinks,
+    NormalOrigin = NormalOrigin,
+    OriginOf = OriginOf,
+    ApplyOrigin = ApplyOrigin,
+    Shift = Shift,
     Snapshot = Snapshot,
     Leftovers = Leftovers,
 

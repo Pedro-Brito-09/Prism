@@ -35,6 +35,23 @@ end
 
 Shared.Drive = Drive
 
+-- What a link writes for a value: the value itself, or where it lands in the
+-- world on a SceneSpace link in a moved copy. The link first, because it is
+-- read off the shape and most links are not this; Origin is a miss on nearly
+-- every property.
+const function Placed(Prop: any, Link: Types.Drive, Value: any): any
+    if Link.SceneSpace then
+        const Origin = Prop.Origin
+        if Origin then
+            return Origin * Value
+        end
+    end
+
+    return Value
+end
+
+Shared.Placed = Placed
+
 const function __setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): (boolean, boolean)
     const Val = Types:FixValue(self.Type, Value, self.Constraints)
     if Val == nil then
@@ -56,7 +73,7 @@ const function __setter<T>(self: Property<T>, Value: Types.ValueFor<T>?): (boole
     const Drives = self.Drives
     if Drives then
         const Link = self.Link :: Types.Drive
-        if not pcall(Drive, Link, Drives, Val) then
+        if not pcall(Drive, Link, Drives, Placed(self, Link, Val)) then
             Logger:Warn(`Failed to drive {self.Name} onto {Link.Name} of {Drives:GetFullName()}.`)
         end
     end
@@ -193,9 +210,23 @@ function Shared.Link(Prop: any, Link: Types.Drive, Inst: Instance)
     setmetatable(Prop, LinkedShapeOf(Current.Base or Current, Link))
 end
 
+-- Moves a property driving a SceneSpace link to a new origin, and its instance
+-- with it. Writes the default for a property holding none, which a link at the
+-- origin leaves to the template: moved, the template's position is wrong.
+function Shared.SetOrigin(Prop: any, Origin: CFrame?)
+    Prop.Origin = Origin
+
+    const Drives = Prop.Drives
+    const Value = if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+    if Drives and Value ~= nil then
+        pcall(Drive, Prop.Link, Drives, Placed(Prop, Prop.Link, Value))
+    end
+end
+
 -- Stops it. Safe on a property that drives nothing.
 function Shared.Unlink(Prop: any)
     Prop.Drives = nil
+    Prop.Origin = nil
 
     const Base = getmetatable(Prop).Base
     if Base then

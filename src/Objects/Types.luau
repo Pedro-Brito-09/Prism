@@ -30,6 +30,12 @@ export type InstanceLinkRegistry = {
     Type: "Property" | "Attribute",
     Descendant: string?,
     Name: string,
+
+    -- The target wants a world value, so it is written Origin * value, where
+    -- Origin is that of the copy holding the object. Get and a save keep the
+    -- value as it is, relative to the copy. A CFrame or a Vector, and refused at
+    -- registration on anything else; see ValidateLinks.
+    SceneSpace: boolean?,
 }
 
 export type ObjectRegistry = {

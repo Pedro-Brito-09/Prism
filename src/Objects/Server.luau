@@ -101,11 +101,40 @@ const function ReachOf(Obj: Object): Types.Reach
     return if Registry then Registry.Replicate else "Admitted"
 end
 
+-- The one live copy of a scene, or nil when it has none or more than one. An
+-- address names a scene, so this is what it can answer in. See Objects/Shared.
+const function OnlyCopy(Scene: any): any?
+    const First = next(Scene.Instances)
+    if First == nil or next(Scene.Instances, First) ~= nil then
+        return nil
+    end
+
+    return Scene.Instances[First]
+end
+
 -- One object in one copy, by the id a reference stores. The crossing between
--- the two identities, and scoped to a copy for the reason Find is.
-const function Find(Copy: Types.SceneInstanceId, Local: number): Object?
+-- the two identities, and scoped to a copy for the reason Find is. An address
+-- is the exception, and says for itself where it points.
+const function Find(Copy: Types.SceneInstanceId, Local: number | string): Object?
+    if type(Local) == "string" then
+        const Guid, Id = Handles.ParseAddress(Local)
+        const Scene = if Guid then SceneRegistry.ByGuid[Guid] else nil
+        const Only = if Scene then OnlyCopy(Scene) else nil
+        return if Only then Only.ByLocal[Id] else nil
+    end
+
     const Live = SceneRegistry.Instances[Copy]
     return if Live then Live.ByLocal[Local] else nil
+end
+
+-- What to store to point at an object in another scene.
+const function Address(Target: Object): (string?, string?)
+    const Scene = SceneRegistry.ById[Target.Scene]
+    if not Scene or not OnlyCopy(Scene) then
+        return nil, `{Target.Name} is in a scene loaded more than once, and a reference could not say which copy it means`
+    end
+
+    return Handles.Address(Scene.Guid, Target.LocalId), nil
 end
 
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
@@ -136,7 +165,7 @@ const function __setter(self: Object, Reference: Types.PropertyReference, Value:
 
     -- Takes the target object as readily as its id, which is the counterpart
     -- to Get handing one back.
-    const Allowed, Val = Shared.Accept(self, Prop, Value, Find)
+    const Allowed, Val = Shared.Accept(self, Prop, Value, Find, Address)
     if not Allowed then
         return false
     end
@@ -695,23 +724,24 @@ function Objects:Split(Persistent: Types.PersistentId): (Types.SceneIdentifier, 
     return Handles.Split(Persistent)
 end
 
--- The object a stored reference names, for a caller holding the raw local id
+-- The object a stored reference names, for a caller holding the raw value
 -- rather than reading it off a property. Scoped to a copy, because that is the
--- only scope a local id answers in.
-function Objects:Resolve(Copy: Types.SceneInstanceId, Local: number): Object?
+-- only scope a local id answers in. An address ignores it.
+function Objects:Resolve(Copy: Types.SceneInstanceId, Local: number | string): Object?
     return Find(Copy, Local)
 end
 
 -- What may be written into an Object property of an object in this copy, as a
--- local id, or nil and the reason it may not. Exported so a transaction makes
--- exactly the check Object:Set makes: a reference that means one thing through
--- a set and another through a transaction is worse than either rule alone.
+-- local id or an address, or nil and the reason it may not. Exported so a
+-- transaction makes exactly the check Object:Set makes: a reference that means
+-- one thing through a set and another through a transaction is worse than
+-- either rule alone.
 function Objects.Reference(
     Copy: Types.SceneInstanceId,
     Prop: PropertyTypes.Property<any>,
     Value: any
-): (number?, string?)
-    return Shared.Reference(Copy, Prop, Value, Find)
+): (any?, string?)
+    return Shared.Reference(Copy, Prop, Value, Find, Address)
 end
 
 function Objects:GetRegistered(): {[ObjectIdentifier]: ObjectRegistry}
@@ -760,7 +790,7 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
 
     -- Wired after the values are in place, so a link starts at the object's own
     -- value rather than at the registry default and then being corrected.
-    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties)
+    Obj.Links = Shared.BuildLinks(Inst, Ref.Links, Obj.Properties, nil, Instance_.Origin)
 
     -- Into the copy holding it, and nowhere else. Which copy rather than which
     -- scene, because two copies of one room have to be able to sit in two
@@ -904,7 +934,7 @@ const function Construct(
             -- itself does not exist yet, and does not need to: a reference is
             -- read against the copy, not against whoever holds it.
             if PropertyTypes.HoldsReferences(Prop) then
-                const Target, Why = Shared.Reference(Instance_.Id, Prop, Value, Find)
+                const Target, Why = Shared.Reference(Instance_.Id, Prop, Value, Find, Address)
                 if Target == nil then
                     Logger:Warn(`Dropped the initial value of {Prop.Name} on {Ref.Name}: {Why}.`)
                     continue

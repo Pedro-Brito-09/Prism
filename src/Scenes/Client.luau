@@ -140,8 +140,25 @@ function Scenes:GetObjects(Instance_: SceneInstanceId): {any}
     return Objects:GetInstance(Instance_)
 end
 
+-- Where a live copy's local space sits, and the crossing between it and the
+-- world. By id, because that is what a client holds of a copy the server made.
+-- A drag works in the world and a value is relative to its copy, so this is what
+-- stands between a gizmo and Set.
+function Scenes:GetOrigin(Instance_: SceneInstanceId): CFrame
+    return Objects:GetOrigin(Instance_)
+end
+
+function Scenes:ToWorld(Instance_: SceneInstanceId, Value: any): any
+    return Objects:GetOrigin(Instance_) * Value
+end
+
+function Scenes:ToLocal(Instance_: SceneInstanceId, Value: any): any
+    return Objects:GetOrigin(Instance_):Inverse() * Value
+end
+
 const function Register(Payload: SceneRegistry)
     Registered[Payload.Id] = Payload
+    Objects.TrackGuid(Payload.Id, Payload.Guid)
 end
 
 -- Gone on the server. Its copies were dropped by their own packets first, so
@@ -149,6 +166,7 @@ end
 -- scenes would otherwise keep drawing.
 Network.SceneUnregistered:Connect(function(Identifier: SceneIdentifier)
     Registered[Identifier] = nil
+    Objects.TrackGuid(Identifier, nil)
 
     -- Who holds what is told to the admitted, and this player no longer is:
     -- whatever they still have of the scene, they stop being told its locks.
@@ -181,6 +199,10 @@ const function AddInstance(Instance_: SceneInstanceId, Scene: SceneIdentifier, O
 end
 
 Network.InstanceAdded:Connect(AddInstance)
+
+Network.InstanceMoved:Connect(function(Instance_: SceneInstanceId, Origin: CFrame)
+    Objects.MoveInstance(Instance_, Origin)
+end)
 
 Network.InstancesReplayed:Connect(function(Instances: {SceneInstanceId}, Scenes_: {SceneIdentifier}, Opened: {boolean})
     for Index, Instance_ in Instances do
@@ -233,7 +255,7 @@ end
 -- twin -- see Scenes/Server, which explains why the references cannot simply be
 -- carried across -- with nothing to announce, because a scene this client owns
 -- replicates to nobody.
-const function __place(self: SceneInstance, Pack: buffer): any
+const function __place(self: SceneInstance, Pack: buffer, At: CFrame?): any
     const Ok, _, Decompressed = pcall(function()
         return Compressor:DecompressScene(Pack)
     end)
@@ -254,6 +276,7 @@ const function __place(self: SceneInstance, Pack: buffer): any
         end
 
         const Values, References = ObjectShared.SplitReferences(Saved.Properties)
+        ObjectShared.Shift(Objects:GetRegistry(Saved.Registry), Values, At)
         const Obj = Objects.new(Saved.Registry, Values, self)
 
         table.insert(Made, Obj)
@@ -328,6 +351,29 @@ end
 
 const function __commit(self: SceneInstance)
     self.Owner.Data = __instance_serialize(self)
+end
+
+-- The copy's local space, kept by Objects for every copy alike; see the server's.
+const function __get_origin(self: any): CFrame
+    return Objects:GetOrigin(self.Id)
+end
+
+const function __set_origin(self: any, Origin: CFrame): boolean
+    if typeof(Origin) ~= "CFrame" then
+        Logger:Warn(`A copy's origin is a CFrame; got a {typeof(Origin)}.`)
+        return false
+    end
+
+    Objects.MoveInstance(self.Id, Origin)
+    return true
+end
+
+const function __to_world(self: any, Value: any): any
+    return Objects:GetOrigin(self.Id) * Value
+end
+
+const function __to_local(self: any, Value: any): any
+    return Objects:GetOrigin(self.Id):Inverse() * Value
 end
 
 -- A copy withdrawn from the world rather than unloaded, and kept whole. The
@@ -418,7 +464,7 @@ const function __instance_unload(self: SceneInstance)
     table.clear(self.ByLocal)
 end
 
-const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
+const function NewInstance(Owner: any, Parent: Instance?, Origin: CFrame?): SceneInstance
     if NextInstanceId <= 0 then
         Logger:Error("Local scene copy id space exhausted.")
     end
@@ -449,6 +495,10 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     Instance_.GetObjects = __instance_objects
     Instance_.Serialize = __instance_serialize
     Instance_.Commit = __commit
+    Instance_.GetOrigin = __get_origin
+    Instance_.SetOrigin = __set_origin
+    Instance_.ToWorld = __to_world
+    Instance_.ToLocal = __to_local
     Instance_.Unload = __instance_unload
     Instance_.Suspend = __instance_suspend
     Instance_.Revive = __instance_revive
@@ -460,6 +510,11 @@ const function NewInstance(Owner: any, Parent: Instance?): SceneInstance
     -- work out its own persistent identity and Objects:GetInstance answers for
     -- it like any other.
     Objects.TrackInstance(Instance_.Id, Owner.Id, nil, true)
+
+    if Origin then
+        Objects.MoveInstance(Instance_.Id, Origin)
+    end
+
     return Instance_ :: any
 end
 
@@ -512,8 +567,8 @@ FinishReading = function(Instance_: any)
     end
 end
 
-const function Read(self: any, Parent: Instance?, Budget: number): any
-    const Instance_ = NewInstance(self, Parent)
+const function Read(self: any, Parent: Instance?, Budget: number, Origin: CFrame?): any
+    const Instance_ = NewInstance(self, Parent, Origin)
 
     const Data = self.Data
     if not Data then
@@ -570,7 +625,7 @@ const function Read(self: any, Parent: Instance?, Budget: number): any
 end
 
 const function __load(self: any, Parent: Instance?, Options: Types.LoadOptions?): any
-    return Read(self, Parent, BudgetOf(Options))
+    return Read(self, Parent, BudgetOf(Options), ObjectShared.OriginOf(Options))
 end
 
 -- For a local transaction, which must not yield.

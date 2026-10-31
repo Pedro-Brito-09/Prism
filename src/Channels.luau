@@ -319,6 +319,16 @@ const Channels: {Channel} = {
         Args = {Codecs.Bool}, -- RedoOnly
         Returns = {Codecs.Bool},
     },
+
+    {
+        -- A copy's local space moving, or a copy arriving somewhere other than
+        -- the default: after InstanceAdded and ahead of its objects when it
+        -- comes with one. One packet for the whole copy, because no object's
+        -- value changed. The parts the server built move on their own; this is
+        -- for what a client writes itself.
+        Name = "Scenes.InstanceMoved",
+        Args = {Codecs.u32, Codecs.CFrame}, -- InstanceId, Origin
+    },
 }
 
 const ById: {Channel} = Channels

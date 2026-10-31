@@ -18,7 +18,7 @@
 | `Name` | `string` | |
 | `Properties` | `{id}` | Property ids |
 | `Instance` | `Instance?` | The template to clone |
-| `Links` | `{link}?` | `{Property, Type = "Property" \| "Attribute", Name, Descendant?}` |
+| `Links` | `{link}?` | `{Property, Type = "Property" \| "Attribute", Name, Descendant?, SceneSpace?}`; see [Local space](/guides/local-space) |
 | `Replicate` | `string?` | `"Everyone"` (default) or `"Admitted"` |
 
 ## Finding and making objects
@@ -29,7 +29,7 @@
 | `Objects.new(type, values?, copy)` | C | object | In a copy this client owns; `copy` is required |
 | `Objects:Get(runtimeId)` | S C | object? | |
 | `Objects:GetWorkspace()` | S C | `{[runtimeId]: object}` | |
-| `Objects:Resolve(copyId, localId)` | S C | object? | A local id, within a copy |
+| `Objects:Resolve(copyId, value)` | S C | object? | A local id, within a copy, or an address |
 | `Objects:Split(persistentId)` | S C | `sceneId, localId` | |
 | `Objects:FromInstance(instance)` | C | object? | |
 | `Objects:Duplicate(object, copy?)` | S | object? | |

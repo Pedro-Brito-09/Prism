@@ -48,9 +48,10 @@ export type CustomEnumConstraints = {
 
 -- What an Object property may point at, by object type id or registered name.
 -- Unlike every other constraint here, this one cannot be checked from the value
--- alone: the value is a local id, and what it names depends on which copy is
--- asking. Objects/Shared.Reference is where it is enforced, against the copy
--- holding the object being written. IsValid checks the number and nothing more.
+-- alone: the value is a local id or an address, and what it names depends on
+-- which copy is asking and what is loaded. Objects/Shared.Reference is where it
+-- is enforced, against the copy holding the object being written. IsValid checks
+-- the shape of the value and nothing more.
 export type ObjectConstraints = {
     Types: {number | string}?,
 }
@@ -84,8 +85,9 @@ type PropertyValues = {
     Enum: EnumItem,
     CustomEnum: CustomEnum.RegisteredOption<any>,
 
-    -- The target's local id, not the object. See Objects/Shared.
-    Object: number,
+    -- The target's local id, or its address when it is in another scene. Never
+    -- the object. See Objects/Shared.
+    Object: number | string,
 
     -- Frozen. A list changed in place would never pass through Set, so nothing
     -- -- undo, replication, listeners -- would hear that it had changed.
@@ -186,6 +188,13 @@ export type Section = {
 export type Drive = {
     Type: "Property" | "Attribute",
     Name: string,
+
+    -- The target wants a world value, so what it is written is the value placed
+    -- by the origin of the copy holding the object. On the link and not on the
+    -- property, because whether a member is world space is a fact about the
+    -- member: one property can drive a part's CFrame on one type and an
+    -- attachment's, already relative to its part, on another.
+    SceneSpace: boolean?,
 }
 
 export type Property<T = PropertyType> = {
@@ -207,6 +216,11 @@ export type Property<T = PropertyType> = {
     -- rather than through a listener; see Properties/Shared.
     Drives: Instance?,
     Link: Drive?,
+
+    -- The origin of the copy holding the object, on a property driving a
+    -- SceneSpace link in a copy that has been moved, and on no other: a copy
+    -- at the default origin pays nothing for the feature. See Objects/Shared.
+    Origin: CFrame?,
 
     -- Returns (Accepted, Changed). Accepted is false when the value failed
     -- validation; Changed is false when it was accepted but equal to the
@@ -310,6 +324,14 @@ end
 
 function Types:IsValid<T>(Type: T, Value: ValueFor<T>?, Constraints: ConstraintsFor<T>?): boolean
     const TypeOf = typeof(Value)
+
+    -- A reference into another scene, which is text where the rest are numbers.
+    -- Ahead of the check below, which only knows the one Luau type per property
+    -- type. Like a local id, it is valid whether or not it names anything.
+    if Type == "Object" and TypeOf == "string" then
+        return Handles.ParseAddress(Value) ~= nil
+    end
+
     if TypeOf ~= Types.Map[Type] then
         return false
     end

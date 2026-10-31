@@ -21,10 +21,7 @@ and a reload without anything having to rewrite it.
 
 It resolves through the copy holding the object doing the pointing, which is the
 whole point: load one room twice and each copy's button works that copy's own
-door. That also fixes the boundary. **A reference only ever names an object in
-the same copy.** Pointing at one in another copy is refused, and cross-scene
-references are out of scope — the id would mean nothing once either scene was
-loaded somewhere else.
+door.
 
 `Get` answers `nil` in three cases it does not tell apart: nothing is pointed
 at, the target was destroyed, and the target has not arrived yet — a copy builds
@@ -36,6 +33,57 @@ through the property: `button:GetProperty("Target").Value`.
 `Objects:Resolve(copyId, localId)` answers the same question from a raw id, for
 a caller holding one that did not come off a property — the crossing itself,
 scoped to a copy because that is the only scope a local id answers in.
+
+## Into another scene
+
+The same property can point at an object in another scene. Hand it the object:
+
+```luau
+-- server
+portal:Set("Target", lobbyDoor)     -- lobbyDoor is in another scene
+portal:Get("Target")                -- lobbyDoor
+portal:GetProperty("Target").Value  -- "<Guid>:<LocalId>"
+```
+
+A local id means nothing outside its copy, and a scene id means nothing on the
+next server, so what's stored instead is an **address**: the target scene's
+[Guid](/guides/saving) and the local id, as text. Set a target in the same copy
+and the property goes back to holding a plain local id. Either kind can sit in a
+`Table` of `Object`, side by side.
+
+An address is looked up on every read, so it doesn't matter which scene loads
+first. It answers when **the target scene has exactly one live copy**:
+
+| The target scene | `Get` | `Set` with the object |
+|---|---|---|
+| is live once | the object | stores the address |
+| is not loaded | `nil`, address kept | nothing to hand it |
+| is live more than once | `nil`, address kept | refused |
+
+A scene loaded twice has two objects under that address, and picking one would
+wire a portal to whichever room loaded first — the same reason naming such a
+scene in `Objects.new` is refused. That includes another copy of the holder's own
+scene. When a game does want a particular copy, take the local id off the end of
+the address and ask that copy: `copy:Find(tonumber(address:match("%d+$")))`.
+
+A client resolves an address only for scenes it has been told about, so one into
+a private scene the player isn't admitted to reads as `nil`. The value itself
+still reaches that player, Guid included: the scene's name and objects don't, but
+the Guid does. A client's own scene has no Guid and can't be pointed at from
+another scene; its objects can point out at the server's scenes.
+
+Three limits follow from the address naming a saved scene:
+
+- `fromBuffer` and a client's push make a new scene with a new Guid, so references
+  to the original don't follow them. `fromDataStore` keeps the Guid, and so keeps
+  them working.
+- `Duplicate`, `DuplicateGroup` and `Place` leave an address as it is. It already
+  means the same thing from anywhere, so a placed portal keeps its destination,
+  where a local id the pack didn't carry is dropped.
+- `OnChange` doesn't fire when a target appears, as with a local id. A value
+  changing is what it reports, and the value hasn't.
+
+## Constraints, links and wiring
 
 `Constraints.Types` says what the property may point at, by object type id or
 registered name. It's checked when the target actually resolves; an id naming
