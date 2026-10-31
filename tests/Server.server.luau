@@ -5473,7 +5473,7 @@ const function Linked(Name: string)
     const Source = Scenes.new({Name = `{Name}Hall`}) :: any
     const Edit = Source:Load()
     const Door = Edit:Create(DoorId, {[TitleId] = "Old"})
-    const Block = Edit:Create(BlockId, {[TitleId] = "Block", [SpotId] = CFrame.new(1, 0, 0)})
+    const Block = Edit:Create(SpaceBlockId, {[TitleId] = "Block", [SpaceSpotId] = CFrame.new(1, 0, 0)})
     Edit:Commit()
 
     const Rooms = Scenes.new({Name = `{Name}Rooms`}) :: any
@@ -5490,7 +5490,7 @@ T:Test("a commit reaches every insert of the scene", function()
     const Part = A:Find(Block.LocalId).Instance
 
     Door:Set(TitleId, "New")
-    Block:Set(SpotId, CFrame.new(2, 0, 0))
+    Block:Set(SpaceSpotId, CFrame.new(2, 0, 0))
     T:Eq(Held:Get(TitleId), "Old", "nothing moves until the source commits")
 
     Edit:Commit()
@@ -5525,10 +5525,10 @@ end)
 T:Test("a value reset in the source resets in an insert", function()
     const Source, Edit, Rooms, _, A, _, _, Block = Linked("UpdateDefault")
 
-    Block:Set(SpotId, CFrame.new(0, 7, 0))
+    Block:Set(SpaceSpotId, CFrame.new(0, 7, 0))
     Edit:Commit()
 
-    T:Eq(A:Find(Block.LocalId):Get(SpotId), CFrame.new(0, 7, 0), "at the default")
+    T:Eq(A:Find(Block.LocalId):Get(SpaceSpotId), CFrame.new(0, 7, 0), "at the default")
 
     Rooms:Destroy()
     Source:Destroy()

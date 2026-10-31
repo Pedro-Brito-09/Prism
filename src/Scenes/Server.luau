@@ -564,7 +564,10 @@ UpdateCopy = function(Copy: any)
         elseif Held and Held.Registry == Saved.Registry then
             Objects.Update(Held, Saved)
         else
-            table.insert(Made, Objects.restore(Copy, Saved, false))
+            const Obj = Objects.restore(Copy, Saved, false)
+            if Obj then
+                table.insert(Made, Obj)
+            end
         end
     end
 
