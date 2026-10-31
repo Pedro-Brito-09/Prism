@@ -147,7 +147,7 @@ rather than guessed.
       on load; pushing to a running server is not built, and would need
       `MessagingService` and a fetch.
 
-- [ ] **Inserting scenes.** Awaiting its run in Studio. `Scene:Insert(source,
+- [x] **Inserting scenes.** `Scene:Insert(source,
       origin)` puts a scene in another, any number of times, each at its own
       origin. Loading a copy loads a copy of the source per insert, inside it,
       and unload, suspend, revive, dispose and moving all follow. An inserted copy
@@ -175,7 +175,7 @@ rather than guessed.
       `Load` takes `Store` and `Source` to fetch what's missing, as public scenes
       named for their Guid; a private source needs registering by the game first.
 
-- [ ] **Local space.** Awaiting its run in Studio. Every copy has an origin, from
+- [x] **Local space.** Every copy has an origin, from
       `Load`'s `Origin` or `SetOrigin`, and values stay relative to it. A link
       marked `SceneSpace` writes `Origin * value` to its target. The flag is on
       the link, not the property, because whether a target is world space is a
@@ -197,7 +197,7 @@ rather than guessed.
       crosses a table doubling; not yet measured on the real level. `Place` takes
       `At`, which does change values, since what it makes belongs to the copy.
 
-- [ ] **References into other scenes.** Awaiting its run in Studio. An `Object`
+- [x] **References into other scenes.** An `Object`
       property can point at an object in another scene, with no new property
       type: a target in the same copy is stored as a local id, as before, and
       one elsewhere as an address, `<Guid>:<LocalId>` as text. The Guid because
