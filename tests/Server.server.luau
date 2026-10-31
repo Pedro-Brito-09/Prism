@@ -5281,7 +5281,7 @@ const function Hallway(Name: string)
     const Source = Scenes.new({Name = Name}) :: any
     const Copy = Source:Load()
     const Door = Copy:Create(DoorId, {[TitleId] = "HallDoor"})
-    const Block = Copy:Create(BlockId, {[TitleId] = "HallBlock", [SpotId] = CFrame.new(1, 0, 0)})
+    const Block = Copy:Create(SpaceBlockId, {[TitleId] = "HallBlock", [SpaceSpotId] = CFrame.new(1, 0, 0)})
     Copy:Commit()
     Copy:Unload()
     return Source, Door.LocalId, Block.LocalId
@@ -5302,7 +5302,7 @@ T:Test("a scene inserted twice stands in two places", function()
     T:Ok(A and B and A ~= B, "each its own copy")
     T:Eq(A:Find(BlockLocal).Instance.CFrame, CFrame.new(1, 0, 0), "the near one where it was saved")
     T:Eq(B:Find(BlockLocal).Instance.CFrame, CFrame.new(5001, 0, 0), "the far one far away")
-    T:Eq(B:Find(BlockLocal):Get(SpotId), CFrame.new(1, 0, 0), "and the same value in both")
+    T:Eq(B:Find(BlockLocal):Get(SpaceSpotId), CFrame.new(1, 0, 0), "and the same value in both")
 
     Copy:Unload()
     T:Eq(next(Source.Instances), nil, "unloading the room takes its hallways")
