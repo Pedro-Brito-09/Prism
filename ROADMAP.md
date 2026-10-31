@@ -131,7 +131,7 @@ rather than guessed.
 
 ## Done
 
-- [ ] **Inserting scenes.** Awaiting its run in Studio. `Scene:Insert(source,
+- [x] **Inserting scenes.** `Scene:Insert(source,
       origin)` puts a scene in another, any number of times, each at its own
       origin. Loading a copy loads a copy of the source per insert, inside it,
       and unload, suspend, revive, dispose and moving all follow. An inserted copy
