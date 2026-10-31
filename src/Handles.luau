@@ -103,7 +103,9 @@ function Handles.ParseAddress(Text: any): (string?, LocalId?, {number}?)
             table.insert(Found, tonumber(Id) :: number)
         end
 
-        Path = Found
+        -- A slash with no id after it finds nothing, and Address would write an
+        -- empty path straight back as that slash.
+        Path = if #Found > 0 then Found else nil
     end
 
     if Handles.Address(Guid :: string, Local, Path) ~= Text then
