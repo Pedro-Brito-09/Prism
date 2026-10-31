@@ -1426,15 +1426,15 @@ T:Test("a replicated reference resolves to the object it names", function()
 end)
 
 T:Test("a copy's origin reaches the client", function()
-    const BlockId = FindObjectType("TestBlock")
-    const SpotId = FindProperty("TestSpot")
-    if not BlockId or not SpotId or not TitleId then
+    const SpaceBlockId = FindObjectType("TestSpaceBlock")
+    const SpaceSpotId = FindProperty("TestSpaceSpot")
+    if not SpaceBlockId or not SpaceSpotId or not TitleId then
         T:Ok(false, "not registered")
         return
     end
 
     const Block = WaitFor("moved block", function()
-        return FindLiveObject(BlockId :: number, TitleId :: number, "FixtureMovedBlock")
+        return FindLiveObject(SpaceBlockId :: number, TitleId :: number, "FixtureMovedBlock")
     end)
 
     if not Block then
@@ -1442,35 +1442,35 @@ T:Test("a copy's origin reaches the client", function()
         return
     end
 
-    T:Eq(Block:Get(SpotId), CFrame.new(1, 0, 0), "the value is relative to the copy")
+    T:Eq(Block:Get(SpaceSpotId), CFrame.new(1, 0, 0), "the value is relative to the copy")
     T:Eq(Scenes:GetOrigin(Block.InstanceId), CFrame.new(1000, 0, 0), "the origin arrived")
-    T:Eq(Scenes:ToWorld(Block.InstanceId, Block:Get(SpotId)), CFrame.new(1001, 0, 0), "and converts")
+    T:Eq(Scenes:ToWorld(Block.InstanceId, Block:Get(SpaceSpotId)), CFrame.new(1001, 0, 0), "and converts")
 
     -- What this client writes itself lands where the server's part does.
-    T:Ok(Block:Set(SpotId, CFrame.new(2, 0, 0), true), "a preview")
+    T:Ok(Block:Set(SpaceSpotId, CFrame.new(2, 0, 0), true), "a preview")
     if Block.Instance then
         T:Eq(Block.Instance.CFrame, CFrame.new(1002, 0, 0), "lands in the world")
     end
 
-    Block:Set(SpotId, CFrame.new(1, 0, 0), true)
+    Block:Set(SpaceSpotId, CFrame.new(1, 0, 0), true)
 end)
 
 T:Test("a copy this client owns has a local space", function()
-    const BlockId = FindObjectType("TestBlock")
-    const SpotId = FindProperty("TestSpot")
+    const SpaceBlockId = FindObjectType("TestSpaceBlock")
+    const SpaceSpotId = FindProperty("TestSpaceSpot")
     const Sandbox = Scenes.new({Name = "ClientSpace"})
-    if not BlockId or not SpotId or not Sandbox then
+    if not SpaceBlockId or not SpaceSpotId or not Sandbox then
         T:Ok(false, "not registered")
         return
     end
 
     const Copy = Sandbox:Load(nil, {Origin = CFrame.new(500, 0, 0)})
-    const Block = Copy:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
+    const Block = Copy:Create(SpaceBlockId, {[SpaceSpotId] = CFrame.new(1, 0, 0)})
 
     T:Eq(Block.Instance.CFrame, CFrame.new(501, 0, 0), "the part lands in the world")
     T:Ok(Copy:SetOrigin(CFrame.new(700, 0, 0)), "moved")
     T:Eq(Block.Instance.CFrame, CFrame.new(701, 0, 0), "and it went with the copy")
-    T:Eq(Block:Get(SpotId), CFrame.new(1, 0, 0), "while the value stayed")
+    T:Eq(Block:Get(SpaceSpotId), CFrame.new(1, 0, 0), "while the value stayed")
 
     Sandbox:Destroy()
 end)
