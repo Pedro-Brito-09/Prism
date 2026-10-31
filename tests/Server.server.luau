@@ -5968,7 +5968,7 @@ Players.PlayerAdded:Connect(AssignBuilder)
 EditableFixture:OnChange(TitleId, function(Value)
     if Value == "UpdatePulse" then
         const Edit = FixtureHall:Load()
-        Edit:Find(FixtureHallDoor.LocalId):Set(TitleId, "FixtureHallDoorUpdated")
+        Edit:Find(FixtureHallDoor.LocalId):Set(TitleId, "FixtureHallDoorNew")
         Edit:Commit()
         Edit:Unload()
         return

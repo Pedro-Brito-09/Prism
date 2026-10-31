@@ -1520,7 +1520,7 @@ T:Test("an update to a source reaches its inserts here", function()
     T:Ok(Editable:Set(TitleId, "UpdatePulse"), "asked the server to commit a change")
 
     T:Eventually(function()
-        return Before:Get(TitleId) == "FixtureHallDoorUpdated"
+        return Before:Get(TitleId) == "FixtureHallDoorNew"
     end, 5, "the same object took the new value")
 
     Editable:Set(TitleId, EDITABLE_MARKER)
