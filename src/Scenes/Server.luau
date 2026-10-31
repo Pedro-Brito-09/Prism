@@ -872,7 +872,9 @@ type Reading = {
     Chain: {[string]: true},
 }
 
-local Read: (self: Scene, Parent: Instance?, Opened: boolean, Context: Reading, Origin: CFrame?, Host: any?, InsertId: number?) -> any
+-- Bare, unlike the declarations above: annotated, the new solver keeps it and
+-- the function below as two types, and a call to the pair is not checked.
+local Read
 
 -- One insert of a copy, as a copy of its own in that copy's folder. A source that
 -- cannot be found warns and leaves the rest of the level loading: a missing
@@ -928,7 +930,7 @@ end
 
 -- Load and Open are one reading of the pack, and differ only in whether the
 -- server builds the parts.
-Read = function(self: Scene, Parent: Instance?, Opened: boolean, Context: Reading, Origin: CFrame?, Host: any?, InsertId: number?): any
+function Read(self: Scene, Parent: Instance?, Opened: boolean, Context: Reading, Origin: CFrame?, Host: any?, InsertId: number?): any
     const Budget = Context.Budget
     const Instance_ = NewInstance(self, Parent, Opened, Origin, Host, InsertId) :: any
 
