@@ -5466,6 +5466,136 @@ T:Test("a plain address ignores inserted copies", function()
     Source:Destroy()
 end)
 
+T:Describe("Updating inserted scenes")
+
+-- A source with a live copy of its own to edit, and a room inserting it twice.
+const function Linked(Name: string)
+    const Source = Scenes.new({Name = `{Name}Hall`}) :: any
+    const Edit = Source:Load()
+    const Door = Edit:Create(DoorId, {[TitleId] = "Old"})
+    const Block = Edit:Create(SpaceBlockId, {[TitleId] = "Block", [SpaceSpotId] = CFrame.new(1, 0, 0)})
+    Edit:Commit()
+
+    const Rooms = Scenes.new({Name = `{Name}Rooms`}) :: any
+    const Near = Rooms:Insert(Source)
+    const Far = Rooms:Insert(Source, CFrame.new(5000, 0, 0))
+    const Room_ = Rooms:Load()
+
+    return Source, Edit, Rooms, Room_, Room_.Inserted[Near], Room_.Inserted[Far], Door, Block
+end
+
+T:Test("a commit reaches every insert of the scene", function()
+    const Source, Edit, Rooms, _, A, B, Door, Block = Linked("UpdateValues")
+    const Held = A:Find(Door.LocalId)
+    const Part = A:Find(Block.LocalId).Instance
+
+    Door:Set(TitleId, "New")
+    Block:Set(SpaceSpotId, CFrame.new(2, 0, 0))
+    T:Eq(Held:Get(TitleId), "Old", "nothing moves until the source commits")
+
+    Edit:Commit()
+
+    T:Eq(Held:Get(TitleId), "New", "the near one followed")
+    T:Eq(B:Find(Door.LocalId):Get(TitleId), "New", "and the far one")
+    T:Eq(A:Find(Door.LocalId), Held, "the same object rather than a new one")
+
+    T:Eq(A:Find(Block.LocalId).Instance, Part, "the same part")
+    T:Eq(Part.CFrame, CFrame.new(2, 0, 0), "moved in the near one")
+    T:Eq(B:Find(Block.LocalId).Instance.CFrame, CFrame.new(5002, 0, 0), "and the far one keeps its place")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("an update adds and removes objects", function()
+    const Source, Edit, Rooms, _, A, B, Door = Linked("UpdateObjects")
+
+    const Added = Edit:Create(DoorId, {[TitleId] = "Added"})
+    Door:Destroy()
+    Edit:Commit()
+
+    T:Eq(A:Find(Door.LocalId), nil, "what the source lost is gone")
+    T:Eq(A:Find(Added.LocalId):Get(TitleId), "Added", "what it gained is here")
+    T:Eq(B:Find(Added.LocalId):Get(TitleId), "Added", "in both")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("a value reset in the source resets in an insert", function()
+    const Source, Edit, Rooms, _, A, _, _, Block = Linked("UpdateDefault")
+
+    Block:Set(SpaceSpotId, CFrame.new(0, 7, 0))
+    Edit:Commit()
+
+    T:Eq(A:Find(Block.LocalId):Get(SpaceSpotId), CFrame.new(0, 7, 0), "at the default")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("a reference into an insert survives an update", function()
+    const Source, Edit, Rooms, Room_, A, _, Door = Linked("UpdateReference")
+
+    const Button = Room_:Create(ButtonId)
+    Button:Set(TargetId, A:Find(Door.LocalId))
+    const Held = Button:Get(TargetId)
+
+    Door:Set(TitleId, "New")
+    Edit:Commit()
+    T:Eq(Button:Get(TargetId), Held, "the same door")
+
+    const Stored = Button:GetProperty(TargetId).Value
+    Door:Destroy()
+    Edit:Commit()
+
+    T:Eq(Button:Get(TargetId), nil, "reads as nothing once the source drops it")
+    T:Eq(Button:GetProperty(TargetId).Value, Stored, "with the address kept")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("a copy of the scene's own is not touched by a commit", function()
+    const Source, Edit, Rooms, _, _, _, Door = Linked("UpdateStanding")
+    const Other = Source:Load()
+
+    Door:Set(TitleId, "New")
+    Edit:Commit()
+
+    T:Eq(Other:Find(Door.LocalId):Get(TitleId), "Old", "it is somebody's work")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("an insert set aside catches up when it comes back", function()
+    const Source, Edit, Rooms, Room_, A, _, Door = Linked("UpdateAside")
+
+    Room_:Suspend()
+    Door:Set(TitleId, "New")
+    Edit:Commit()
+    Room_:Revive()
+
+    T:Eq(A:Find(Door.LocalId):Get(TitleId), "New", "it missed nothing")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("a new load reads the latest source", function()
+    const Source, Edit, Rooms, _, _, _, Door = Linked("UpdateLoad")
+
+    Door:Set(TitleId, "New")
+    Edit:Commit()
+
+    const Fresh = Rooms:Load()
+    T:Eq(Fresh.Inserted[1]:Find(Door.LocalId):Get(TitleId), "New", "without any update")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
 T:Describe("Holds and copies as operations")
 
 T:Test("a transaction takes holds, edits, and lets go", function()
@@ -5836,6 +5966,14 @@ Players.PlayerAdded:Connect(AssignBuilder)
 -- then the builder again, so the remaining accepted-edit and destroy tests can
 -- proceed deterministically.
 EditableFixture:OnChange(TitleId, function(Value)
+    if Value == "UpdatePulse" then
+        const Edit = FixtureHall:Load()
+        Edit:Find(FixtureHallDoor.LocalId):Set(TitleId, "FixtureHallDoorNew")
+        Edit:Commit()
+        Edit:Unload()
+        return
+    end
+
     if Value == "UnregisterPulse" then
         Objects:Unregister(DoomedType)
         Properties:Unregister(DoomedProperty)

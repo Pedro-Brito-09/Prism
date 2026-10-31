@@ -36,6 +36,32 @@ a copy, so they go straight into its pack with no commit. Save the scene to keep
 them. An id is never handed out twice, and inserting that would put a scene inside
 itself, directly or through another, is refused.
 
+## Updating
+
+Committing the source updates every insert of it, like publishing a package:
+
+```luau
+local edit = Hallway:Load()
+edit:Find(doorId):Set(Color, red)
+edit:Commit()                         -- every hallway in every live room is red
+```
+
+Each inserted copy is compared with the source by local id, because the same id
+is always the same object. A changed value is set, an object the source gained is
+built, and one it lost is destroyed. Objects that didn't change aren't touched,
+their parts aren't rebuilt, and references to them hold. An insert's origin is the
+room's, so an update never moves one away from where you put it.
+
+- **Only inserts follow.** A copy of the scene loaded on its own is left alone,
+  because it may hold somebody's work.
+- **It happens inside the commit**, all at once, so no insert is ever half
+  updated. A large source updated in many places takes that long, in one frame.
+- **Other servers** read the latest source the next time they load the level,
+  once it has been saved. An update doesn't reach a server that's already running.
+- **A room set aside** catches up when it comes back.
+- If a reference pointed at an object the source removed, `Get` answers `nil` and
+  the address stays, as with any destroyed target.
+
 ## Read only
 
 An inserted copy is its source's to change. Setting or destroying anything in it,

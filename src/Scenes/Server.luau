@@ -403,13 +403,24 @@ const function __instance_serialize(self: SceneInstance): buffer
     return Compressor:CompressScene(self.Owner.LastId, List :: any, Compressor:ReadInserts(self.Owner.Data))
 end
 
+local UpdateCopy: (Copy: any) -> ()
+
 const function __commit(self: SceneInstance)
     if (self :: any).Host then
         Logger:Warn(`A copy of {self.Owner.Name} inserted into another scene cannot commit. Change {self.Owner.Name} itself.`)
         return
     end
 
-    self.Owner.Data = __instance_serialize(self)
+    const Owner = self.Owner
+    Owner.Data = __instance_serialize(self)
+
+    -- Publishing, in the package sense: everything inserted from this scene
+    -- follows. A copy of its own stays as it is, because it is somebody's work.
+    for _, Copy in Owner.Instances do
+        if (Copy :: any).Host then
+            UpdateCopy(Copy)
+        end
+    end
 end
 
 -- Told to whoever is told of the copy, as InstanceAdded is: one packet for the
@@ -507,6 +518,72 @@ end
 local FinishReading: (Instance_: any) -> ()
 local SyncInserts: (Copy: any) -> ()
 
+-- An inserted copy brought to what its source now says, by local id. That is the
+-- whole mechanism, and it is only possible because a local id is the same across
+-- commits and never handed out twice: the same id is the same object, so a door
+-- whose colour changed is updated in place and every reference to it still holds.
+-- Rebuilding the copy would be simpler and would put every part through a
+-- destroy, and a player standing on one would notice.
+--
+-- Whole, never across frames: it runs inside a commit, and a copy half updated
+-- would be neither version. What is in the source and not here is built, what is
+-- here and not in the source goes, and an id whose type changed is the second and
+-- then the first. The origin is the insert's and nothing here touches it.
+UpdateCopy = function(Copy: any)
+    const Data = Copy.Owner.Data
+    if Copy.Applied == Data then
+        return
+    end
+
+    const Ok, _, Decompressed = pcall(function()
+        return Compressor:DecompressScene(Data)
+    end)
+
+    if not Ok then
+        Logger:Warn(`Failed to read the pack for scene {Copy.Owner.Name}, so a copy inserted from it was not updated.`)
+        return
+    end
+
+    FinishReading(Copy)
+    Copy.Applied = Data
+
+    const Seen: {[number]: true} = {}
+    const Made = {}
+    const Unknown = {}
+
+    for _, Saved in Decompressed :: {any} do
+        Seen[Saved.LocalId] = true
+
+        const Held = Copy.ByLocal[Saved.LocalId]
+        if Held and Held.Registry ~= Saved.Registry then
+            Objects.Remove(Held)
+        end
+
+        if not Objects:GetRegistry(Saved.Registry) then
+            table.insert(Unknown, Saved)
+        elseif Held and Held.Registry == Saved.Registry then
+            Objects.Update(Held, Saved)
+        else
+            const Obj = Objects.restore(Copy, Saved, false)
+            if Obj then
+                table.insert(Made, Obj)
+            end
+        end
+    end
+
+    Copy.Unknown = Unknown
+
+    for Local, Obj in table.clone(Copy.ByLocal) do
+        if not Seen[Local] then
+            Objects.Remove(Obj)
+        end
+    end
+
+    if #Made > 0 then
+        Objects.AnnounceAll(Made, math.huge)
+    end
+end
+
 const function __instance_suspend(self: SceneInstance): boolean
     if self.Suspended then
         return false
@@ -596,8 +673,14 @@ const function __instance_revive(self: SceneInstance): boolean
         Child:Revive()
     end
 
-    -- Its scene may have gained or lost an insert while it was away.
+    -- Its scene may have gained or lost an insert while it was away, and its
+    -- source may have been committed.
     SyncInserts(self)
+
+    if (self :: any).Host then
+        UpdateCopy(self)
+    end
+
     return true
 end
 
@@ -860,6 +943,10 @@ function Read(self: Scene, Parent: Instance?, Opened: boolean, Context: Reading,
         -- answer: it is the one you can now put objects in.
         return Instance_
     end
+
+    -- Which version it holds, so one updated or brought back is not read again
+    -- when nothing has changed.
+    Instance_.Applied = Data
 
     const Ok, LastId, Decompressed = pcall(function()
         return Compressor:DecompressScene(Data)

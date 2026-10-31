@@ -186,6 +186,34 @@ function Objects.IsInserted(Obj: Object): boolean
     return Live ~= nil and Live.Host ~= nil
 end
 
+-- One inserted object brought to what its source now says. The property itself
+-- rather than the object's Set, which refuses here, and only what differs: an
+-- update to one door in a hallway is one packet, not one per property of every
+-- object in it. A value the pack left out is the default, so a property reset
+-- in the source resets here.
+function Objects.Update(Obj: Object, Saved: any)
+    for PropertyId, Prop in Obj.Properties do
+        const Wanted = if Saved.Properties[PropertyId] ~= nil then Saved.Properties[PropertyId] else Prop.DefaultValue
+        const Held = if Prop.Value == nil then Prop.DefaultValue else Prop.Value
+
+        if PropertyTypes:Equals(Prop.Type, Held, Wanted) then
+            continue
+        end
+
+        const _, Changed = Prop:Set(Wanted)
+        if not Changed then
+            continue
+        end
+
+        const Compressed = Compressor:CompressValue(Prop.Type, Prop.Value, Prop.Constraints)
+        if Compressed then
+            Audience.Fire(Network.PropertyChanged, Obj.Scene, ReachOf(Obj), Obj.RuntimeId, Prop.Parent, Compressed)
+        end
+    end
+
+    Obj.Unknown = Shared.Leftovers(Obj, Saved)
+end
+
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
@@ -331,6 +359,11 @@ const function __destroy(self: Object)
     end
 
     Teardown(self, true)
+end
+
+-- The one way an inserted object goes: its source no longer has it.
+function Objects.Remove(Obj: Object)
+    Teardown(Obj, true)
 end
 
 -- Read through __index rather than set on each object: five fields an object
