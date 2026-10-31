@@ -131,7 +131,7 @@ rather than guessed.
 
 ## Done
 
-- [ ] **Inserted scenes update from their source.** Awaiting its run in Studio.
+- [x] **Inserted scenes update from their source.**
       Committing a copy of a scene updates every copy inserted from it, like
       publishing a package. Each is compared with the new pack by local id, which
       only works because an id is the same across commits and never handed out
