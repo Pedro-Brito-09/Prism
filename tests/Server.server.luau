@@ -5274,6 +5274,198 @@ T:Test("SceneSpace is refused on what cannot be placed", function()
     T:Eq(Links[2].SceneSpace, nil, "and angles are not a position")
 end)
 
+T:Describe("Inserted scenes")
+
+-- A hallway of one door and a block, committed, as the source of what follows.
+const function Hallway(Name: string)
+    const Source = Scenes.new({Name = Name}) :: any
+    const Copy = Source:Load()
+    const Door = Copy:Create(DoorId, {[TitleId] = "HallDoor"})
+    const Block = Copy:Create(SpaceBlockId, {[TitleId] = "HallBlock", [SpaceSpotId] = CFrame.new(1, 0, 0)})
+    Copy:Commit()
+    Copy:Unload()
+    return Source, Door.LocalId, Block.LocalId
+end
+
+T:Test("a scene inserted twice stands in two places", function()
+    const Source, _, BlockLocal = Hallway("InsertTwiceHall")
+    const Rooms = Scenes.new({Name = "InsertTwiceRooms"}) :: any
+
+    const Near = Rooms:Insert(Source, CFrame.new(0, 0, 0))
+    const Far = Rooms:Insert(Source, CFrame.new(5000, 0, 0))
+    T:Ok(Near and Far and Near ~= Far, "two inserts, two ids")
+
+    const Copy = Rooms:Load()
+    const A = Copy.Inserted[Near]
+    const B = Copy.Inserted[Far]
+
+    T:Ok(A and B and A ~= B, "each its own copy")
+    T:Eq(A:Find(BlockLocal).Instance.CFrame, CFrame.new(1, 0, 0), "the near one where it was saved")
+    T:Eq(B:Find(BlockLocal).Instance.CFrame, CFrame.new(5001, 0, 0), "the far one far away")
+    T:Eq(B:Find(BlockLocal):Get(SpaceSpotId), CFrame.new(1, 0, 0), "and the same value in both")
+
+    Copy:Unload()
+    T:Eq(next(Source.Instances), nil, "unloading the room takes its hallways")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("inserts survive a save and a reload, where they were put", function()
+    const Source, _, BlockLocal = Hallway("InsertSavedHall")
+    const Rooms = Scenes.new({Name = "InsertSavedRooms"}) :: any
+
+    const Far = Rooms:Insert(Source, CFrame.new(5000, 0, 0))
+
+    const Copy = Rooms:Load()
+    Copy:Create(DoorId)
+    Copy:Commit()
+    Copy:Unload()
+
+    const Pack = Rooms:Serialize()
+    const Again = Scenes.fromBuffer({Name = "InsertSavedAgain"}, Pack) :: any
+    T:Eq(#Again:GetInserts(), 1, "the insert travelled with the pack")
+
+    const Back = Again:Load()
+    T:Eq(Back.Inserted[Far]:Find(BlockLocal).Instance.CFrame, CFrame.new(5001, 0, 0), "and came back there")
+
+    Again:Destroy()
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("a pack with no inserts is what it always was", function()
+    const Scene = Scenes.new({Name = "InsertNone"}) :: any
+    const Copy = Scene:Load()
+    Copy:Create(DoorId)
+
+    const Before = Copy:Serialize()
+    Scene:Destroy()
+
+    T:Eq(Compressor:ReadInserts(Before).Last, 0, "nothing in the header")
+    T:Eq(buffer.tostring(Compressor:WithInserts(Before, {Last = 0, List = {}})), buffer.tostring(Before), "not a byte different")
+end)
+
+T:Test("inserting changes live copies at once", function()
+    const Source, _, BlockLocal = Hallway("InsertLiveHall")
+    const Rooms = Scenes.new({Name = "InsertLiveRooms"}) :: any
+    const Copy = Rooms:Load()
+
+    const Id = Rooms:Insert(Source, CFrame.new(100, 0, 0))
+    const Child = Copy.Inserted[Id]
+    T:Ok(Child, "built in the copy already there")
+
+    T:Ok(Rooms:MoveInsert(Id, CFrame.new(200, 0, 0)), "moved")
+    T:Eq(Child:Find(BlockLocal).Instance.CFrame, CFrame.new(201, 0, 0), "and it went")
+
+    T:Ok(Copy:SetOrigin(CFrame.new(1000, 0, 0)), "moving the room")
+    T:Eq(Child:Find(BlockLocal).Instance.CFrame, CFrame.new(1201, 0, 0), "moves what is inserted in it")
+
+    T:Ok(Rooms:RemoveInsert(Id), "removed")
+    T:Eq(Copy.Inserted[Id], nil, "and gone from the copy")
+    T:Ok(not Rooms:RemoveInsert(Id), "only once")
+
+    const Next = Rooms:Insert(Source)
+    T:Ok(Next ~= Id, "an id is never handed out twice")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("a scene cannot end up inside itself", function()
+    const A = Scenes.new({Name = "InsertCycleA"}) :: any
+    const B = Scenes.new({Name = "InsertCycleB"}) :: any
+
+    T:Eq(A:Insert(A), nil, "not directly")
+    T:Ok(A:Insert(B), "one way is fine")
+    T:Eq(B:Insert(A), nil, "and back is refused")
+
+    A:Destroy()
+    B:Destroy()
+end)
+
+T:Test("a source that is not registered is skipped", function()
+    const Source = Hallway("InsertMissingHall")
+    const Rooms = Scenes.new({Name = "InsertMissingRooms"}) :: any
+    const Id = Rooms:Insert(Source)
+    Source:Destroy()
+
+    const Copy = Rooms:Load()
+    T:Ok(Copy, "the room still loads")
+    T:Eq(Copy.Inserted[Id], nil, "without it")
+
+    Rooms:Destroy()
+end)
+
+T:Test("an inserted scene is read only", function()
+    const Source, DoorLocal = Hallway("InsertLockedHall")
+    const Rooms = Scenes.new({Name = "InsertLockedRooms"}) :: any
+    const Id = Rooms:Insert(Source)
+    const Child = Rooms:Load().Inserted[Id]
+    const Door = Child:Find(DoorLocal)
+
+    T:Ok(not Door:Set(TitleId, "Changed"), "a set is refused")
+    T:Eq(Door:Get(TitleId), "HallDoor", "and changes nothing")
+
+    Door:Destroy()
+    T:Ok(not Door.Destroyed, "a destroy is refused")
+
+    T:Eq(Child:Place(Child:Serialize()), nil, "nothing can be placed in it")
+    T:Ok(not Child:SetOrigin(CFrame.new(1, 0, 0)), "it moves through its insert")
+
+    const Applied = Transactions.new():Set(Door, TitleId, "Changed"):Commit()
+    T:Ok(not Applied, "a transaction is refused too")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("a reference reaches its own room's hallway", function()
+    const Source, DoorLocal = Hallway("InsertRefHall")
+    const Rooms = Scenes.new({Name = "InsertRefRooms"}) :: any
+    const Id = Rooms:Insert(Source)
+
+    const First = Rooms:Load()
+    const Button = First:Create(ButtonId)
+    T:Ok(Button:Set(TargetId, First.Inserted[Id]:Find(DoorLocal)), "takes the door in its hallway")
+    T:Eq(Button:GetProperty(TargetId).Value, Handles.Address(Rooms.Guid, DoorLocal, {Id}), "by way of the insert")
+    First:Commit()
+
+    const Second = Rooms:Load()
+    const Other = Second:Find(Button.LocalId)
+
+    T:Eq(Button:Get(TargetId), First.Inserted[Id]:Find(DoorLocal), "the first room reads its own")
+    T:Eq(Other:Get(TargetId), Second.Inserted[Id]:Find(DoorLocal), "and the second room its own")
+
+    T:Ok(not Button:Set(TargetId, Second.Inserted[Id]:Find(DoorLocal)), "another room's hallway is refused")
+
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
+T:Test("a plain address ignores inserted copies", function()
+    const Source, DoorLocal = Hallway("InsertPlainHall")
+    const Rooms = Scenes.new({Name = "InsertPlainRooms"}) :: any
+    Rooms:Insert(Source)
+    const Copy = Rooms:Load()
+
+    const HereScene, Here = Room("InsertPlainHere")
+    const Button = Here:Create(ButtonId)
+
+    Button:Set(TargetId, Handles.Address(Source.Guid, DoorLocal))
+    T:Eq(Button:Get(TargetId), nil, "an inserted copy is not the scene's one copy")
+
+    const Standing = Source:Load()
+    T:Eq(Button:Get(TargetId), Standing:Find(DoorLocal), "one of its own is")
+
+    T:Ok(Button:Set(TargetId, Copy.Inserted[1]:Find(DoorLocal)), "and from outside, by the room it is in")
+    T:Eq(Button:GetProperty(TargetId).Value, Handles.Address(Rooms.Guid, DoorLocal, {1}), "through the insert")
+
+    HereScene:Destroy()
+    Rooms:Destroy()
+    Source:Destroy()
+end)
+
 T:Describe("Holds and copies as operations")
 
 T:Test("a transaction takes holds, edits, and lets go", function()
@@ -5550,6 +5742,24 @@ HiddenCopy:Create(PrivateId, {[TitleId] = "FixtureHiddenPrivate"})
 Scenes.new({Name = "FixtureMoved"}):Load(nil, {Origin = CFrame.new(1000, 0, 0)}):Create(SpaceBlockId, {
     [TitleId] = "FixtureMovedBlock",
     [SpaceSpotId] = CFrame.new(1, 0, 0),
+})
+
+-- A hallway inserted into a room twice, the second far away, with a button in the
+-- room pointing at the door in the second. The client reads it through the tree
+-- of copies the server told it about.
+const FixtureHall = Scenes.new({Name = "FixtureHall"}) :: any
+const FixtureHallCopy = FixtureHall:Load()
+const FixtureHallDoor = FixtureHallCopy:Create(DoorId, {[TitleId] = "FixtureHallDoor"})
+FixtureHallCopy:Commit()
+FixtureHallCopy:Unload()
+
+const FixtureRoom = Scenes.new({Name = "FixtureRoom"}) :: any
+FixtureRoom:Insert(FixtureHall)
+const FixtureFar = FixtureRoom:Insert(FixtureHall, CFrame.new(2000, 0, 0))
+const FixtureRoomCopy = FixtureRoom:Load()
+FixtureRoomCopy:Create(ButtonId, {
+    [TitleId] = "FixtureRoomButton",
+    [TargetId] = FixtureRoomCopy.Inserted[FixtureFar]:Find(FixtureHallDoor.LocalId),
 })
 
 -- Two buttons reaching out of their scene. The client resolves the first by the

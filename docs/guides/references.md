@@ -72,6 +72,10 @@ still reaches that player, Guid included: the scene's name and objects don't, bu
 the Guid does. A client's own scene has no Guid and can't be pointed at from
 another scene; its objects can point out at the server's scenes.
 
+Inserted copies don't count as the scene's copy, because they're a part of another
+scene. Reaching one takes the longer address on
+[Inserting a scene](/guides/inserting#references).
+
 Three limits follow from the address naming a saved scene:
 
 - `fromBuffer` and a client's push make a new scene with a new Guid, so references

@@ -101,40 +101,89 @@ const function ReachOf(Obj: Object): Types.Reach
     return if Registry then Registry.Replicate else "Admitted"
 end
 
--- The one live copy of a scene, or nil when it has none or more than one. An
--- address names a scene, so this is what it can answer in. See Objects/Shared.
-const function OnlyCopy(Scene: any): any?
-    const First = next(Scene.Instances)
-    if First == nil or next(Scene.Instances, First) ~= nil then
-        return nil
-    end
+-- What an address needs to know of the world, on this side. See Objects/Shared.
+const World: Shared.AddressWorld = {
+    SceneOfGuid = function(Guid: string): Types.SceneIdentifier?
+        const Scene = SceneRegistry.ByGuid[Guid]
+        return if Scene then Scene.Id else nil
+    end,
 
-    return Scene.Instances[First]
-end
+    GuidOf = function(Scene: Types.SceneIdentifier): string?
+        const Found = SceneRegistry.ById[Scene]
+        return if Found then Found.Guid else nil
+    end,
+
+    SceneOf = function(Copy: Types.SceneInstanceId): Types.SceneIdentifier?
+        const Live = SceneRegistry.Instances[Copy]
+        return if Live then Live.Scene else nil
+    end,
+
+    -- A scene's one copy of its own: a copy inserted into another scene is not
+    -- one, however many there are.
+    OnlyCopy = function(Scene: Types.SceneIdentifier): Types.SceneInstanceId?
+        const Found = SceneRegistry.ById[Scene]
+        if not Found then
+            return nil
+        end
+
+        local Only: Types.SceneInstanceId? = nil
+        for Id, Live in Found.Instances do
+            if Live.Host then
+                continue
+            end
+
+            if Only then
+                return nil
+            end
+
+            Only = Id
+        end
+
+        return Only
+    end,
+
+    HostOf = function(Copy: Types.SceneInstanceId): (Types.SceneInstanceId?, number?)
+        const Live = SceneRegistry.Instances[Copy]
+        if Live and Live.Host then
+            return Live.Host.Id, Live.InsertId
+        end
+
+        return nil, nil
+    end,
+
+    Inserted = function(Copy: Types.SceneInstanceId, Insert: number): Types.SceneInstanceId?
+        const Live = SceneRegistry.Instances[Copy]
+        const Inside = if Live then Live.Inserted[Insert] else nil
+        return if Inside then Inside.Id else nil
+    end,
+
+    Local = function(Copy: Types.SceneInstanceId, Id: number): Object?
+        const Live = SceneRegistry.Instances[Copy]
+        return if Live then Live.ByLocal[Id] else nil
+    end,
+}
 
 -- One object in one copy, by the id a reference stores. The crossing between
 -- the two identities, and scoped to a copy for the reason Find is. An address
--- is the exception, and says for itself where it points.
+-- starts from the copy as well, when it names a scene inserted there.
 const function Find(Copy: Types.SceneInstanceId, Local: number | string): Object?
     if type(Local) == "string" then
-        const Guid, Id = Handles.ParseAddress(Local)
-        const Scene = if Guid then SceneRegistry.ByGuid[Guid] else nil
-        const Only = if Scene then OnlyCopy(Scene) else nil
-        return if Only then Only.ByLocal[Id] else nil
+        return Shared.Locate(World, Copy, Local)
     end
 
-    const Live = SceneRegistry.Instances[Copy]
-    return if Live then Live.ByLocal[Local] else nil
+    return World.Local(Copy, Local)
 end
 
 -- What to store to point at an object in another scene.
-const function Address(Target: Object): (string?, string?)
-    const Scene = SceneRegistry.ById[Target.Scene]
-    if not Scene or not OnlyCopy(Scene) then
-        return nil, `{Target.Name} is in a scene loaded more than once, and a reference could not say which copy it means`
-    end
+const function Address(Target: Object, Copy: Types.SceneInstanceId): (string?, string?)
+    return Shared.AddressOf(World, Target, Copy)
+end
 
-    return Handles.Address(Scene.Guid, Target.LocalId), nil
+-- Whether an object belongs to a scene inserted into another. Those are its
+-- source scene's to change, so nothing but an update touches them.
+function Objects.IsInserted(Obj: Object): boolean
+    const Live = SceneRegistry.Instances[Obj.InstanceId]
+    return Live ~= nil and Live.Host ~= nil
 end
 
 const function __getter(self: Object, Reference: Types.PropertyReference): any?
@@ -160,6 +209,11 @@ end
 const function __setter(self: Object, Reference: Types.PropertyReference, Value: any?): boolean
     const Prop = Shared.GetProperty(self, Reference)
     if not Prop then
+        return false
+    end
+
+    if Objects.IsInserted(self) then
+        Logger:Warn(`{self.Name} is part of an inserted scene. Change its source scene and commit that.`)
         return false
     end
 
@@ -271,6 +325,11 @@ const function Teardown(self: Object, Announce: boolean)
 end
 
 const function __destroy(self: Object)
+    if Objects.IsInserted(self) then
+        Logger:Warn(`{self.Name} is part of an inserted scene. Change its source scene and commit that.`)
+        return
+    end
+
     Teardown(self, true)
 end
 
@@ -1126,7 +1185,12 @@ function Objects.new(
     Target: any?,
     Announce: boolean?
 ): Object
-    return Construct(Reference, InitialValues, ResolveInstance(Target), nil, Announce ~= false)
+    const Live = ResolveInstance(Target)
+    if Live and Live.Host then
+        Logger:Error("Tried creating an object in an inserted scene. Change its source scene and commit that.")
+    end
+
+    return Construct(Reference, InitialValues, Live, nil, Announce ~= false)
 end
 
 -- Rebuilds an object under the id it was saved with. Used by a scene loading its

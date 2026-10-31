@@ -108,6 +108,7 @@ const function Reveal(Plr: Player, List: {Scene})
     const CopyScenes: {SceneIdentifier} = {}
     const CopyOpened: {boolean} = {}
     const Moved: {any} = {}
+    const Inserted: {any} = {}
     const Held: {any} = {}
 
     -- Every object in a scene revealed whole, for its locks: who holds what is
@@ -151,6 +152,10 @@ const function Reveal(Plr: Player, List: {Scene})
                 if Copy.Origin then
                     table.insert(Moved, Copy)
                 end
+
+                if Copy.Host then
+                    table.insert(Inserted, Copy)
+                end
             end
 
             for _, Obj in Copy.Objects do
@@ -181,6 +186,10 @@ const function Reveal(Plr: Player, List: {Scene})
     -- Ahead of the objects, which are placed by it as they arrive.
     for _, Copy in Moved do
         Network.InstanceMoved:Fire(Plr, Copy.Id, Copy.Origin)
+    end
+
+    for _, Copy in Inserted do
+        Network.InstanceHosted:Fire(Plr, Copy.Id, Copy.Host.Id, Copy.InsertId)
     end
 
     -- Before anything yields, like the copies: a lock taken from here on is
@@ -293,6 +302,11 @@ end
 -- it -- the id would name whatever in this copy happens to answer to it, and a
 -- pasted button would come up wired to a door it has never met.
 const function __place(self: SceneInstance, Pack: buffer, At: CFrame?): {ObjectTypes.Object}?
+    if (self :: any).Host then
+        Logger:Warn(`A copy of {self.Owner.Name} inserted into another scene takes nothing placed. Change {self.Owner.Name} and commit that.`)
+        return nil
+    end
+
     const Ok, _, Decompressed = pcall(function()
         return Compressor:DecompressScene(Pack)
     end)
@@ -384,10 +398,17 @@ const function __instance_serialize(self: SceneInstance): buffer
         end
     end
 
-    return Compressor:CompressScene(self.Owner.LastId, List :: any)
+    -- The scene's inserts belong to the scene, and go along with whatever a copy
+    -- writes for it.
+    return Compressor:CompressScene(self.Owner.LastId, List :: any, Compressor:ReadInserts(self.Owner.Data))
 end
 
 const function __commit(self: SceneInstance)
+    if (self :: any).Host then
+        Logger:Warn(`A copy of {self.Owner.Name} inserted into another scene cannot commit. Change {self.Owner.Name} itself.`)
+        return
+    end
+
     self.Owner.Data = __instance_serialize(self)
 end
 
@@ -403,29 +424,62 @@ const function AnnounceOrigin(self: any)
     )
 end
 
+const function AnnounceHost(self: any)
+    Audience.Fire(
+        Network.InstanceHosted,
+        self.Scene,
+        if self.Opened then "Admitted" else "Everyone",
+        self.Id,
+        self.Host.Id,
+        self.InsertId
+    )
+end
+
 const function __get_origin(self: any): CFrame
     return self.Origin or CFrame.identity
 end
 
--- The whole copy, at once, and it never reaches the scene: a commit writes values
--- and an origin is not one, so a moved room saved is the same room. A copy set
--- aside takes the new origin when it comes back, its links being down until then.
-const function __set_origin(self: any, Origin: CFrame): boolean
-    if typeof(Origin) ~= "CFrame" then
-        Logger:Warn(`A copy's origin is a CFrame; got a {typeof(Origin)}.`)
-        return false
-    end
+-- Where a scene inserted into this copy sits: its place in this copy's local
+-- space, which moves as this copy does.
+const function InsertOrigin(Copy: any, Entry: Compressor.Insert): CFrame?
+    return ObjectShared.NormalOrigin((Copy.Origin or CFrame.identity) * Entry.Origin)
+end
 
-    self.Origin = ObjectShared.NormalOrigin(Origin)
+-- The copy and everything inserted in it. A copy set aside takes the new origin
+-- when it comes back, its links being down until then.
+const function MoveCopy(self: any, Origin: CFrame?)
+    self.Origin = Origin
 
     for _, Obj in self.Objects do
-        ObjectShared.ApplyOrigin(Obj, self.Origin)
+        ObjectShared.ApplyOrigin(Obj, Origin)
     end
 
     if not self.Suspended then
         AnnounceOrigin(self)
     end
 
+    for _, Entry in Compressor:ReadInserts(self.Owner.Data).List do
+        const Child = self.Inserted[Entry.Id]
+        if Child then
+            MoveCopy(Child, InsertOrigin(self, Entry))
+        end
+    end
+end
+
+-- The whole copy, at once, and it never reaches the scene: a commit writes values
+-- and an origin is not one, so a moved room saved is the same room.
+const function __set_origin(self: any, Origin: CFrame): boolean
+    if typeof(Origin) ~= "CFrame" then
+        Logger:Warn(`A copy's origin is a CFrame; got a {typeof(Origin)}.`)
+        return false
+    end
+
+    if self.Host then
+        Logger:Warn(`A copy of {self.Owner.Name} inserted into another scene is moved through MoveInsert on that scene.`)
+        return false
+    end
+
+    MoveCopy(self, ObjectShared.NormalOrigin(Origin))
     return true
 end
 
@@ -451,6 +505,7 @@ end
 -- What it costs while it is away is what the objects cost, which is what they
 -- cost anyway: they are the same tables, out of sight.
 local FinishReading: (Instance_: any) -> ()
+local SyncInserts: (Copy: any) -> ()
 
 const function __instance_suspend(self: SceneInstance): boolean
     if self.Suspended then
@@ -465,6 +520,11 @@ const function __instance_suspend(self: SceneInstance): boolean
     -- Still being read: the rest is read now, so what is set aside -- and what
     -- comes back -- is the whole copy rather than however much had been read.
     FinishReading(self)
+
+    -- What is inserted here goes with it, and stays on the copy to come back.
+    for _, Child in (self :: any).Inserted do
+        Child:Suspend()
+    end
 
     -- The objects first, while the copy is still filed: each unfiles itself
     -- from the tables below on the way out.
@@ -526,7 +586,18 @@ const function __instance_revive(self: SceneInstance): boolean
         AnnounceOrigin(self)
     end
 
+    if (self :: any).Host then
+        AnnounceHost(self)
+    end
+
     Objects.AnnounceAll(Objects.ReviveInstance(Held))
+
+    for _, Child in (self :: any).Inserted do
+        Child:Revive()
+    end
+
+    -- Its scene may have gained or lost an insert while it was away.
+    SyncInserts(self)
     return true
 end
 
@@ -539,6 +610,11 @@ const function __instance_dispose(self: SceneInstance)
     end
 
     self.Suspended = nil
+
+    for _, Child in (self :: any).Inserted do
+        Child:Dispose()
+    end
+
     Objects.DisposeInstance(Held)
 
     if self.Folder then
@@ -548,6 +624,16 @@ const function __instance_dispose(self: SceneInstance)
 end
 
 const function __instance_unload(self: SceneInstance)
+    -- First, and by way of their own Unload: each is a copy as much as this is.
+    for _, Child in table.clone((self :: any).Inserted) do
+        Child:Unload()
+    end
+
+    const Host = (self :: any).Host
+    if Host then
+        Host.Inserted[(self :: any).InsertId] = nil
+    end
+
     const Owner = self.Owner
     if Owner then
         Owner.Instances[self.Id] = nil
@@ -563,7 +649,14 @@ const function __instance_unload(self: SceneInstance)
     Audience.Fire(Network.InstanceRemoved, self.Scene, if self.Opened then "Admitted" else "Everyone", self.Id)
 end
 
-const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean, Origin: CFrame?): SceneInstance
+const function NewInstance(
+    Owner: Scene,
+    Parent: Instance?,
+    Opened: boolean,
+    Origin: CFrame?,
+    Host: any?,
+    InsertId: number?
+): SceneInstance
     InstanceCounter += 1
 
     const Instance_ = {}
@@ -572,6 +665,12 @@ const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean, Ori
     Instance_.Owner = Owner
     Instance_.Opened = Opened
     Instance_.Origin = Origin
+
+    -- The copies inserted here, by insert id. Host and InsertId say the same from
+    -- the other end, on a copy that is one of them.
+    Instance_.Inserted = {}
+    Instance_.Host = Host
+    Instance_.InsertId = InsertId
 
     -- None for an opened copy. It would hold nothing, and an empty folder named
     -- for the scene, in a workspace every player can see, is exactly the
@@ -611,6 +710,11 @@ const function NewInstance(Owner: Scene, Parent: Instance?, Opened: boolean, Ori
 
     if Origin then
         AnnounceOrigin(Instance_)
+    end
+
+    if Host then
+        Host.Inserted[InsertId :: number] = Instance_
+        AnnounceHost(Instance_)
     end
 
     return Instance_ :: any
@@ -678,10 +782,77 @@ FinishReading = function(Instance_: any)
     end
 end
 
+-- What one load carries down through the scenes inserted in it: its budget, where
+-- to fetch a source scene nobody has registered, and the Guids it is already
+-- inside, which is what stops a saved cycle a pack was edited into.
+type Reading = {
+    Budget: number,
+    Store: DataStore?,
+    Source: Types.SceneSource?,
+    Chain: {[string]: true},
+}
+
+-- Bare, unlike the declarations above: annotated, the new solver keeps it and
+-- the function below as two types, and a call to the pair is not checked.
+local Read
+
+-- One insert of a copy, as a copy of its own in that copy's folder. A source that
+-- cannot be found warns and leaves the rest of the level loading: a missing
+-- hallway should not cost you the room.
+const function BuildInsert(Copy: any, Entry: Compressor.Insert, Context: Reading)
+    if Context.Chain[Entry.Guid] then
+        Logger:Warn(`Scene {Copy.Owner.Name} is inserted inside itself through {Entry.Guid}. That insert was skipped.`)
+        return
+    end
+
+    local Source = Registry.ByGuid[Entry.Guid]
+    if not Source and Context.Store then
+        Source = Scenes.fromDataStore(Context.Store, Entry.Guid, {Name = Entry.Guid}, Context.Source or "Published")
+    end
+
+    if not Source then
+        Logger:Warn(`Scene {Copy.Owner.Name} inserts {Entry.Guid}, which is not registered. That insert was skipped.`)
+        return
+    end
+
+    Context.Chain[Entry.Guid] = true
+    Read(Source, Copy.Folder, Copy.Opened, Context, InsertOrigin(Copy, Entry), Copy, Entry.Id)
+    Context.Chain[Entry.Guid] = nil
+end
+
+-- Brings a live copy's inserted copies into line with its scene: what was added
+-- is built, what was taken out goes, what moved moves. Whole, never across
+-- frames, because it runs inside a call that has already changed the scene.
+SyncInserts = function(Copy: any)
+    const Kept: {[number]: true} = {}
+
+    for _, Entry in Compressor:ReadInserts(Copy.Owner.Data).List do
+        Kept[Entry.Id] = true
+
+        const Child = Copy.Inserted[Entry.Id]
+        if not Child then
+            BuildInsert(Copy, Entry, {Budget = math.huge, Chain = {[Copy.Owner.Guid] = true}})
+            continue
+        end
+
+        const Origin = InsertOrigin(Copy, Entry)
+        if Child.Origin ~= Origin then
+            MoveCopy(Child, Origin)
+        end
+    end
+
+    for Id, Child in table.clone(Copy.Inserted) do
+        if not Kept[Id] then
+            Child:Unload()
+        end
+    end
+end
+
 -- Load and Open are one reading of the pack, and differ only in whether the
 -- server builds the parts.
-const function Read(self: Scene, Parent: Instance?, Opened: boolean, Budget: number, Origin: CFrame?): any
-    const Instance_ = NewInstance(self, Parent, Opened, Origin) :: any
+function Read(self: Scene, Parent: Instance?, Opened: boolean, Context: Reading, Origin: CFrame?, Host: any?, InsertId: number?): any
+    const Budget = Context.Budget
+    const Instance_ = NewInstance(self, Parent, Opened, Origin, Host, InsertId) :: any
 
     const Data = self.Data
     if not Data then
@@ -739,24 +910,145 @@ const function Read(self: Scene, Parent: Instance?, Opened: boolean, Budget: num
     end
 
     Objects.AnnounceAll(Restored, Budget)
+
+    -- After what announcing yields through, and only if the copy is still here.
+    if Registry.Instances[Instance_.Id] == Instance_ then
+        for _, Entry in Compressor:ReadInserts(Data).List do
+            BuildInsert(Instance_, Entry, Context)
+        end
+    end
+
     return Instance_
 end
 
+-- What a load carries, from its options.
+const function ContextOf(self: any, Options: Types.LoadOptions?): Reading
+    return {
+        Budget = BudgetOf(Options),
+        Store = Options and Options.Store,
+        Source = Options and Options.Source,
+        Chain = {[self.Guid] = true},
+    }
+end
+
 const function __load(self: Scene, Parent: Instance?, Options: Types.LoadOptions?): any
-    return Read(self, Parent, false, BudgetOf(Options), ObjectShared.OriginOf(Options))
+    return Read(self, Parent, false, ContextOf(self, Options), ObjectShared.OriginOf(Options))
 end
 
 const function __open(self: Scene, Options: Types.LoadOptions?): any
-    return Read(self, nil, true, BudgetOf(Options), ObjectShared.OriginOf(Options))
+    return Read(self, nil, true, ContextOf(self, Options), ObjectShared.OriginOf(Options))
 end
 
 -- Every copy at once. Nothing is written back: with more than one copy live,
 -- saving on unload would have to pick one and cannot, so committing is the
--- copy's own call and always explicit.
+-- copy's own call and always explicit. Copies inserted into another scene are
+-- that scene's, and go with the copy holding them.
 const function __unload(self: Scene)
     for _, Instance_ in table.clone(self.Instances) do
-        Instance_:Unload()
+        if not (Instance_ :: any).Host then
+            Instance_:Unload()
+        end
     end
+end
+
+--=============================================================================
+-- Inserting
+--=============================================================================
+
+-- A scene inserted into another is an entry in that scene's pack: which scene, and
+-- where in this one's local space. Loading a copy loads a copy of the source for
+-- each entry, inside it, read only, so a level holds a hallway twice by holding
+-- two entries, and the hallway stays one document.
+--
+-- Written straight into the pack rather than waiting for a commit. It says what
+-- the scene is rather than what a copy holds, and a copy has no version of it to
+-- commit. The header is outside the compressed payload, so this costs a few bytes.
+const function WriteInserts(self: any, Inserts: Compressor.Inserts)
+    self.Data = Compressor:WithInserts(self.Data or Compressor:CompressScene(self.LastId, {}), Inserts)
+
+    for _, Copy in self.Instances do
+        SyncInserts(Copy)
+    end
+end
+
+-- Whether a scene is reached by following inserts from another, itself included.
+const function Reaches(From: any, Guid: string, Seen: {[string]: true}): boolean
+    if From.Guid == Guid then
+        return true
+    end
+
+    Seen[From.Guid] = true
+
+    for _, Entry in Compressor:ReadInserts(From.Data).List do
+        const Next = Registry.ByGuid[Entry.Guid]
+        if Next and not Seen[Entry.Guid] and Reaches(Next, Guid, Seen) then
+            return true
+        end
+    end
+
+    return false
+end
+
+const function __insert(self: any, Source: any, Origin: CFrame?): number?
+    if type(Source) ~= "table" or Registry.ByGuid[Source.Guid] ~= Source then
+        Logger:Warn(`Scene {self.Name} can only insert a scene registered on this server.`)
+        return nil
+    end
+
+    if Origin ~= nil and typeof(Origin) ~= "CFrame" then
+        Logger:Warn(`An insert's origin is a CFrame; got a {typeof(Origin)}.`)
+        return nil
+    end
+
+    -- Refused here, where it can be said. A load skips one a pack arrived with.
+    if Reaches(Source, self.Guid, {}) then
+        Logger:Warn(`Inserting {Source.Name} into {self.Name} would put {self.Name} inside itself.`)
+        return nil
+    end
+
+    const Inserts = Compressor:ReadInserts(self.Data)
+    Inserts.Last += 1
+    table.insert(Inserts.List, {Id = Inserts.Last, Guid = Source.Guid, Origin = Origin or CFrame.identity})
+
+    WriteInserts(self, Inserts)
+    return Inserts.Last
+end
+
+const function __remove_insert(self: any, Id: number): boolean
+    const Inserts = Compressor:ReadInserts(self.Data)
+
+    for Index, Entry in Inserts.List do
+        if Entry.Id == Id then
+            table.remove(Inserts.List, Index)
+            WriteInserts(self, Inserts)
+            return true
+        end
+    end
+
+    return false
+end
+
+const function __move_insert(self: any, Id: number, Origin: CFrame): boolean
+    if typeof(Origin) ~= "CFrame" then
+        Logger:Warn(`An insert's origin is a CFrame; got a {typeof(Origin)}.`)
+        return false
+    end
+
+    const Inserts = Compressor:ReadInserts(self.Data)
+
+    for _, Entry in Inserts.List do
+        if Entry.Id == Id then
+            Entry.Origin = Origin
+            WriteInserts(self, Inserts)
+            return true
+        end
+    end
+
+    return false
+end
+
+const function __get_inserts(self: any): {Compressor.Insert}
+    return Compressor:ReadInserts(self.Data).List
 end
 
 const function __serialize(self: Scene): buffer
@@ -831,8 +1123,11 @@ end
 
 const function __destroy(self: Scene)
     -- Unloaded first, so the copies go as copies rather than being orphaned by
-    -- a scene that has already stopped existing.
-    __unload(self)
+    -- a scene that has already stopped existing. Every one of them, here: a copy
+    -- inserted elsewhere has no source to read from any more.
+    for _, Instance_ in table.clone(self.Instances) do
+        Instance_:Unload()
+    end
 
     -- Its rights go with it, told to whoever held them while the scene can
     -- still be found.
@@ -1010,6 +1305,10 @@ const function Build(Config: SceneConfig, Guid: string?): Scene?
     Scene.Publish = __publish
     Scene.Backup = __backup
     Scene.GetInstances = __get_instances
+    Scene.Insert = __insert
+    Scene.RemoveInsert = __remove_insert
+    Scene.MoveInsert = __move_insert
+    Scene.GetInserts = __get_inserts
     Scene.Destroy = __destroy
     Scene.Admit = __admit
     Scene.Evict = __evict

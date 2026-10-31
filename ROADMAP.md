@@ -131,6 +131,34 @@ rather than guessed.
 
 ## Done
 
+- [x] **Inserting scenes.** `Scene:Insert(source,
+      origin)` puts a scene in another, any number of times, each at its own
+      origin. Loading a copy loads a copy of the source per insert, inside it,
+      and unload, suspend, revive, dispose and moving all follow. An inserted copy
+      is an ordinary copy with a `Host`, read only on the server; the alternative
+      was merging the objects into the host, which would have needed ids rewritten
+      and could never have been updated from the source.
+
+      Inserts live in the pack's header under a flag, outside compression, so
+      they change without a commit and without repacking, a pack with none is
+      unchanged, and an older build refuses one with a message. Ids only climb,
+      and `Last` is saved, for the reason local ids do. Cycles are refused at
+      `Insert`, and skipped at load for a pack that arrived with one. A push
+      drops inserts, because the server rebuilds the pack, and a client must not
+      get to name any scene it likes into a copy the server builds.
+
+      An address through an insert is `<Guid>/<Insert>:<LocalId>`, the Guid being
+      the host's, and starts from the nearest copy of that scene going up from the
+      reader, which is what gives each room its own hallway. Everything addresses
+      need of the world goes through `Shared.AddressWorld`, so the rule is written
+      once for both sides. A plain address ignores inserted copies. One room
+      pointing into another's hallway is refused: it would read as its own.
+      References go inward only, and a source doesn't know where it's used;
+      per-insert overrides are how that would change.
+
+      `Load` takes `Store` and `Source` to fetch what's missing, as public scenes
+      named for their Guid; a private source needs registering by the game first.
+
 - [x] **Local space.** Every copy has an origin, from
       `Load`'s `Origin` or `SetOrigin`, and values stay relative to it. A link
       marked `SceneSpace` writes `Origin * value` to its target. The flag is on

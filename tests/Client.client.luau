@@ -1475,6 +1475,32 @@ T:Test("a copy this client owns has a local space", function()
     Sandbox:Destroy()
 end)
 
+T:Test("an address through an insert resolves here as it does there", function()
+    if not ButtonId or not TargetId or not TitleId then
+        T:Ok(false, "not registered")
+        return
+    end
+
+    const Button = WaitFor("room button", function()
+        return FindLiveObject(ButtonId :: number, TitleId :: number, "FixtureRoomButton")
+    end)
+
+    if not Button then
+        T:Ok(false, "fixture never arrived")
+        return
+    end
+
+    const Door = WaitFor("the door in the far hallway", function()
+        return Button:Get(TargetId)
+    end)
+
+    T:Ok(Door, "it names a door here")
+    if Door then
+        T:Eq(Door:Get(TitleId), "FixtureHallDoor", "the hallway's")
+        T:Eq(Scenes:GetOrigin(Door.InstanceId), CFrame.new(2000, 0, 0), "in the far one of the two")
+    end
+end)
+
 T:Test("a replicated address resolves through the scene it names", function()
     if not DoorId or not ButtonId or not TargetId or not TitleId then
         T:Ok(false, "not registered")

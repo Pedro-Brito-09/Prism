@@ -129,6 +129,25 @@ do
         ok(not PropertyTypes:IsValid("Object", bad), `"{bad}" should not be a valid Object value`)
     end
 
+    -- Through inserts: a slash each, in order from the outermost.
+    for _, path in {{3}, {3, 12}, {1, 2, 4}} do
+        local address = Handles.Address(guid, 9, path)
+        local gotGuid, gotLocal, gotPath = Handles.ParseAddress(address)
+        ok(gotGuid == guid and gotLocal == 9, `ParseAddress({address}) lost its ends`)
+        ok(gotPath ~= nil and #gotPath == #path, `ParseAddress({address}) path length`)
+        for index, id in path do
+            ok(gotPath ~= nil and gotPath[index] == id, `ParseAddress({address}) path item {index}`)
+        end
+        ok(PropertyTypes:IsValid("Object", address), `{address} should be a valid Object value`)
+    end
+
+    local _, _, noPath = Handles.ParseAddress(Handles.Address(guid, 9))
+    ok(noPath == nil, "an address with no inserts has no path")
+
+    for _, bad in {`{guid}/:1`, `{guid}//2:1`, `{guid}/2/:1`, `{guid}/02:1`, `{guid}2:1`} do
+        ok(Handles.ParseAddress(bad) == nil, `ParseAddress should refuse "{bad}"`)
+    end
+
     ok(Handles.ParseAddress(4) == nil, "a number is not an address")
     ok(PropertyTypes:IsValid("Object", 4), "a local id is still a valid Object value")
 end

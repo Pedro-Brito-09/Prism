@@ -118,6 +118,12 @@ under the new type), anything unknown in database metadata, and anything a
 **placement** or a transaction's `Duplicate` would have to carry — those build
 fresh objects of known types from known values.
 
+A scene's inserts sit in the pack's header, ahead of the payload and outside its
+compression, under a flag: the last insert id, then each insert's id, Guid and
+origin. Changing them rewrites the header and copies the payload across untouched.
+Without the flag a pack is byte for byte what it was, and a build from before them
+refuses one that has it, as it refuses any flag it doesn't know.
+
 Objects and packs carry a format version, and readers refuse anything newer
 than they understand rather than misreading it. Individual metadata records do
 not — the version lives on the pack that contains them.

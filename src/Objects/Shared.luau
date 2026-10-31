@@ -20,6 +20,7 @@ const Properties: typeof(require("../Properties/Server")) = if RunService:IsClie
 
 const PropertyTypes = require("../Properties/Types")
 const PropertyShared = require("../Properties/Shared")
+const Handles = require("../Handles")
 const Compressor = require("../Compressor")
 const Logger = require("../Logger")
 const Types = require("./Types")
@@ -477,12 +478,101 @@ end
 -- Each side hands in its own Find, because Shared cannot require the module
 -- that requires it: the server reads the copy's ByLocal, the client its index
 -- of the same thing. Find answers for both kinds of value, and ignores the copy
--- for an address, which already says where it points. Address goes the other
--- way, from a live object in another scene to what to store for it, and answers
--- nil and the reason when there is no saying.
+-- for an address, unless the address names a scene inserted into that copy.
+-- Address goes the other way, from a live object elsewhere to what to store for
+-- it, and answers nil and the reason when there is no saying.
 
 export type Find = (Instance_: Types.SceneInstanceId, Local: number | string) -> Types.Object?
-export type Address = (Target: Types.Object) -> (string?, string?)
+export type Address = (Target: Types.Object, Copy: Types.SceneInstanceId) -> (string?, string?)
+
+-- What an address has to know of the world. The two sides hold it differently,
+-- and reading an address must not mean one thing on the server and another on a
+-- client, so each answers these and the rule itself is written once, below.
+export type AddressWorld = {
+    SceneOfGuid: (Guid: string) -> Types.SceneIdentifier?,
+    GuidOf: (Scene: Types.SceneIdentifier) -> string?,
+    SceneOf: (Copy: Types.SceneInstanceId) -> Types.SceneIdentifier?,
+    OnlyCopy: (Scene: Types.SceneIdentifier) -> Types.SceneInstanceId?,
+    HostOf: (Copy: Types.SceneInstanceId) -> (Types.SceneInstanceId?, number?),
+    Inserted: (Copy: Types.SceneInstanceId, Insert: number) -> Types.SceneInstanceId?,
+    Local: (Copy: Types.SceneInstanceId, Id: number) -> Types.Object?,
+}
+
+-- The object an address names, read from a copy. An address through an insert
+-- starts at the nearest copy of its scene going up from the one asking, which is
+-- what gives each of five rooms its own hallway. Failing that, and for an address
+-- with no inserts at all, it needs the scene's one copy of its own.
+const function Locate(World: AddressWorld, Copy: Types.SceneInstanceId, Text: string): Types.Object?
+    const Guid, Id, Path = Handles.ParseAddress(Text)
+    if not Guid then
+        return nil
+    end
+
+    const Scene = World.SceneOfGuid(Guid)
+    if not Scene then
+        return nil
+    end
+
+    local Start: Types.SceneInstanceId? = nil
+
+    if Path then
+        local Walk: Types.SceneInstanceId? = Copy
+        while Walk do
+            if World.SceneOf(Walk) == Scene then
+                Start = Walk
+                break
+            end
+
+            Walk = World.HostOf(Walk)
+        end
+    end
+
+    local At = Start or World.OnlyCopy(Scene)
+
+    if Path then
+        for _, Insert in Path do
+            if not At then
+                return nil
+            end
+
+            At = World.Inserted(At, Insert)
+        end
+    end
+
+    return if At then World.Local(At, Id :: number) else nil
+end
+
+-- What to store to point at Target from Copy, climbing out of any scenes Target
+-- is inserted in. Ending at Copy, the address is relative to it and each copy of
+-- it has its own answer. Ending anywhere else, it has to be a scene's one copy,
+-- which is what refuses one room's button pointing at another room's hallway: it
+-- would quietly read as its own room's.
+const function AddressOf(World: AddressWorld, Target: Types.Object, Copy: Types.SceneInstanceId): (string?, string?)
+    const Path: {number} = {}
+    local Root = Target.InstanceId
+
+    while Root ~= Copy do
+        const Host, Insert = World.HostOf(Root)
+        if not Host then
+            break
+        end
+
+        table.insert(Path, 1, Insert :: number)
+        Root = Host
+    end
+
+    const Scene = World.SceneOf(Root)
+    const Guid = if Scene then World.GuidOf(Scene) else nil
+    if not Scene or not Guid then
+        return nil, `{Target.Name} is in a scene with no Guid, and only a saved scene can be pointed at from another`
+    end
+
+    if Root ~= Copy and World.OnlyCopy(Scene) ~= Root then
+        return nil, `{Target.Name} is in a scene loaded more than once, and a reference could not say which copy it means`
+    end
+
+    return Handles.Address(Guid, Target.LocalId, if #Path > 0 then Path else nil), nil
+end
 
 -- No target. Zero rather than nil, because a property with no value reads as
 -- its default and the format has to write something either way.
@@ -595,7 +685,7 @@ const function ReferenceOne(
         if Other.InstanceId == Copy then
             Target = Other.LocalId
         else
-            const Named, Why = Address(Other)
+            const Named, Why = Address(Other, Copy)
             if not Named then
                 return nil, Why
             end
@@ -888,6 +978,8 @@ return {
     Leftovers = Leftovers,
 
     NO_TARGET = NO_TARGET,
+    Locate = Locate,
+    AddressOf = AddressOf,
     ResolveReference = ResolveReference,
     ResolveValue = ResolveValue,
     Reference = Reference,
