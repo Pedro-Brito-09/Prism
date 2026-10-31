@@ -5122,8 +5122,8 @@ BlockTemplate.Name = "PrismBlockTemplate"
 BlockTemplate.Anchored = true
 BlockTemplate.Parent = ReplicatedStorage
 
-const SpotId = Properties:Register({
-    Name = "TestSpot",
+const SpaceSpotId = Properties:Register({
+    Name = "TestSpaceSpot",
     Type = "CFrame",
     DefaultValue = CFrame.new(0, 7, 0),
 }) :: number
@@ -5135,12 +5135,12 @@ const BulkId = Properties:Register({
 }) :: number
 
 -- Registered at load, so the client receives it and checks a moved copy as well.
-const BlockId = Objects:Register({
-    Name = "TestBlock",
-    Properties = {TitleId, SpotId, BulkId},
+const SpaceBlockId = Objects:Register({
+    Name = "TestSpaceBlock",
+    Properties = {TitleId, SpaceSpotId, BulkId},
     Instance = BlockTemplate,
     Links = {
-        {Property = SpotId, Type = "Property", Name = "CFrame", SceneSpace = true},
+        {Property = SpaceSpotId, Type = "Property", Name = "CFrame", SceneSpace = true},
         {Property = BulkId, Type = "Property", Name = "Size"},
     },
 }) :: number
@@ -5151,13 +5151,13 @@ T:Test("an origin moves the part and not the value", function()
     const Scene = Scenes.new({Name = "SpaceMoved"})
     const Copy = Scene:Load(nil, {Origin = FAR}) :: any
 
-    const Block = Copy:Create(BlockId, {[SpotId] = CFrame.new(10, 0, 0), [BulkId] = Vector3.new(4, 4, 4)})
+    const Block = Copy:Create(SpaceBlockId, {[SpaceSpotId] = CFrame.new(10, 0, 0), [BulkId] = Vector3.new(4, 4, 4)})
 
-    T:Eq(Block:Get(SpotId), CFrame.new(10, 0, 0), "Get stays relative to the copy")
+    T:Eq(Block:Get(SpaceSpotId), CFrame.new(10, 0, 0), "Get stays relative to the copy")
     T:Eq(Block.Instance.CFrame, CFrame.new(5010, 0, 0), "the part lands in the world")
     T:Eq(Block.Instance.Size, Vector3.new(4, 4, 4), "a link not marked SceneSpace is left alone")
 
-    Block:Set(SpotId, CFrame.new(20, 0, 0))
+    Block:Set(SpaceSpotId, CFrame.new(20, 0, 0))
     T:Eq(Block.Instance.CFrame, CFrame.new(5020, 0, 0), "a later set lands there too")
 
     Scene:Destroy()
@@ -5167,7 +5167,7 @@ T:Test("a value left at its default is placed as well", function()
     const Scene = Scenes.new({Name = "SpaceDefault"})
     const Copy = Scene:Load(nil, {Origin = FAR}) :: any
 
-    const Block = Copy:Create(BlockId)
+    const Block = Copy:Create(SpaceBlockId)
     T:Eq(Block.Instance.CFrame, CFrame.new(5000, 7, 0), "not where the template sits")
 
     Scene:Destroy()
@@ -5176,7 +5176,7 @@ end)
 T:Test("two copies of a scene stand apart", function()
     const Scene = Scenes.new({Name = "SpaceTwice"})
     const First = Scene:Load() :: any
-    const Block = First:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
+    const Block = First:Create(SpaceBlockId, {[SpaceSpotId] = CFrame.new(1, 0, 0)})
     First:Commit()
 
     const Second = Scene:Load(nil, {Origin = FAR}) :: any
@@ -5184,7 +5184,7 @@ T:Test("two copies of a scene stand apart", function()
 
     T:Eq(Block.Instance.CFrame, CFrame.new(1, 0, 0), "the first stays where it is")
     T:Eq(Other.Instance.CFrame, CFrame.new(5001, 0, 0), "the second is far away")
-    T:Eq(Other:Get(SpotId), Block:Get(SpotId), "and both hold the same value")
+    T:Eq(Other:Get(SpaceSpotId), Block:Get(SpaceSpotId), "and both hold the same value")
 
     Scene:Destroy()
 end)
@@ -5192,13 +5192,13 @@ end)
 T:Test("moving a copy changes no value and is not saved", function()
     const Scene = Scenes.new({Name = "SpaceMoving"})
     const Copy = Scene:Load() :: any
-    const Block = Copy:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
+    const Block = Copy:Create(SpaceBlockId, {[SpaceSpotId] = CFrame.new(1, 0, 0)})
     const Before = buffer.tostring(Copy:Serialize())
 
     T:Ok(Copy:SetOrigin(FAR), "moved")
     T:Eq(Copy:GetOrigin(), FAR, "and it says so")
     T:Eq(Block.Instance.CFrame, CFrame.new(5001, 0, 0), "the part went with it")
-    T:Eq(Block:Get(SpotId), CFrame.new(1, 0, 0), "the value did not")
+    T:Eq(Block:Get(SpaceSpotId), CFrame.new(1, 0, 0), "the value did not")
     T:Eq(buffer.tostring(Copy:Serialize()), Before, "the pack is what it was")
 
     Copy:Commit()
@@ -5215,7 +5215,7 @@ end)
 T:Test("a copy set aside takes a new origin when it comes back", function()
     const Scene = Scenes.new({Name = "SpaceAside"})
     const Copy = Scene:Load() :: any
-    const Block = Copy:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
+    const Block = Copy:Create(SpaceBlockId, {[SpaceSpotId] = CFrame.new(1, 0, 0)})
 
     Copy:Suspend()
     T:Ok(Copy:SetOrigin(FAR), "moved while away")
@@ -5241,17 +5241,17 @@ end)
 T:Test("placing with At moves what is placed", function()
     const Source = Scenes.new({Name = "SpacePlaceSource"}) :: any
     const SourceCopy = Source:Load()
-    const Held = SourceCopy:Create(BlockId, {[SpotId] = CFrame.new(1, 0, 0)})
-    SourceCopy:Create(BlockId)
+    const Held = SourceCopy:Create(SpaceBlockId, {[SpaceSpotId] = CFrame.new(1, 0, 0)})
+    SourceCopy:Create(SpaceBlockId)
 
     const Pack = SourceCopy:Serialize()
     const Scene = Scenes.new({Name = "SpacePlaceTarget"})
     const Copy = Scene:Load() :: any
 
     const Made = Copy:Place(Pack, CFrame.new(100, 0, 0)) :: any
-    T:Eq(Made[1]:Get(SpotId), CFrame.new(101, 0, 0), "a value it held")
-    T:Eq(Made[2]:Get(SpotId), CFrame.new(100, 7, 0), "and one it left at the default")
-    T:Eq(Held:Get(SpotId), CFrame.new(1, 0, 0), "the original is untouched")
+    T:Eq(Made[1]:Get(SpaceSpotId), CFrame.new(101, 0, 0), "a value it held")
+    T:Eq(Made[2]:Get(SpaceSpotId), CFrame.new(100, 7, 0), "and one it left at the default")
+    T:Eq(Held:Get(SpaceSpotId), CFrame.new(1, 0, 0), "the original is untouched")
 
     Source:Destroy()
     Scene:Destroy()
@@ -5739,9 +5739,9 @@ HiddenCopy:Create(PrivateId, {[TitleId] = "FixtureHiddenPrivate"})
 
 -- A copy that is not at the default origin, for the client to place what it
 -- writes itself by.
-Scenes.new({Name = "FixtureMoved"}):Load(nil, {Origin = CFrame.new(1000, 0, 0)}):Create(BlockId, {
+Scenes.new({Name = "FixtureMoved"}):Load(nil, {Origin = CFrame.new(1000, 0, 0)}):Create(SpaceBlockId, {
     [TitleId] = "FixtureMovedBlock",
-    [SpotId] = CFrame.new(1, 0, 0),
+    [SpaceSpotId] = CFrame.new(1, 0, 0),
 })
 
 -- A hallway inserted into a room twice, the second far away, with a button in the
