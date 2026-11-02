@@ -85,15 +85,6 @@ a large load stopped the server -- and a holder leaving had no test.
 New work goes here, described well enough to start without the conversation that
 produced it, with anything that is a decision marked *Ask*.
 
-- [ ] **Find what lengthened a bulk commit's frame.** Three players each
-      committing a 1,000-set transaction at once gave the server one frame of
-      78-82 ms as the commits landed, and each client one of 47-52 ms as the
-      others' edits arrived, on 2026-10-31, twice. On 2026-10-23, before the
-      work on links and objects, the same burst's longest frames were 29 ms and
-      20 ms. Building the transaction takes the client 2 ms, so the time is in
-      applying or receiving. Run the burst on the commit before
-      `feat/lighter-links` and on `main`, side by side in the same place, and
-      profile the long frame to see which change it was.
 - [ ] **Find what the server keeps after an edited level unloads.** After the
       edit bursts and `History:Clear`, unloading the level left the server at
       11.9 MB against 3.9 MB before it was loaded. With one player and no
@@ -121,6 +112,28 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **No change lengthened a bulk commit's frame.** On 2026-11-01 the
+      three-player bulk burst ran on `main` and on `497c483`, the code the
+      2026-10-23 numbers were measured on, side by side in the same place. The
+      longest server frame was 56-182 ms on `main` and 49-123 ms on the older
+      code: the same within Studio's noise, and neither near the 29 ms of
+      2026-10-23, so that figure came from different conditions.
+
+      The long frame is the three commits applying in the frame they arrive,
+      and most of it is the engine moving 3,000 parts: 26-42 ms for the writes
+      alone. 3,000 property sets take 28-41 ms on `main` against 70-78 ms on
+      the older code, where a listener on its own thread wrote each part, so
+      the links work made this faster, not slower. A `math.huge` load with
+      three players took 7.5 s on `main` against 8.9 s.
+
+      Two things about measuring it, kept in the bench place's scripts now.
+      Starting the clients with a Studio call each put a slow call between
+      them and any profiler capture, and those calls caused hitches of their
+      own, 2-3 s after the commits; the server starts them through a
+      `RemoteEvent` instead. And the script profiler only shows a frame that
+      falls inside its capture, so it has to be running before the burst
+      starts.
 
 - [x] **What the performance page dropped, measured again.** On 2026-10-31 on
       the real 34,918-object level, in the game's place with its own scripts
