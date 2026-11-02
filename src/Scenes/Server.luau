@@ -700,6 +700,11 @@ const function __instance_dispose(self: SceneInstance)
 
     Objects.DisposeInstance(Held)
 
+    -- Kept while it was suspended, for its objects to come back into; nothing
+    -- comes back now. See the same in Unload.
+    self.Objects = {}
+    self.ByLocal = {}
+
     if self.Folder then
         self.Folder:Destroy()
         self.Folder = nil
@@ -725,6 +730,12 @@ const function __instance_unload(self: SceneInstance)
     Registry.Instances[self.Id] = nil
 
     Objects.DropInstance(self)
+
+    -- Fresh rather than emptied. A table keeps the room it grew to, so a game
+    -- holding on to an unloaded copy of a 34,918-object level kept 3 MB in these
+    -- two for objects that were gone.
+    self.Objects = {}
+    self.ByLocal = {}
 
     -- The folder goes after its objects, so nothing is left holding a
     -- reference to an instance that is already gone.
