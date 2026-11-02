@@ -94,8 +94,8 @@ show in load times.
 
 ## Unloading
 
-An unload of a level nobody edited gives the server everything back, and a client
-all but about 2.5 MB of it.
+An unload gives a client all but about 2.5 MB of the level back. The server keeps
+room in its tables the same way, and edits leave nothing behind.
 
 Every object, property and part of the level is collected on a client once the
 collector has caught up. What stays is room in the client's tables of objects by
@@ -110,9 +110,12 @@ The server holds on to anything still in a player's undo history until
 edit bursts below, that was 1.8 MB: 112.1 MB against 110.3 MB after
 `History:Clear`, which is what the level read before anyone edited it.
 
-After those bursts the server read 11.9 MB once the level was unloaded, against
-3.9 MB before it was loaded. The 2026-10-28 run, with one player and no edits,
-got everything back.
+On the server, what stays is room in tables keyed by runtime id, sized by the
+most objects that were live at once. With the level built and loaded once, the
+unloaded server read 12.3-12.5 MB, against 3.9 MB before anything was built.
+Five more cycles of loading, editing with three players, clearing the history
+and unloading all read 12.3 MB, with one player as with three. Two copies loaded
+at once took it to 21.3 MB, and one copy again brought it back to 17.9 MB.
 
 ## While a level is loaded
 
