@@ -12,6 +12,7 @@ const Shared = require("./Shared")
 const Handles = require("../Handles")
 const Logger = require("../Logger")
 const Listeners = require("../Listeners")
+const Room = require("../Room")
 const Permissions = require("../Permissions/Client")
 const Types = require("./Types")
 
@@ -23,15 +24,19 @@ export type Object = Types.Object
 const Objects = {}
 
 const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
-const Workspace: {[RuntimeId]: Object} = {}
-const ByPart: {[Instance]: RuntimeId} = setmetatable({}, {__mode = "k"}) :: any
+
+-- These three are not const: unloading a level leaves each holding room for
+-- every object that was in it, about 2.5 MB together for 34,918, so each is
+-- swapped for a fresh copy once it empties out.
+local Workspace: {[RuntimeId]: Object} = Room.new()
+local ByPart: {[Instance]: RuntimeId} = Room.new("k")
 
 -- The other direction, and the reason an object can find its instance at all
 -- when the reference sent beside it did not survive: a tagged part carries its
 -- runtime id, so it can be filed here before its object arrives and claimed
 -- afterwards. Weak valued, so a part that is destroyed or streamed out is not
 -- held here by this table alone.
-const ByRuntimeId: {[RuntimeId]: Instance} = setmetatable({}, {__mode = "v"}) :: any
+local ByRuntimeId: {[RuntimeId]: Instance} = Room.new("v")
 
 -- Objects grouped by the live scene copy holding them. A copy going away is one
 -- packet naming it, not an ObjectRemoved per object, so the client has to be
@@ -683,7 +688,7 @@ const function Withdraw(Obj: Object)
     Obj.Links = nil
 
     if Obj.Instance then
-        ByPart[Obj.Instance] = nil
+        ByPart = Room.Take(ByPart, Obj.Instance)
 
         -- A local or drawn part was cloned here, so it is this side's to move:
         -- out of the world and kept, so an object that comes back comes back
@@ -700,7 +705,7 @@ const function Withdraw(Obj: Object)
         end
     end
 
-    ByRuntimeId[Obj.RuntimeId] = nil
+    ByRuntimeId = Room.Take(ByRuntimeId, Obj.RuntimeId)
     Unindex(Obj)
 
     -- Its removal is the only news a listener needs; no lock change follows.
@@ -724,7 +729,7 @@ const function Withdraw(Obj: Object)
     -- the wire did it themselves and a local Destroy did not, so an object this
     -- client destroyed stayed answerable through Objects:Get for the rest of
     -- the session -- destroyed, but still there to be found.
-    Workspace[Obj.RuntimeId] = nil
+    Workspace = Room.Take(Workspace, Obj.RuntimeId)
 
     setmetatable(Obj :: any, Shared.Gone)
 
@@ -845,12 +850,12 @@ const function File(Obj: any, Order: {PropertyTypes.PropertyIdentifier}, Methods
     -- metatable pair, which has none of the object's fields.
     setmetatable(Obj :: any, Methods)
 
-    Workspace[Obj.RuntimeId] = Obj
+    Room.Put(Workspace, Obj.RuntimeId, Obj)
     Index(Obj)
 
     if Obj.Instance then
-        ByPart[Obj.Instance] = Obj.RuntimeId
-        ByRuntimeId[Obj.RuntimeId] = Obj.Instance
+        Room.Put(ByPart, Obj.Instance, Obj.RuntimeId)
+        Room.Put(ByRuntimeId, Obj.RuntimeId, Obj.Instance)
     end
 end
 
@@ -1238,8 +1243,8 @@ const function Track(Inst: Instance)
         return
     end
 
-    ByPart[Inst] = RuntimeId
-    ByRuntimeId[RuntimeId] = Inst
+    Room.Put(ByPart, Inst, RuntimeId)
+    Room.Put(ByRuntimeId, RuntimeId, Inst)
 
     const Obj = Workspace[RuntimeId]
     if Obj and not Obj.Destroyed then
@@ -1253,14 +1258,14 @@ end
 -- from everything. The pairing is rebuilt by Track if it streams back in.
 const function Untrack(Inst: Instance)
     const RuntimeId = ByPart[Inst]
-    ByPart[Inst] = nil
+    ByPart = Room.Take(ByPart, Inst)
 
     if RuntimeId == nil then
         return
     end
 
     if ByRuntimeId[RuntimeId] == Inst then
-        ByRuntimeId[RuntimeId] = nil
+        ByRuntimeId = Room.Take(ByRuntimeId, RuntimeId)
     end
 
     const Obj = Workspace[RuntimeId]
@@ -1272,6 +1277,8 @@ const function Untrack(Inst: Instance)
     end
 end
 
+-- The live map, which an unload can swap for a fresh one: read it again rather
+-- than holding on to it.
 function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end

@@ -448,6 +448,10 @@ const function __instance_dispose(self: any)
     self.Suspended = nil
     Objects.DisposeInstance(Held)
 
+    -- Kept while it was suspended, for its objects to come back into.
+    self.Objects = {}
+    self.ByLocal = {}
+
     if self.Folder then
         self.Folder:Destroy()
         self.Folder = nil
@@ -464,8 +468,11 @@ const function __instance_unload(self: SceneInstance)
     -- outside this client ever knew about them.
     Objects.DropInstance(self.Id)
     World.DropCopy(self.Scene, self.Folder)
-    table.clear(self.Objects)
-    table.clear(self.ByLocal)
+
+    -- Fresh rather than cleared, which keeps the room: a game holding on to an
+    -- unloaded copy would keep it for every object that was in it.
+    self.Objects = {}
+    self.ByLocal = {}
 end
 
 const function NewInstance(Owner: any, Parent: Instance?, Origin: CFrame?): SceneInstance

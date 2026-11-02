@@ -3751,6 +3751,44 @@ T:Test("a large load does not hold the server for its whole length", function()
     Scene:Destroy()
 end)
 
+T:Test("unloading a large copy gives the workspace its room back", function()
+    const Scene = CratePack("LargeRoom", 2000)
+    const Copy = Scene:Load(nil, {Budget = math.huge}) :: any
+    const Stays = Objects.new(CrateId, {[HealthId] = 7})
+    if not Copy or not Stays then
+        T:Ok(false, "the copy or the object staying behind was not made")
+        return
+    end
+
+    const Full = Objects:GetWorkspace()
+    T:Eq(Full[Stays.RuntimeId], Stays, "the object staying behind is in the workspace")
+    const Filed, FiledByLocal = Copy.Objects, Copy.ByLocal
+
+    Copy:Unload()
+
+    -- A game can keep hold of a copy it unloaded; its maps go fresh too.
+    T:Ok(Copy.Objects ~= Filed and Copy.ByLocal ~= FiledByLocal, "the unloaded copy's maps were swapped")
+    T:Eq(next(Copy.Objects), nil, "and hold nothing")
+
+    -- A table only gives room back by being replaced, so a fresh one is the
+    -- proof; the same one would still hold room for the 2,000 crates.
+    const After = Objects:GetWorkspace()
+    T:Ok(After ~= Full, "the workspace was swapped for a fresh map")
+    T:Eq(After[Stays.RuntimeId], Stays, "which still holds the object that stayed")
+    T:Eq(Objects:Get(Stays.RuntimeId), Stays, "and Get still finds it")
+
+    local Crates = 0
+    for _, Obj in After do
+        if Obj.Copy == Copy then
+            Crates += 1
+        end
+    end
+    T:Eq(Crates, 0, "and none of the unloaded crates")
+
+    Stays:Destroy()
+    Scene:Destroy()
+end)
+
 -- How many objects the copy a load is building holds the moment the load first
 -- hands control back. The announcing after the read yields too, so the load
 -- returning would not say whether the reading did.

@@ -18,6 +18,7 @@
 local Varint = require("../src/Varint")
 local Handles = require("../src/Handles")
 local IdPool = require("../src/IdPool")
+local Room = require("../src/Room")
 local Codecs = require("../src/Codecs")
 local PermissionsShared = require("../src/Permissions/Shared")
 local PropertiesShared = require("../src/Properties/Shared")
@@ -152,6 +153,109 @@ do
     ok(PropertyTypes:IsValid("Object", 4), "a local id is still a valid Object value")
 end
 
+
+-- A map that empties out is copied, keeping what is live and its weak mode, and
+-- only once it is down to a quarter of the most it held.
+do
+    -- Held here too, or the collector could take them out of the weak map.
+    local held = {}
+    local map = Room.new("v")
+    for id = 1, 2000 do
+        held[id] = {}
+        Room.Put(map, id, held[id])
+    end
+    Room.Put(map, 1, map[1])
+
+    local live, peak = Room.CountOf(map)
+    ok(live == 2000 and peak == 2000, `writing a key twice counted it twice: {live}, {peak}`)
+
+    local kept = map
+    for id = 1, 1499 do
+        kept = Room.Take(kept, id)
+    end
+    ok(kept == map, "the map was copied before it was down to a quarter")
+
+    kept = Room.Take(kept, 1500)
+    ok(kept ~= map, "the map was not copied at a quarter of its peak")
+    ok(getmetatable(kept).__mode == "v", "the copy lost the map's weak mode")
+
+    local count, stray = 0, nil
+    for id, value in kept do
+        count += 1
+        if id <= 1500 or value ~= held[id] then
+            stray = id
+        end
+    end
+    ok(stray == nil, `the copy holds {stray}, which is not live`)
+    ok(count == 500, `the copy holds {count} entries, not the 500 live`)
+    ok(Room.Take(kept, 999999) == kept, "taking a missing key changed the map")
+
+    local small = Room.new()
+    for id = 1, 100 do
+        Room.Put(small, id, true)
+    end
+    for id = 1, 100 do
+        small = Room.Take(small, id)
+    end
+    ok(Room.CountOf(small) == 0, "a small map's count did not reach zero")
+end
+
+-- The point of it: a map filled the way a level fills the workspace, by runtime
+-- ids that only climb, and emptied by an unload gives its room back where a
+-- plain table keeps it.
+do
+    -- The heap once the collector has been through it: garbage until a cycle
+    -- finishes, a few times over, and the lowest reading.
+    local function settled(): number
+        local low = math.huge
+        for _ = 1, 4 do
+            local peak = gcinfo()
+            local junk = {}
+            for _ = 1, 200 do
+                for i = 1, 500 do
+                    junk[i] = table.create(16, 0)
+                end
+                local now = gcinfo()
+                if now < peak - 256 then
+                    break
+                end
+                peak = math.max(peak, now)
+            end
+            junk = nil
+            low = math.min(low, gcinfo())
+        end
+        return low
+    end
+
+    local function heldAfterEmptying(useRoom: boolean): number
+        local before = settled()
+        local map = if useRoom then Room.new() else {}
+        for id = 100001, 135000 do
+            if useRoom then
+                Room.Put(map, id, true)
+            else
+                map[id] = true
+            end
+        end
+        for id = 100001, 135000 do
+            if useRoom then
+                map = Room.Take(map, id)
+            else
+                map[id] = nil
+            end
+        end
+        local held = settled() - before
+        ok(next(map) == nil, "the map was not empty")
+        return held
+    end
+
+    local plain = heldAfterEmptying(false)
+    local room = heldAfterEmptying(true)
+    ok(plain > 512, `a plain table kept only {plain} KB, so this proves nothing`)
+    -- Against the plain table rather than zero: the heap is read by settling it,
+    -- which is good to a hundred KB or so.
+    ok(room < plain / 4, `an emptied map still held {room} KB, against {plain} KB for a plain table`)
+end
 
 -- Recycling pool: ids come back after release.
 do

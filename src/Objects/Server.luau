@@ -12,6 +12,7 @@ const Network = require("./Network")
 const Shared = require("./Shared")
 const Handles = require("../Handles")
 const IdPool = require("../IdPool")
+const Room = require("../Room")
 const Listeners = require("../Listeners")
 const Logger = require("../Logger")
 const Types = require("./Types")
@@ -33,7 +34,10 @@ const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
 -- Every live object on the server. Keyed by runtime id rather than by the
 -- persistent one, because the persistent one is not unique here: instancing a
 -- scene twice puts two objects carrying the same persistent id in this table.
-const Workspace: {[RuntimeId]: Object} = {}
+--
+-- Not const: unloading a level leaves it holding room for every object that was
+-- in it, 2 MB for 34,918, so it is swapped for a fresh copy once it empties out.
+local Workspace: {[RuntimeId]: Object} = Room.new()
 
 -- Who holds each locked object: the holder's user id, and the connection the
 -- lock was taken on, which is what lets it go with the player who took it.
@@ -311,7 +315,7 @@ const function Withdraw(self: Object, Announce: boolean)
     end
 
     if Workspace[self.RuntimeId] then
-        Workspace[self.RuntimeId] = nil
+        Workspace = Room.Take(Workspace, self.RuntimeId)
 
         -- A scene unloading announces itself once, by name, instead of once per
         -- object it held.
@@ -802,6 +806,8 @@ function Objects:IsLocalScene(_Scene: Types.SceneIdentifier): boolean
     return false
 end
 
+-- The live map, which an unload can swap for a fresh one: read it again rather
+-- than holding on to it.
 function Objects:GetWorkspace(): {[RuntimeId]: Object}
     return Workspace
 end
@@ -904,7 +910,7 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
     setmetatable(Obj :: any, Methods)
     Obj.Copy = Instance_
 
-    Workspace[Obj.RuntimeId] = Obj
+    Room.Put(Workspace, Obj.RuntimeId, Obj)
     Instance_.Objects[Obj.RuntimeId] = Obj
     Instance_.ByLocal[Obj.LocalId] = Obj
 
