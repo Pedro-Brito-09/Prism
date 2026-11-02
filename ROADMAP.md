@@ -83,15 +83,8 @@ undo switched off everyone's history, concurrent creates stranded records, and
 a large load stopped the server -- and a holder leaving had no test.
 
 New work goes here, described well enough to start without the conversation that
-produced it, with anything that is a decision marked *Ask*.
-
-- [ ] **Find what the server keeps after an edited level unloads.** After the
-      edit bursts and `History:Clear`, unloading the level left the server at
-      11.9 MB against 3.9 MB before it was loaded. With one player and no
-      edits, on 2026-10-28, it got everything back. Could be room left in
-      tables keyed by runtime id, as on a client, or something per player.
-      Load, edit, clear and unload twice: if the second unload reads the
-      same, it is reused room; if it grows, it is a leak.
+produced it, with anything that is a decision marked *Ask*. Nothing is queued
+now.
 
 Also decided against, for now: **type checking `tests/`.** It needs a
 sourcemap passed to the analyser with `--sourcemap`, which resolves the requires and turns up 674 diagnostics in `tests/`, almost all nil
@@ -112,6 +105,22 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+- [x] **What the server keeps after an unload is room, not a leak.** On
+      2026-11-01, with the level built and loaded once, the unloaded server
+      read 12.3-12.5 MB. Five more cycles -- loading, three players editing,
+      `History:Clear`, unloading, and two with no edits -- all read 12.3 MB,
+      and one player read the same as three, so it is neither the edits nor
+      anything per player. Two copies loaded at once took it to 21.3 MB, and
+      one again brought it back to 17.9 MB: it is sized by the most objects
+      live at once, as a table's room is. The 3.9 MB it was set against on
+      2026-10-31 was read before the level was built, not before it was
+      loaded.
+
+      What holds it is the server's tables keyed by runtime id -- the
+      `Workspace` map and the object id pool's `Used` set among them. Object
+      runtime ids are not recycled, so every load takes fresh ones, and the
+      tables' room is reused rather than grown.
 
 - [x] **No change lengthened a bulk commit's frame.** On 2026-11-01 the
       three-player bulk burst ran on `main` and on `497c483`, the code the
