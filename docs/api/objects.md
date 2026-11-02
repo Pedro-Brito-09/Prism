@@ -28,7 +28,7 @@
 | `Objects.new(type, values?, copy?)` | S | object | With no copy, lands in the implicit `Default` scene |
 | `Objects.new(type, values?, copy)` | C | object | In a copy this client owns; `copy` is required |
 | `Objects:Get(runtimeId)` | S C | object? | |
-| `Objects:GetWorkspace()` | S C | `{[runtimeId]: object}` | |
+| `Objects:GetWorkspace()` | S C | `{[runtimeId]: object}` | The live map. An unload can swap it, so read it again rather than keeping it |
 | `Objects:Resolve(copyId, value)` | S C | object? | A local id, within a copy, or an address |
 | `Objects:Split(persistentId)` | S C | `sceneId, localId` | |
 | `Objects:FromInstance(instance)` | C | object? | |

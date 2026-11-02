@@ -106,21 +106,28 @@ rather than guessed.
 
 ## Done
 
-- [x] **What the server keeps after an unload is room, not a leak.** On
-      2026-11-01, with the level built and loaded once, the unloaded server
-      read 12.3-12.5 MB. Five more cycles -- loading, three players editing,
-      `History:Clear`, unloading, and two with no edits -- all read 12.3 MB,
-      and one player read the same as three, so it is neither the edits nor
-      anything per player. Two copies loaded at once took it to 21.3 MB, and
-      one again brought it back to 17.9 MB: it is sized by the most objects
-      live at once, as a table's room is. The 3.9 MB it was set against on
-      2026-10-31 was read before the level was built, not before it was
-      loaded.
+- [x] **An unload gives the room back.** After an unload the server read
+      9.9-12.5 MB against 4.0-4.3 MB before the level was built, and a client
+      11.3 MB against 5.4 MB, the same with edits as without and with one
+      player as with three. It was not a leak: it held steady over five
+      cycles, and two copies loaded at once raised it, which is a table's
+      room, sized by the most it ever held. A Luau table keeps that room after
+      its keys are gone and only gives it back on a rehash, which only an
+      insert into a full table does, so there is no shrinking one in place.
 
-      What holds it is the server's tables keyed by runtime id -- the
-      `Workspace` map and the object id pool's `Used` set among them. Object
-      runtime ids are not recycled, so every load takes fresh ones, and the
-      tables' room is reused rather than grown.
+      `src/Room.luau` counts a map's entries and, once it falls to a quarter
+      of the most it held, hands back a fresh copy of what is live, weak mode
+      and all. A quarter, so a copy costs at most a third of the removals that
+      led to it. The workspace maps on both sides and the client's maps of
+      parts by runtime id and back go through it; the server's map alone kept
+      2 MB. An unloaded or disposed copy gets fresh `Objects` and `ByLocal`
+      too, because a game holding on to one kept another 3 MB in them. Now the
+      server reads 5.2 MB after an unload and a client 7.2-9.3 MB.
+
+      `GetWorkspace` hands back whichever map is live, so a caller holding the
+      table across an unload sees the old one. That is the price of a map
+      that can shrink. Per-copy and lock maps were left alone: the first die
+      with their copy and the second only ever hold what is locked.
 
 - [x] **No change lengthened a bulk commit's frame.** On 2026-11-01 the
       three-player bulk burst ran on `main` and on `497c483`, the code the

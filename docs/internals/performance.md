@@ -94,13 +94,29 @@ show in load times.
 
 ## Unloading
 
-An unload gives a client all but about 2.5 MB of the level back. The server keeps
-room in its tables the same way, and edits leave nothing behind.
+An unload gives the server and a client the level back, and edits leave nothing
+behind. Measured on 2026-11-01 with three players, the same way on both sides:
 
-Every object, property and part of the level is collected on a client once the
-collector has caught up. What stays is room in the client's tables of objects by
-runtime id and of parts: a Luau table keeps that room after its keys are gone, and
-the next load reuses it, so a second load and unload read the same.
+| | Before | After unloading |
+|---|---|---|
+| Server | 4.0-4.3 MB, nothing built | 5.2 MB |
+| Each client | 5.4 MB, nothing loaded | 7.2-9.3 MB |
+
+The server's 0.9 MB is the scene, its pack and the schema that built it. What a
+client keeps over its start was not pinned down: a playing client's own scripts
+grow its heap too.
+
+Every object, property and part of the level is collected once the collector has
+caught up. The tables that filed them are the other half. A Luau table keeps the
+room it grew to after its keys are gone, and gives it back only when an insert
+into a full table makes it rehash, so the maps of objects by runtime id and of
+parts used to keep room for the whole level: 2 MB the workspace map alone. Now a
+map that falls to a quarter of the most it held is copied into a fresh one of
+what is live, and an unloaded copy's own maps are replaced. Before that, the
+server read 9.9-11.9 MB after an unload and a client 11.3 MB.
+
+`Objects:GetWorkspace()` hands back whichever map is live, so read it again
+rather than holding on to it across an unload.
 
 The value the server last confirmed is kept only for a property this client edits,
 and `Objects:CountConfirmed()` says how many that is.
@@ -110,12 +126,6 @@ The server holds on to anything still in a player's undo history until
 edit bursts below, that was 1.8 MB: 112.1 MB against 110.3 MB after
 `History:Clear`, which is what the level read before anyone edited it.
 
-On the server, what stays is room in tables keyed by runtime id, sized by the
-most objects that were live at once. With the level built and loaded once, the
-unloaded server read 12.3-12.5 MB, against 3.9 MB before anything was built.
-Five more cycles of loading, editing with three players, clearing the history
-and unloading all read 12.3 MB, with one player as with three. Two copies loaded
-at once took it to 21.3 MB, and one copy again brought it back to 17.9 MB.
 
 ## While a level is loaded
 
