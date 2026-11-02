@@ -37,6 +37,9 @@ take about four times as long as the building does.
 
 On 2026-10-31, without the game's scripts and with three players connected, the
 default budget took 10.4-13.4 s over 594-770 frames, the longest 0.40-0.53 s.
+`math.huge` took 7.5 s with three players on 2026-11-01, against 8.9 s on the
+code of 2026-10-23. A stall that long can trip Studio's script timeout when the
+load runs from a Script while players are joining, as it once did here.
 
 Choose by what the player is doing. The default suits a level loading into a running
 game, and a game behind a loading screen can afford more. `math.huge` is the fastest
@@ -137,9 +140,20 @@ Three players at once, on the loaded level:
 The drag burst ran under a role with `Rate = 120`. The bulk burst ran under one
 with a `Rate` high enough for 1,000 operations at once, since a transaction
 spends one action per operation. Building a 1,000-set transaction takes the
-client about 2 ms. The longest bulk frames are longer than the 29 ms on the
-server and 20 ms on a client measured on 2026-10-23, before the work on links
-and objects; nothing here says which change that was.
+client about 2 ms.
+
+The long server frame is the three commits applying in the frame they arrive:
+3,000 sets, each moving a part. The part writes alone take the engine 26-42 ms
+in a quiet frame, and they are most of what a set costs. 3,000 `Set`s on the
+properties took 28-41 ms against 70-78 ms on the code of 2026-10-23, when a
+part was written by a listener on its own thread.
+
+On 2026-11-01 the burst ran on today's code and on that of 2026-10-23, side by
+side in the same place. The longest server frame was 56-182 ms today and
+49-123 ms on the older code: the same within Studio's noise, and neither came
+near the 29 ms recorded on 2026-10-23, so that figure came from different
+conditions, not from code since changed. A long stall did not repeat without
+the edits.
 
 Studio caps a server at 60 frames a second, so these say whether a frame went
 long, not how much headroom was left. They are Studio's frame times, on one
