@@ -16,6 +16,7 @@ const RunService = game:GetService("RunService")
 const Channels = require("./Channels")
 const Codecs = require("./Codecs")
 const Logger = require("./Logger")
+const Limits = require("./Limits")
 
 const IS_SERVER = RunService:IsServer()
 
@@ -30,10 +31,8 @@ const IS_SERVER = RunService:IsServer()
 const RUNNING = RunService:IsRunning()
 const WAIT_TIMEOUT = 10
 
--- The largest packet the server will decode from a client. Twice the biggest
--- single argument a client sends, a scene commit (MAX_COMMIT_BYTES in
--- Scenes/Server), so a full commit and its framing always fit.
-const MAX_PACKET_BYTES = 1048576
+-- The largest packet the server will decode from a client; see Limits.
+const MAX_PACKET_BYTES = Limits.MAX_PACKET_BYTES
 
 export type Codec<T> = Codecs.Codec<T>
 

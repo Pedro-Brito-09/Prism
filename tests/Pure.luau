@@ -25,6 +25,7 @@ local PropertiesShared = require("../src/Properties/Shared")
 local PropertyTypes = require("../src/Properties/Types")
 local Try = require("../src/Try")
 local CustomEnum = require("../src/CustomEnum")
+local Limits = require("../src/Limits")
 
 local failures = 0
 local checks = 0
@@ -721,6 +722,11 @@ do
     mixed[2] = 1
     ok(not (prop:Set(mixed)), "a list with a wrong item should be refused")
 end
+
+-- A full commit has to fit in a packet the server will decode, with room left
+-- for the channel id and the lengths framing it. 64 bytes is far more framing
+-- than a commit carries.
+ok(Limits.MAX_PACKET_BYTES >= Limits.MAX_COMMIT_BYTES + 64, `a {Limits.MAX_COMMIT_BYTES} byte commit should fit in a {Limits.MAX_PACKET_BYTES} byte packet`)
 
 print(`{checks - failures}/{checks} checks passed`)
 if failures > 0 then

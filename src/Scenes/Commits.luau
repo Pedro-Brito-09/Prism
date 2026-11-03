@@ -8,6 +8,7 @@ const Objects = require("../Objects/Server")
 const Registry = require("./Registry")
 const Network = require("./Network")
 const Logger = require("../Logger")
+const Limits = require("../Limits")
 const Types = require("./Types")
 
 type SceneIdentifier = Types.SceneIdentifier
@@ -26,8 +27,9 @@ end
 -- decoding walks the buffer and does nothing else until it is through -- and
 -- the object cap is what stops a well formed pack of a hundred thousand
 -- objects becoming a scene nobody asked for. The name cap is only there so a
--- registry key cannot be a novel.
-const MAX_COMMIT_BYTES = 524288
+-- registry key cannot be a novel. The byte cap lives in Limits, beside the
+-- packet cap it has to stay under.
+const MAX_COMMIT_BYTES = Limits.MAX_COMMIT_BYTES
 const MAX_COMMIT_OBJECTS = 4096
 const MAX_NAME_LENGTH = 64
 
