@@ -56,7 +56,7 @@ and assertion, then fails the corresponding script.
 ### The server suite in CI
 
 CI also runs the server suite on Roblox itself, on every push to this
-repository. `node scripts/build.js` writes `dist/PrismCI.rbxlx`, a place with
+repository. `node scripts/build.js` writes `dist/PrismCI.rbxl`, a place with
 the suite in `ServerStorage` as a ModuleScript, and `scripts/studio-tests.js`
 publishes it to a dedicated test place and runs it through an Open Cloud Luau
 Execution, which runs only the script it is handed. The job fails unless the

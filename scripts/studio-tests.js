@@ -1,4 +1,4 @@
-// Run the server suite on Roblox from CI: publish dist/PrismCI.rbxlx to a
+// Run the server suite on Roblox from CI: publish dist/PrismCI.rbxl to a
 // dedicated test place, run the suite there through an Open Cloud Luau
 // Execution, and fail unless it reports every test passed.
 //
@@ -22,7 +22,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.resolve(__dirname, "..");
-const PLACE = path.join(ROOT, "dist", "PrismCI.rbxlx");
+const PLACE = path.join(ROOT, "dist", "PrismCI.rbxl");
 const API = "https://apis.roblox.com";
 
 // What the execution runs. The suite is a module in the CI place; requiring it
@@ -76,7 +76,7 @@ const main = async () => {
         "POST",
         `${API}/universes/v1/${UNIVERSE}/places/${PLACE_ID}/versions?versionType=Published`,
         fs.readFileSync(PLACE),
-        "application/xml",
+        "application/octet-stream",
     );
     console.log(`Published version ${versionNumber}.`);
 
