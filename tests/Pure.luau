@@ -648,6 +648,25 @@ do
     ok(CustomEnum.UNKNOWN.Value == "Unknown", `UNKNOWN.Value was {tostring(CustomEnum.UNKNOWN.Value)}`)
 end
 
+-- Precision snaps through whole numbers: the value times Scale, rounded. Past
+-- what that product can hold, or with a step that rounds to zero, the snap
+-- gives infinity or NaN, and a finite value has to come back out.
+do
+    local function isFinite(value: number): boolean
+        return value == value and math.abs(value) ~= math.huge
+    end
+
+    local huge = PropertyTypes:FixValue("Number", 1e308, {Precision = 0.01, Scale = 100})
+    ok(huge ~= nil and isFinite(huge), `1e308 snapped at Scale 100 should stay finite, got {huge}`)
+    ok(huge == 1e308, `a value past Scale's reach should be left as it was, got {huge}`)
+
+    local zeroStep = PropertyTypes:FixValue("Number", 5, {Precision = 0.001, Scale = 1})
+    ok(zeroStep ~= nil and isFinite(zeroStep), `a step that rounds to zero should not give NaN, got {zeroStep}`)
+
+    local snapped = PropertyTypes:FixValue("Number", 1.3, {MinValue = 0, Precision = 0.5, Scale = 10})
+    ok(snapped == 1.5, `1.3 at Precision 0.5 should snap to 1.5, got {snapped}`)
+end
+
 -- Table: a list of one item type, every item held to that type's constraints.
 do
     local Numbers = {Of = "Number", Item = {MinValue = 0, MaxValue = 10, AllowDecimals = false}, MinItems = 1, MaxItems = 3}
