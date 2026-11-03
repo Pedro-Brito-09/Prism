@@ -90,8 +90,8 @@ export type DestroyOperation = {
 
 -- Taking and releasing a hold on one object. In the list rather than on a
 -- channel of their own so that claiming what an edit needs and making the edit
--- are one thing: locking three objects and moving them used to be two round
--- trips, with the lock able to come back refused after the edit was built.
+-- are one thing: locking three objects and moving them is one round trip, not
+-- two with the lock able to come back refused after the edit was built.
 --
 -- Locks are taken before anything else in the transaction and released after,
 -- which is the order the words are in: hold these, do this, let go.

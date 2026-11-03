@@ -46,7 +46,7 @@ local Workspace: {[RuntimeId]: Object} = Room.new()
 -- UserId is filled in only where that resolves to a person, which is the part a
 -- client can be told about.
 --
--- A hold used to require a player, so the server holding an object meant
+-- A hold does not require a player, so the server can hold an object without
 -- inventing a fake one. Nothing about a hold needs a person: it says this is
 -- being worked on, leave it alone.
 const Locks: {[RuntimeId]: {UserId: number?, Holder: any}} = {}
@@ -59,8 +59,8 @@ const Ids = IdPool.new(nil, false)
 -- Every object appearing here and going, however it came and however it went:
 -- created, restored by a scene load, revived from a suspend, destroyed,
 -- suspended, or taken away with the copy that held it. Server scripts that
--- drive objects -- a spinner reading its speed -- used to poll GetWorkspace to
--- notice any of it.
+-- drive objects -- a spinner reading its speed -- do not have to poll
+-- GetWorkspace to notice any of it.
 --
 -- The client's twin, down to the argument: Restored says the object came back
 -- from a pack under the id it was saved with, which is a copy reading itself in
@@ -942,10 +942,10 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
 end
 
 -- InitialValues are applied before the links are wired and before the broadcast.
--- Restoring a saved object used to call Objects.new and then Set once per
--- property, which broadcast the defaults and then one PropertyChanged for each
--- property -- a 500 object level at ten properties each cost several thousand
--- packets, and every object's first packet carried state that was already wrong.
+-- Restoring through Objects.new and then a Set per property would broadcast the
+-- defaults and then one PropertyChanged for each property -- a 500 object level
+-- at ten properties each costs several thousand packets, and every object's
+-- first packet carries state that is already wrong.
 --
 -- LocalId is the object's id within its scene. Creating mints the next one;
 -- restoring from a pack passes the id the object was saved under, which is the
@@ -1263,7 +1263,7 @@ function Objects:Duplicate(Obj: Object, Target: any?): Object?
     const New = Objects.new(Obj.Registry, Shared.Snapshot(Obj), Target or SceneRegistry.Instances[Obj.InstanceId])
 
     -- Kept values travel with the rest, or duplicating a room and deleting the
-    -- original would lose them as surely as the save used to.
+    -- original would lose them.
     New.Unknown = if Obj.Unknown then table.clone(Obj.Unknown) else nil
     return New
 end
@@ -1649,9 +1649,9 @@ Permissions.OnSceneRights(function(UserId: number, Scene: Types.SceneIdentifier)
 end)
 
 Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer): boolean
-    -- Budget first. Check used to run after the workspace lookup, so a client
-    -- spamming runtime ids that do not exist returned early and never spent any
-    -- of its allowance -- the one flood the limiter most needed to catch.
+    -- Budget first, ahead of the workspace lookup: otherwise a client spamming
+    -- runtime ids that do not exist returns early and never spends any of its
+    -- allowance -- the one flood the limiter most needs to catch.
     if not Permissions:Consume(Plr) then
         return false
     end
@@ -1736,8 +1736,7 @@ Network.Destroy.OnInvoke = function(Plr: Player, Identifier: RuntimeId): boolean
 
     -- Retired rather than destroyed: a player's own destroy is theirs to take
     -- back, and this is the channel a lone Object:Destroy on the client comes
-    -- down. Nothing keeping it means it is gone as immediately as it used to
-    -- be.
+    -- down. Nothing keeping it means it is gone immediately.
     Objects.Retire(Plr, Obj, true)
     return true
 end

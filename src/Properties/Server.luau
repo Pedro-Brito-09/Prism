@@ -183,8 +183,8 @@ function Properties:Unregister(Identifier: PropertyIdentifier): boolean
     Registered[Identifier] = nil
     Ids:Release(Identifier)
 
-    -- Told to every client, which used to keep serving the registry it had for
-    -- the rest of the session.
+    -- Told to every client, which would otherwise keep serving the registry it
+    -- had for the rest of the session.
     Network.PropertyUnregistered:FireAll(Identifier)
     return true
 end

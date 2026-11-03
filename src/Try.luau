@@ -18,8 +18,8 @@ const function Try(Attempts: number, fn: (...any) -> ...any, ...: any): ...any
             break
         end
 
-        -- The old loop waited after the final attempt too, so a run that was
-        -- always going to fail still slept for the last (and longest) backoff.
+        -- No wait after the final attempt, so a run that is always going to fail
+        -- does not sleep for the last (and longest) backoff.
         if Attempt < Total then
             task.wait(Delay)
             Delay *= 2

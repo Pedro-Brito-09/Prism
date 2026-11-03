@@ -220,7 +220,7 @@ end
 -- Tells the server to drop this player's redo stack, or both. Invoked on a
 -- thread of its own so neither caller yields, and spawned rather than deferred
 -- so the request leaves now: it has to reach the server ahead of any edit made
--- after it, which also goes through the remote function, and an event used to
+-- after it, which also goes through the remote function, and an event can
 -- arrive behind such an edit and wipe the step it had just recorded.
 const function Forget(RedoOnly: boolean)
     task.spawn(function()
@@ -375,7 +375,7 @@ const function Move(From: {Token}, To: {Token}, Forward: boolean): boolean
 
     if Token.Step then
         -- Off the order while it runs, as on the server: a custom action can
-        -- yield, and a new action, a clear or a fork landing meanwhile used to
+        -- yield, and a new action, a clear or a fork landing meanwhile would
         -- reach a step half applied -- or leave it to be put on a redo stack
         -- that had been forked past it.
         table.remove(From)

@@ -21,9 +21,9 @@ const IS_SERVER = RunService:IsServer()
 
 -- Whether a game is running at all. Required from a plugin or the command bar
 -- there is no server to talk to and no client to tell, and Studio's edit mode
--- answers true to IsServer and IsClient alike: this used to wait ten seconds for
--- remotes that never come and then error, or would have built them into the
--- place being edited. Outside a running game nothing is created or waited for,
+-- answers true to IsServer and IsClient alike, so without this check it would
+-- wait ten seconds for remotes that never come and then error, or build them
+-- into the place being edited. Outside a running game nothing is created or waited for,
 -- and a send goes nowhere with one warning per channel. Everything that needs
 -- no network -- the compressor, a scene read into a plugin's own world --
 -- works as it does anywhere else.
@@ -58,8 +58,8 @@ local Event: RemoteEvent
 local Function: RemoteFunction
 
 const function Pack(Id: number, Schema: {Codec<any>}, Args: {any}, Count: number): (buffer, {any}?)
-    -- Checked in both directions. Too few arguments used to fall through to a
-    -- codec writing a nil, which surfaced as an opaque buffer error rather than
+    -- Checked in both directions. Too few arguments would fall through to a
+    -- codec writing a nil, which surfaces as an opaque buffer error rather than
     -- naming the channel that was called wrongly.
     if Count ~= #Schema then
         Logger:Error(`Channel {Channels.List[Id].Name} takes {#Schema} argument(s), got {Count}.`)

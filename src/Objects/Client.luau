@@ -93,7 +93,7 @@ const Hosted: {[Types.SceneInstanceId]: {[number]: Types.SceneInstanceId}} = {}
 
 -- Every object appearing here and going, whichever way it came: replicated
 -- from the server, built in a scene this client owns, or drawn for a copy the
--- server opened. UI used to poll GetWorkspace to notice any of it.
+-- server opened, so UI does not have to poll GetWorkspace to notice any of it.
 -- Restored says the object came back from a pack under the id it was saved
 -- with -- a copy reading itself in, rather than anything anyone did. A history
 -- would record a step per object in a level without it.
@@ -198,8 +198,8 @@ function Objects:Lock(Refs: Object | {Object}): boolean
 
     -- Recorded from the answer rather than left to the broadcast. The answer
     -- comes back on the remote function and the broadcast on the remote event,
-    -- and Roblox orders nothing across the two, so IsLocked used to say free
-    -- for a moment after Lock had said yes.
+    -- and Roblox orders nothing across the two, so IsLocked would say free for
+    -- a moment after Lock had said yes.
     const Me = Players.LocalPlayer.UserId
     for _, Identifier in Ids do
         Record(Identifier, true, Me)
@@ -400,17 +400,17 @@ const Pending: {[any]: number} = setmetatable({}, {__mode = "k"}) :: any
 
 -- The value the server has actually asserted for a property. A refusal rolls
 -- back to this rather than to whatever was on screen just before the refused
--- set: two refused sets in a row used to leave the second one's starting value
+-- set: two refused sets in a row would leave the second one's starting value
 -- in place, which is the first refused value, and no broadcast follows a
 -- refusal to correct it.
 --
 -- Held only for a property this client has edited, from just before the edit
 -- shows, and kept current by every PropertyChanged after. Until then the value
 -- on screen is the server's: a set and a preview are the only two things that
--- show anything else, and both hold first. It used to be seeded for every
--- property as it arrived, which on a 34,918-object level is 495,279 entries
--- and 16 MB of hash -- kept after the level was unloaded, since a Luau table
--- never gives back the room its emptied keys took, weak or not.
+-- show anything else, and both hold first. Not seeded for every property as it
+-- arrives: on a 34,918-object level that is 495,279 entries and 16 MB of hash
+-- -- kept after the level is unloaded, since a Luau table never gives back the
+-- room its emptied keys took, weak or not.
 const Confirmed: {[any]: any} = setmetatable({}, {__mode = "k"}) :: any
 
 -- What Confirmed holds for a nil value, which would otherwise read as no entry
@@ -443,10 +443,10 @@ const function Confirm(Prop: any, Value: any)
 end
 
 -- Properties being set with ClientSided, and the value each held before the
--- first of those sets. A drag used to send a set per frame, which at sixty
--- frames a second sat exactly on the default budget: the limiter refused half
--- way through and every refusal snapped the value back while the player was
--- still holding it. The game knows when a drag starts and ends and the wire
+-- first of those sets. A drag sending a set per frame, at sixty frames a
+-- second, sits exactly on the default budget: the limiter refuses half way
+-- through and every refusal snaps the value back while the player is still
+-- holding it. The game knows when a drag starts and ends and the wire
 -- does not, so the game says so: every frame is shown here and nowhere else,
 -- and the set that ends it is the one edit anybody hears about, starting from
 -- the value it started from. Weak keyed, like the two tables above.
@@ -483,9 +483,9 @@ const WarnedTemplate: {[ObjectIdentifier]: true} = {}
 -- The template to build a type's instances from here, for an object in a scene
 -- this client owns or in a copy it draws. Warned about the first time it is
 -- missing for a type that has one -- the moment it matters, and on the side it
--- matters to. Registration used to guess from where the template sat, which
--- warned for every type in ServerStorage, including every type in a game whose
--- clients never build anything.
+-- matters to. Not at registration, where guessing from where the template sits
+-- would warn for every type in ServerStorage, including every type in a game
+-- whose clients never build anything.
 const function TemplateOf(Registry: ObjectRegistry): Instance?
     if Registry.Instance then
         return Registry.Instance

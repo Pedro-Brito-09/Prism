@@ -20,10 +20,10 @@
 -- the new tail. The manifest is where readers look the boundary up, and it may
 -- lag the shard for a moment; anyone who meets the gap closes it.
 --
--- This also removes the write contention of the old single key layout, where
--- every edit in the game did UpdateAsync against the same key: read the whole
--- corpus, decompress it, change one record, recompress, write it back. Edits to
--- different shards no longer contend at all.
+-- This also avoids the write contention of a single key, where every edit in
+-- the game does UpdateAsync against the same key: read the whole corpus,
+-- decompress it, change one record, recompress, write it back. Edits to
+-- different shards do not contend at all.
 --
 -- Cache tiers
 --

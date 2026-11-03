@@ -1,11 +1,10 @@
 --!strict
 -- The tree Prism owns in the workspace.
 --
--- An object's instance used to be parented wherever a Container field named:
--- one on the object registry, one on the scene, one on the copy, resolved in
--- that order. Three places to set it, three chances for them to disagree, and
--- nothing in the explorer to say which room a part belonged to. There is one
--- place instead, and the framework owns it:
+-- An object's instance is parented in one place, and the framework owns it.
+-- Container fields on the object registry, the scene and the copy would be
+-- three places to set it, three chances for them to disagree, and nothing in
+-- the explorer to say which room a part belongs to:
 --
 --     workspace.__prism.__scene_{SceneId}.__copy_{CopyId}
 --

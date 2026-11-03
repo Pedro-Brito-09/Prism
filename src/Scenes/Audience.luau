@@ -1,11 +1,10 @@
 --!strict
 -- Who hears about a scene.
 --
--- Every packet about a scene used to go out with FireAll, so every player heard
--- about every scene. That is fine for a game with one level and wrong for a
--- place several people build in at once. A scene now admits players by user id,
--- and one that is not private admits everybody -- which is what every scene
--- that existed before this already was.
+-- Sending every packet about a scene with FireAll would tell every player about
+-- every scene. That is fine for a game with one level and wrong for a place
+-- several people build in at once. A scene admits players by user id, and one
+-- that is not private admits everybody.
 --
 -- A player holds a scene at one of two reaches, named for the Replicate field
 -- on an object type. Everyone is what every player is owed of every scene the

@@ -1,9 +1,8 @@
 --!strict
 -- Property instances, shared by the server and the client.
 --
--- This used to live in Server.luau, which meant the client had no Properties.new
--- at all -- and the compressor calls it while decompressing metadata, so any
--- client side decompression died on a nil call.
+-- Shared rather than in Server.luau because the compressor calls Properties.new
+-- while decompressing metadata, and the client decompresses too.
 --
 -- Change notification is deliberately not a signal object. Most properties in an
 -- editor are never watched, and allocating a signal table plus a handler list for
@@ -20,11 +19,11 @@ export type Property<T> = Types.Property<T>
 
 const Shared = {}
 
--- Writes a value onto the instance a property drives. A link used to be an
--- OnChange listener: a link table, two closures and a listener array a
--- property, 431 bytes, and 330,259 of the 495,279 properties of a real
--- 34,918-object level drive a part -- about 140 MB of a client's 309. Two
--- fields on the property, the instance and the type's own link, do the same.
+-- Writes a value onto the instance a property drives. Two fields on the
+-- property, the instance and the type's own link, rather than an OnChange
+-- listener: a link table, two closures and a listener array cost 431 bytes a
+-- property, and 330,259 of the 495,279 properties of a real 34,918-object level
+-- drive a part -- about 140 MB of a client's 309.
 const function Drive(Link: Types.Drive, Inst: Instance, Value: any)
     if Link.Type == "Attribute" then
         Inst:SetAttribute(Link.Name, Value)

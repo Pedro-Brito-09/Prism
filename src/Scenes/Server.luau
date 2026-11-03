@@ -843,9 +843,9 @@ end
 -- Load and Open are one reading of the pack, and differ only in whether the
 -- server builds the parts.
 -- One object of a pack into a copy. A type this build does not have is kept as
--- the bytes it was read from and written back where it was by the next commit;
--- restoring used to warn and leave it out, and committing the copy afterwards
--- then wrote it out of the pack for good.
+-- the bytes it was read from and written back where it was by the next commit.
+-- Left out, committing the copy afterwards would write it out of the pack for
+-- good.
 const function ReadOne(Scene: Scene, Instance_: any, Object: any, Restored: {any})
     if not Objects:GetRegistry(Object.Registry) then
         Logger:Warn(`Scene {Scene.Name} holds an object of type {Object.Registry}, which is not registered. Kept as saved, and written back unchanged.`)

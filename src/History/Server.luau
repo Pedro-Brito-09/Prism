@@ -1,12 +1,11 @@
 --!strict
 -- Undo and redo for the scenes the server owns, kept per player, here.
 --
--- It used to live entirely on the client, which could record what it had done
--- but could not hold on to what it had undone: the server destroyed an object
--- the moment a destroy landed, so undoing one built a new object in its place.
--- A new object gets a new local id, and every reference still naming the old
--- one was left pointing at nothing. An undo that loses the wiring is not an
--- undo.
+-- Server side because the client can record what it has done but cannot hold
+-- on to what it has undone: if the server destroyed an object the moment a
+-- destroy landed, undoing one would build a new object in its place. A new
+-- object gets a new local id, and every reference still naming the old one is
+-- left pointing at nothing. An undo that loses the wiring is not an undo.
 --
 -- So the stack lives where the objects do. A destroy suspends its object --
 -- out of the world by every measure, but whole -- and the step that caused it
@@ -70,9 +69,9 @@ local HELD_LIMIT = 10000
 -- actions.
 const MERGE_WINDOW = 1
 
--- An entry names an object rather than an id, and holds it. That is the whole
--- change: a destroy no longer has to describe the object well enough to build
--- another one, because it kept the one it took.
+-- An entry names an object rather than an id, and holds it, so a destroy does
+-- not have to describe the object well enough to build another one: it keeps
+-- the one it took.
 --
 -- Create and Destroy carry the same thing and differ only in which direction
 -- means "in the world" -- undoing a create and redoing a destroy are the same
@@ -548,9 +547,9 @@ const function Move(Plr: Player, Shelf: Shelf, From: {Step}, To: {Step}, Forward
 
     -- Off its stack while it runs. Applying can yield, and in that time this
     -- player can make a new action, fork or clear their history, or leave. Each
-    -- of those used to reach the step mid-apply: a new action landed on top and
-    -- was the one removed afterwards in its place, and a fork or a clear
-    -- disposed of objects the step was in the middle of bringing back.
+    -- of those would otherwise reach the step mid-apply: a new action lands on
+    -- top and is the one removed afterwards in its place, and a fork or a clear
+    -- disposes of objects the step is in the middle of bringing back.
     table.remove(From)
     const Pushed = Shelf.Next
     const Forked = Shelf.Forked
@@ -810,9 +809,8 @@ Objects.OnPlayerEdited(function(Plr, Obj, Property, Before, After)
     Shelf.Next += 1
 end)
 
--- A lone destroy, which used to be the one edit nothing could take back: it
--- went through neither a transaction nor a set, so the client's history never
--- saw it. Claiming it here is what keeps the object.
+-- A lone destroy goes through neither a transaction nor a set, so the client's
+-- history never sees it. Claiming it here is what keeps the object.
 Objects.OnRetired(function(Plr, Obj): boolean
     -- Nothing is kept while a step is being applied. A custom action that
     -- destroys something as part of undoing is destroying it for good, because

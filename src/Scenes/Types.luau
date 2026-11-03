@@ -272,12 +272,12 @@ export type ServerScene = Scene & {
     -- players it admits and to nobody else; a public one is everybody's, and
     -- its admitted list is inert.
     --
-    -- A flag rather than something read off the list. Privacy used to mean "has
-    -- admitted somebody", which made evicting the last player throw the scene
+    -- A flag rather than something read off the list. Reading privacy as "has
+    -- admitted somebody" would make evicting the last player throw the scene
     -- open -- to everyone, including the player just evicted -- at exactly the
-    -- moment somebody was locking it down. It also left no way to say the one
-    -- thing a level editor most wants at the start: closed, and nobody in it
-    -- yet.
+    -- moment somebody is locking it down. It would also leave no way to say the
+    -- one thing a level editor most wants at the start: closed, and nobody in
+    -- it yet.
     Private: boolean,
 
     -- User ids. The scene's rather than anyone's session, so it outlives

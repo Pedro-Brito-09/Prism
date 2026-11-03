@@ -132,8 +132,8 @@ export type Object = {
 
     -- The scene copy holding it, which Destroy drops it from. Untyped, because
     -- naming that type here would put Objects and Scenes in a require cycle.
-    -- A closure doing the dropping used to stand here, about 64 bytes an
-    -- object where a reference costs nothing.
+    -- A reference rather than a closure doing the dropping, which would cost
+    -- about 64 bytes an object.
     Copy: any?,
 
     -- The type's own links, when the object drives anything through them. Each

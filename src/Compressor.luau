@@ -14,14 +14,14 @@
 -- never heard of semantic type 19 still knows type 19 is length prefixed, so it
 -- skips it precisely and keeps reading. Without that, one unknown property makes
 -- the rest of the record unreadable -- and since decoding runs inside DataStore
--- UpdateAsync transforms, an unreadable record used to brick the key.
+-- UpdateAsync transforms, an unreadable record bricks the key.
 --
 -- Numbers pick their encoding from the value, not from the schema. A whole
 -- number becomes a varint, a fractional one that survives f32 becomes four
 -- bytes, anything else becomes eight. That is why changing AllowDecimals cannot
--- corrupt anything: the bytes describe themselves. It also ends the old bug
--- where every number went through f32, whose 24 bit mantissa silently mangles
--- any integer past 16,777,216 -- user ids and unix timestamps included.
+-- corrupt anything: the bytes describe themselves. It also keeps integers out
+-- of f32, whose 24 bit mantissa silently mangles any integer past 16,777,216 --
+-- user ids and unix timestamps included.
 
 const RunService = game:GetService("RunService")
 const EncodingService = game:GetService("EncodingService")

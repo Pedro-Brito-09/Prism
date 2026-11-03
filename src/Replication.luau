@@ -1,9 +1,10 @@
 --!strict
 -- Sends current state to joining players.
 --
--- Registration used to broadcast with FireAll and nothing else, so anyone who
--- joined after startup received an empty registry and an empty workspace and
--- stayed that way. Requiring this module on the server closes that hole.
+-- Registration broadcasts with FireAll, which reaches only those already here:
+-- anyone who joins after startup would receive an empty registry and an empty
+-- workspace and stay that way. Requiring this module on the server closes that
+-- hole.
 --
 -- The replay is driven by the client announcing it is ready, not by PlayerAdded.
 -- At PlayerAdded the client has not finished requiring Prism, so nothing is
@@ -32,11 +33,10 @@ const Ready = Networking:Get("Prism.Ready")
 const Replication = {}
 const Replayed: {[Player]: true} = {}
 
--- Entries per packet. The replay used to send one remote fire per registered
--- property, per registered object type, and per live object, all inside the
--- Ready handler with no yield anywhere -- so a large workspace both flooded the
--- remote queue in a single frame and held the server thread while every object
--- was compressed.
+-- Entries per packet. One remote fire per registered property, per registered
+-- object type and per live object, all inside the Ready handler with no yield,
+-- would let a large workspace both flood the remote queue in a single frame and
+-- hold the server thread while every object is compressed.
 const CHUNK_SIZE = 50
 
 const function SendChunks<T>(Plr: Player, Send: ({T}) -> (), Items: {T}): boolean
