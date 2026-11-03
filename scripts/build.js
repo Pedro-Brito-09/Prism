@@ -3,6 +3,8 @@
 //
 //   dist/Prism.rbxmx          the framework: one ModuleScript called Prism
 //   dist/PrismTests.rbxmx     the Studio test suite, with its own copy of Prism
+//   dist/PrismCI.rbxlx        a place CI publishes to run the server suite in;
+//                             see scripts/studio-tests.js
 //
 // Studio is where Prism is used, so the model is the product and this file is
 // the only thing that decides its layout. Every entry script is a Script with
@@ -89,7 +91,8 @@ const escape = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/
 // CDATA cannot hold "]]>", so a source containing it is split around the ">".
 const cdata = (s) => `<![CDATA[${s.replace(/]]>/g, "]]]]><![CDATA[>")}]]>`;
 
-const write = (node) => {
+// One node for a model, or a list of services for a place.
+const write = (nodes) => {
     let referent = 0;
     const lines = [];
 
@@ -111,7 +114,9 @@ const write = (node) => {
         lines.push(`${pad}</Item>`);
     };
 
-    item(node, 1);
+    for (const node of [].concat(nodes)) {
+        item(node, 1);
+    }
     return [
         `<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">`,
         ...lines,
@@ -141,6 +146,33 @@ const MODELS = {
         fromFile(path.join(ROOT, "tests", "Server.server.luau")),
         fromFile(path.join(ROOT, "tests", "Client.client.luau")),
     ]),
+
+    // ServerStorage
+    // └── PrismTests
+    //     ├── Prism
+    //     ├── Harness
+    //     └── Server   (a ModuleScript)
+    //
+    // An Open Cloud Luau Execution runs only the script it is handed -- the
+    // place's own Scripts do not start -- and there is no player, so no client
+    // half. The server suite becomes a module that script requires; a module
+    // has to return a value, and the suite returns nothing of its own.
+    "PrismCI.rbxlx": () => {
+        const server = fromFile(path.join(ROOT, "tests", "Server.server.luau"), "Server");
+        server.Class = "ModuleScript";
+        server.RunContext = undefined;
+        server.Source += "\nreturn true\n";
+
+        return [{
+            Class: "ServerStorage",
+            Name: "ServerStorage",
+            Children: [folder("PrismTests", [
+                prism(),
+                fromFile(path.join(ROOT, "tests", "Harness.luau")),
+                server,
+            ])],
+        }];
+    },
 };
 
 fs.mkdirSync(DIST, {recursive: true});

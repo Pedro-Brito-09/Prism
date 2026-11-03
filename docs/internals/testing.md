@@ -53,6 +53,29 @@ and assertion, then fails the corresponding script.
 > anything you want. Set `RUN_DATABASE = false` in any place whose data stores
 > you care about.
 
+### The server suite in CI
+
+CI also runs the server suite on Roblox itself, on every push to this
+repository. `node scripts/build.js` writes `dist/PrismCI.rbxlx`, a place with
+the suite in `ServerStorage` as a ModuleScript, and `scripts/studio-tests.js`
+publishes it to a dedicated test place and runs it through an Open Cloud Luau
+Execution, which runs only the script it is handed. The job fails unless the
+suite reports no failures.
+
+An execution has no players, so the tests that need one skip themselves and the
+client suite does not run: those still need **Test > Play**. It is also capped at
+five minutes. The database section runs there, against the test place's own
+data stores.
+
+The job needs a secret and two variables on the repository, and is skipped
+without them, as it is on a fork:
+
+| Name | Kind | What |
+|---|---|---|
+| `ROBLOX_API_KEY` | secret | An Open Cloud key with `universe-places` write and Luau execution write on the test experience |
+| `ROBLOX_UNIVERSE_ID` | variable | The test experience |
+| `ROBLOX_PLACE_ID` | variable | The test place. Every run publishes over it, so keep nothing in it |
+
 ## Type checking
 
 Every file is `--!strict`, and `scripts/analyze.sh` is what actually holds them
