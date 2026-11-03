@@ -298,6 +298,11 @@ function Types.HoldsReferences(Prop: any): boolean
     return Prop.Type == "Table" and Prop.Constraints ~= nil and Prop.Constraints.Of == "Object"
 end
 
+-- NaN is the one value not equal to itself.
+const function IsFinite(Value: number): boolean
+    return Value == Value and math.abs(Value) ~= math.huge
+end
+
 const function FixNumber(Value: ValueFor<"Number">, Constraints: ConstraintsFor<"Number">)
     if Constraints.Precision and Constraints.Scale then
         const IntMin = math.round((Constraints.MinValue or 0) * Constraints.Scale)
@@ -338,6 +343,37 @@ function Types:IsValid<T>(Type: T, Value: ValueFor<T>?, Constraints: Constraints
 
     if Type == "CustomEnum" and (Value :: any).__type ~= "CustomEnumOption" then
         return false
+    end
+
+    -- NaN and infinity are numbers to typeof and pass straight through the
+    -- clamp in FixNumber, since math.max(NaN, x) is NaN. Let one in and it is
+    -- set on the instance, replicated to everyone and saved.
+    if Type == "Number" and not IsFinite((Value :: any) :: number) then
+        return false
+    end
+
+    if Type == "Vector" then
+        const TypedValue = (Value :: any) :: Vector3
+        if not (IsFinite(TypedValue.X) and IsFinite(TypedValue.Y) and IsFinite(TypedValue.Z)) then
+            return false
+        end
+    end
+
+    -- A Color3 holds any number in a channel, NaN among them, and FixValue
+    -- would hand each channel to the Number fix and get nil back.
+    if Type == "Color" then
+        const TypedValue = (Value :: any) :: Color3
+        if not (IsFinite(TypedValue.R) and IsFinite(TypedValue.G) and IsFinite(TypedValue.B)) then
+            return false
+        end
+    end
+
+    if Type == "CFrame" then
+        for _, Component in {((Value :: any) :: CFrame):GetComponents()} do
+            if not IsFinite(Component) then
+                return false
+            end
+        end
     end
 
     -- A reference is a local id, so the same bounds a local id has. Whole,
