@@ -1,7 +1,7 @@
 --!strict
 -- Named sets of objects, and the unit a level is saved and loaded as.
 --
--- Before this there was one global workspace: every object the server had ever
+-- Without them there is one global workspace: every object the server has ever
 -- made, alive for the session, with no way to put a level away without
 -- destroying it object by object and no way to hand one to a DataStore.
 --
@@ -28,9 +28,10 @@ const Handles = require("../Handles")
 const IdPool = require("../IdPool")
 const Encoding = require("../Encoding")
 const Logger = require("../Logger")
-const Try = require("../Try")
 const ObjectTypes = require("../Objects/Types")
 const Types = require("./Types")
+const Storage = require("./Storage")
+const Commits = require("./Commits")
 
 export type SceneIdentifier = Types.SceneIdentifier
 export type SceneConfig = Types.SceneConfig
@@ -1155,55 +1156,23 @@ const function __serialize(self: Scene): buffer
     return self.Data or Compressor:CompressScene(self.LastId, {})
 end
 
-const SAVE_ATTEMPTS = 5
-
--- Every key a scene is stored under starts with its Guid. A draft and a
--- published pack are one key each, overwritten in place: their history is the
--- DataStore's own versions, which it keeps for thirty days. A backup is a key
--- of its own per call, so it outlives that, and nothing here ever deletes one.
-const function KeyOf(Guid: string, Which: string): string
-    return `{Guid}:{Which}`
-end
-
-const function BackupKey(Guid: string, Id: number): string
-    return KeyOf(Guid, `Backup:{Id}`)
-end
-
--- The buffer itself rather than buffer.tostring of it. A DataStore only takes
--- a string that is valid UTF-8, and a pack is binary through and through: any
--- byte past 127 that does not open a UTF-8 sequence makes the write fail.
-const function Write(self: Scene, Store: DataStore, Key: string): boolean
-    const Success = Try(SAVE_ATTEMPTS, Store.SetAsync, Store, Key, __serialize(self))
-    if not Success then
-        Logger:Warn(`Failed to write scene {self.Name} to key {Key}.`)
-    end
-
-    return Success
-end
-
 -- What a draft and a published pack hold is the same thing -- the scene as it
 -- was last committed -- and publishing does not read the draft back. A scene
 -- published without being saved first goes live as it is, which is what the
 -- game asked for by publishing it.
 const function __save(self: Scene, Store: DataStore): boolean
-    return Write(self, Store, KeyOf(self.Guid, "Draft"))
+    return Storage.Write(Store, Storage.KeyOf(self.Guid, "Draft"), __serialize(self), self.Name)
 end
 
 const function __publish(self: Scene, Store: DataStore): boolean
-    return Write(self, Store, KeyOf(self.Guid, "Published"))
+    return Storage.Write(Store, Storage.KeyOf(self.Guid, "Published"), __serialize(self), self.Name)
 end
-
--- Climbs within a server, so two backups in the same millisecond do not land on
--- one key and leave the first unreachable.
-local LastBackup = 0
 
 -- When to take one is the game's: after every publish, once a day, before a
 -- risky edit. The id is the moment it was taken, in unix milliseconds.
 const function __backup(self: Scene, Store: DataStore): number?
-    const Id = math.max(DateTime.now().UnixTimestampMillis, LastBackup + 1)
-    LastBackup = Id
-
-    if not Write(self, Store, BackupKey(self.Guid, Id)) then
+    const Id = Storage.NextBackupId()
+    if not Storage.Write(Store, Storage.BackupKey(self.Guid, Id), __serialize(self), self.Name) then
         return nil
     end
 
@@ -1454,49 +1423,6 @@ function Scenes.fromBuffer(Config: SceneConfig, Data: buffer): Scene?
     return Scene
 end
 
--- Which stored pack fromDataStore reads, and how: the current draft or
--- published pack, one of the DataStore's own versions of either, or a backup.
--- Returns where it read from, or nil for a source that names no single pack --
--- a table naming two would otherwise read whichever was checked first.
-const function ReadStored(Store: DataStore, Guid: string, Source: Types.SceneSource): (boolean, any, string?)
-    if Source == "Draft" or Source == "Published" then
-        const Key = KeyOf(Guid, Source)
-        const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key, nil)
-        return Success, Stored, Key
-    end
-
-    if type(Source) ~= "table" then
-        return false, nil, nil
-    end
-
-    -- Through any: SceneSource's table half has named fields and no indexer,
-    -- and counting what is in it is exactly what has to be done to one.
-    local Named = 0
-    for _ in Source :: any do
-        Named += 1
-    end
-
-    if Named ~= 1 then
-        return false, nil, nil
-    end
-
-    if type(Source.Backup) == "number" then
-        const Key = BackupKey(Guid, Source.Backup)
-        const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetAsync, Store, Key, nil)
-        return Success, Stored, Key
-    end
-
-    const Which = if type(Source.Draft) == "string" then "Draft" elseif type(Source.Published) == "string" then "Published" else nil
-    if not Which then
-        return false, nil, nil
-    end
-
-    const Version = (Source.Draft or Source.Published) :: string
-    const Key = KeyOf(Guid, Which)
-    const Success, Stored = Try(SAVE_ATTEMPTS, Store.GetVersionAsync, Store, Key, Version)
-    return Success, Stored, `{Key} at version {Version}`
-end
-
 -- Registers a saved scene as itself: under the Guid it was saved with, so
 -- saving it again writes the same keys. The draft unless Source names another
 -- pack. Nil when the Guid is not one Prism made, the pack could not be read,
@@ -1512,7 +1438,7 @@ function Scenes.fromDataStore(Store: DataStore, Guid: string, Config: SceneConfi
         return nil
     end
 
-    const Success, Stored, Where = ReadStored(Store, Guid, Source or "Draft")
+    const Success, Stored, Where = Storage.ReadStored(Store, Guid, Source or "Draft")
     if not Where then
         Logger:Warn(`Cannot read scene {Config.Name}: a source is "Draft", "Published", or a table naming one of Draft, Published or Backup.`)
         return nil
@@ -1542,109 +1468,15 @@ function Scenes.fromDataStore(Store: DataStore, Guid: string, Config: SceneConfi
     return Scene
 end
 
--- How many entries a listing asks the DataStore for at once.
-const LIST_PAGE_SIZE = 100
-
--- The DataStore's own history of a draft or a published pack, newest first:
--- every write in the last thirty days, which is as long as it keeps them. Nil
--- when the listing could not be read. Limit caps how many come back; a scene
--- saved on every edit has a great many.
+-- The DataStore's own versions of a draft or a published pack, newest first.
+-- See Storage.ListVersions.
 function Scenes:ListVersions(Store: DataStore, Guid: string, Which: "Draft" | "Published", Limit: number?): {Types.SceneVersion}?
-    if not IsGuid(Guid) then
-        Logger:Warn(`{Guid} is not a scene Guid.`)
-        return nil
-    end
-
-    -- Anything else names a key nothing writes, and would list as no versions
-    -- at all rather than as a mistake.
-    if Which ~= "Draft" and Which ~= "Published" then
-        Logger:Warn(`Versions are kept of "Draft" and "Published", not {Which}. Backups are listed by ListBackups.`)
-        return nil
-    end
-
-    const Wanted = Limit or math.huge
-    const Success, Versions = Try(SAVE_ATTEMPTS, function(): {Types.SceneVersion}
-        const Found: {Types.SceneVersion} = {}
-        const Pages = Store:ListVersionsAsync(KeyOf(Guid, Which), Enum.SortDirection.Descending, 0, 0, math.min(Wanted, LIST_PAGE_SIZE))
-
-        while true do
-            for _, Info in Pages:GetCurrentPage() do
-                -- A version the key was removed at holds no pack to read.
-                if Info.IsDeleted then
-                    continue
-                end
-
-                table.insert(Found, {Version = Info.Version, Time = Info.CreatedTime})
-                if #Found >= Wanted then
-                    return Found
-                end
-            end
-
-            if Pages.IsFinished then
-                return Found
-            end
-
-            Pages:AdvanceToNextPageAsync()
-        end
-    end)
-
-    if not Success then
-        Logger:Warn(`Failed to list versions of scene {Guid}.`)
-        return nil
-    end
-
-    return Versions
+    return Storage.ListVersions(Store, Guid, Which, Limit)
 end
 
--- Every backup of a scene, newest first, shaped like a version: Backup is the
--- id fromDataStore takes back as {Backup = id}, as Version is for a version.
--- The id is the moment it was taken, so Time is the same number. Nil when the
--- listing could not be read.
---
--- Limit cuts the list after sorting rather than stopping the walk early: keys
--- list in name order, which is oldest first, so the newest are the last read.
+-- Every backup of a scene, newest first. See Storage.ListBackups.
 function Scenes:ListBackups(Store: DataStore, Guid: string, Limit: number?): {Types.SceneBackup}?
-    if not IsGuid(Guid) then
-        Logger:Warn(`{Guid} is not a scene Guid.`)
-        return nil
-    end
-
-    const Prefix = KeyOf(Guid, "Backup:")
-    const Success, Ids = Try(SAVE_ATTEMPTS, function(): {number}
-        const Found: {number} = {}
-        const Pages = Store:ListKeysAsync(Prefix, LIST_PAGE_SIZE, "", true)
-
-        while true do
-            for _, Key in Pages:GetCurrentPage() do
-                const Id = tonumber(string.sub(Key.KeyName, #Prefix + 1))
-                if Id then
-                    table.insert(Found, Id)
-                end
-            end
-
-            if Pages.IsFinished then
-                return Found
-            end
-
-            Pages:AdvanceToNextPageAsync()
-        end
-    end)
-
-    if not Success then
-        Logger:Warn(`Failed to list backups of scene {Guid}.`)
-        return nil
-    end
-
-    table.sort(Ids, function(A: number, B: number): boolean
-        return A > B
-    end)
-
-    const Backups: {Types.SceneBackup} = {}
-    for Index = 1, math.min(#Ids, Limit or math.huge) do
-        table.insert(Backups, {Backup = Ids[Index], Time = Ids[Index]})
-    end
-
-    return Backups
+    return Storage.ListBackups(Store, Guid, Limit)
 end
 
 function Scenes:Get(Name: string): Scene?
@@ -1728,129 +1560,17 @@ function Scenes.Catchup(Plr: Player)
     end
 end
 
---=============================================================================
--- Commits from a client
---=============================================================================
-
--- What one commit may carry. The byte cap is what actually bounds the work --
--- decoding walks the buffer and does nothing else until it is through -- and
--- the object cap is what stops a well formed pack of a hundred thousand
--- objects becoming a scene nobody asked for. The name cap is only there so a
--- registry key cannot be a novel.
-const MAX_COMMIT_BYTES = 524288
-const MAX_COMMIT_OBJECTS = 4096
-const MAX_NAME_LENGTH = 64
-
--- The role a player is granted on a scene they push, or nil for none. A pushed
--- scene admits only its author either way: it was built where nobody else could
--- see it, and registering it should not change that.
-local PushRole: string? = nil
-
+-- The role a player is granted on a scene they push. See Commits.
 function Scenes:SetPushRole(Role: string?)
-    if Role and not Permissions:GetRegistered()[Role] then
-        Logger:Warn(`Cannot grant unregistered role {Role} on pushed scenes.`)
-        return
-    end
-
-    PushRole = Role
+    Commits.SetPushRole(Role)
 end
 
--- A client handing over a scene it built locally. Refusals are not logged,
--- like every other client facing handler here: a refusal that logs is a
--- refusal a client can spam to fill the server's output. They do say why to
--- the client that asked, which costs nothing and is the one thing a game needs
--- to tell its player.
-const function Refuse(Reason: string): (boolean, SceneIdentifier, string)
-    return false, 0, Reason
-end
-
-Network.Commit.OnInvoke = function(Plr: Player, Name: string, Data: buffer): (boolean, SceneIdentifier, string)
-    -- One action for the packet rather than one per object in it. A transaction
-    -- charges per operation because every operation reaches into the world as
-    -- it stands; this arrives whole, and what bounds it is its size, which is
-    -- known before a byte of it is read.
-    if not Permissions:Consume(Plr) then
-        return Refuse("Budget")
-    end
-
-    -- A global right rather than a check against the pack's types. The scene
-    -- does not exist yet, so there are no rights over it to consult, and
-    -- registering a scene at all is exactly the kind of thing that is about the
-    -- session rather than a document.
-    if not Permissions:CanPush(Plr) then
-        return Refuse("NoPushRight")
-    end
-
-    if buffer.len(Data) > MAX_COMMIT_BYTES then
-        return Refuse("TooLarge")
-    end
-
-    if #Name == 0 or #Name > MAX_NAME_LENGTH then
-        return Refuse("BadName")
-    end
-
-    -- Names are how a scene is asked for, so the first one to take a name keeps
-    -- it. Refused here as well as in Scenes.new so the pack is not decoded for
-    -- a commit that cannot land anyway.
-    if Registry.ByName[Name] then
-        return Refuse("NameTaken")
-    end
-
-    const Ok, _, Decompressed = pcall(function()
-        return Compressor:DecompressScene(Data)
-    end)
-
-    if not Ok or not Decompressed then
-        return Refuse("Unreadable")
-    end
-
-    const Packed = Decompressed :: {any}
-    if #Packed > MAX_COMMIT_OBJECTS then
-        return Refuse("TooManyObjects")
-    end
-
-    -- Every object type in the pack has to be one the server knows, and the
-    -- whole commit is refused if any is not. A scene arriving with half its
-    -- objects dropped is not the scene that was sent, and the client would
-    -- have no way to tell.
-    local Highest = 0
-
-    for _, Object in Packed do
-        if not Objects:GetRegistry(Object.Registry) then
-            return Refuse("UnknownType")
-        end
-
-        -- A client's pack keeps no bytes the server cannot read. A save of the
-        -- server's own keeps what an older build wrote; a packet from a client
-        -- is untrusted, and this is the server writing its own pack.
-        Object.Unknown = nil
-
-        Highest = math.max(Highest, Object.LocalId)
-    end
-
-    -- Re-encoded rather than kept as it arrived, so the pack the server holds
-    -- is the one the server wrote. Its LastId is the highest id actually in it
-    -- rather than whatever the client claimed -- a pack declaring an id space
-    -- already spent would otherwise give the scene room for nothing.
-    -- Private to its author from the packet that registers it, and theirs to
-    -- edit if the game has said what a pusher holds.
-    const Scene = Scenes.fromBuffer({
-        Name = Name,
-        Private = true,
-        Admitted = {Plr.UserId},
-        Rights = if PushRole then {[Plr.UserId] = PushRole} else nil,
-    }, Compressor:CompressScene(Highest, Packed))
-    if not Scene then
-        return Refuse("Failed")
-    end
-
-    return true, Scene.Id, ""
-end
+Commits.Bind(Scenes.fromBuffer)
 
 -- The scene an object lands in when the caller names none, so Objects.new keeps
--- working exactly as it did before scenes existed. Registered here, but not
--- loaded: Objects loads it the first time something actually needs it, so a
--- game that puts everything in its own scenes never pays for this one.
+-- working without one. Registered here, but not loaded: Objects loads it the
+-- first time something actually needs it, so a game that puts everything in its
+-- own scenes never pays for this one.
 Registry.Default = Scenes.new({Name = "Default"})
 
 function Scenes:GetDefault(): Scene
