@@ -6450,6 +6450,54 @@ if RUN_DATABASE then
         T:Eq(#None, 0, "no matches")
     end)
 
+    T:Test("FindPage walks the shards a page at a time and misses nothing", function()
+        db:Refresh()
+
+        const function Everything()
+            return true
+        end
+
+        const All = db:Find(Everything)
+        T:Ok(#All > 0, "the database has records to page through")
+
+        -- One shard a page: this database seals every few records, so it has
+        -- more than one, and the first page has to hand back a cursor.
+        const First, Next = db:FindPage(Everything)
+        T:Ok(#First > 0, "the first page found records")
+        T:Eq(Next, 2, "and points at the second shard")
+
+        const Seen: {[number]: number} = {}
+        local Pages = 0
+        local Cursor: number? = 1
+        while Cursor do
+            const Records, After = db:FindPage(Everything, Cursor)
+            for _, Record in Records do
+                Seen[Record.Id] = (Seen[Record.Id] or 0) + 1
+            end
+
+            Pages += 1
+            T:Ok(After == nil or After == (Cursor :: number) + 1, `page {Pages} moves on one shard`)
+            Cursor = After
+        end
+
+        T:Ok(Pages > 1, `paged through more than one shard, got {Pages}`)
+
+        local Count = 0
+        for Id, Times in Seen do
+            Count += 1
+            T:Eq(Times, 1, `id {Id} seen once`)
+        end
+        T:Eq(Count, #All, "every record Find sees, and nothing else")
+
+        const Whole, Done = db:FindPage(Everything, 1, Pages)
+        T:Eq(#Whole, #All, "a page as large as the database reads all of it")
+        T:Eq(Done, nil, "and says it is done")
+
+        const Past, Beyond = db:FindPage(Everything, Pages + 5)
+        T:Eq(#Past, 0, "a cursor past the end finds nothing")
+        T:Eq(Beyond, nil, "and goes nowhere")
+    end)
+
     T:Test("REGRESSION: returned records are frozen", function()
         db:Refresh()
         const Record = db:GetById(Created[1])

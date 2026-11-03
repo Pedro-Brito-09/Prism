@@ -92,6 +92,22 @@ db:Find(function(record)
 end, 50)
 ```
 
+A search that matches little never reaches its limit, so `Find` reads every
+shard to answer it, all in one call. `FindPage` reads a few shards at a time
+instead and says where to carry on, so a search can be spread over several
+requests -- a "load more" button, say:
+
+```luau
+-- server
+local records, nextShard = db:FindPage(matches, cursor) -- one shard
+-- nextShard is nil once the last shard has been read
+```
+
+A page holds every match in the shards it read, with no limit, so carrying on
+from `nextShard` neither repeats nor skips a record. Each page reads its shards
+as they are then: a record created into the tail after its page was read turns
+up in no page of that walk.
+
 ## Caching
 
 Three tiers: in-process, then a MemoryStore page cache shared across servers,

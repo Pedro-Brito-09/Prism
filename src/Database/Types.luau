@@ -100,6 +100,9 @@ export type Database<T> = {
     Get: (self: Database<T>, Cache: string, Page: number?) -> Page,
     GetById: (self: Database<T>, Id: number) -> Metadata?,
     Find: (self: Database<T>, Predicate: Predicate, Limit: number?) -> {Metadata},
+    -- Every match in at most MaxShards shards from FromShard, and the shard to
+    -- carry on from, nil once the last has been read.
+    FindPage: (self: Database<T>, Predicate: Predicate, FromShard: number?, MaxShards: number?) -> ({Metadata}, number?),
     Edit: (self: Database<T>, Id: number, ToChange: {[number]: any}) -> boolean,
     Delete: (self: Database<T>, Id: number) -> boolean,
 
