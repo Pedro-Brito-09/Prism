@@ -92,7 +92,9 @@ runs this script, `check-channels.js` and `test-pure.sh`, so a push is checked
 exactly the way a local run is.
 
 The tests are only lightly checked. The analyser reads files, not the model, so
-it cannot resolve the suites' `require("./Prism")`, and everything the suites get from Prism
+it cannot resolve the suites' `require("./Prism")`, nor the `require("./Prism/...")`
+they use for the internal modules Prism does not export (`Compressor`,
+`Encoding`, `Handles` and the like), and everything the suites get from Prism
 reads as `any`, and a mistake in how a test calls Prism shows up when the test
 runs rather than here. [`ROADMAP.md`](https://github.com/Pedro-Brito-09/Prism/blob/main/ROADMAP.md) has the reasoning for leaving it that way.
 
@@ -103,7 +105,7 @@ per file, and `scripts/analyze.sh --update-baseline` rewrites it.
 It runs the new type solver (`LuauSolverV2`), the one the code is written for:
 `type function` and `read` fields are new-solver features, and the default
 solver reports them as errors that are not. Under it `src/` is clean. What the
-baseline still holds is the three unresolved `require`s in the suites described
+baseline still holds is the twelve unresolved `require`s in the suites described
 above, so the ratchet is what lets the check pass without pretending those
 away.
 

@@ -1,2 +1,2 @@
-tests/Client.client.luau	1
-tests/Server.server.luau	2
+tests/Client.client.luau	2
+tests/Server.server.luau	10
