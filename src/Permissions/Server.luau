@@ -380,8 +380,10 @@ function Permissions:Has(Plr: Player, Capability: string, Scene: number?): boole
     return Rights ~= nil and Rights.Capabilities[Capability] == true
 end
 
--- Sliding one second window, budgeted by the player's global rights so a
--- trusted player is not held to the same ceiling as an untrusted one.
+-- Fixed one second window, budgeted by the player's global rights so a
+-- trusted player is not held to the same ceiling as an untrusted one. Fixed,
+-- not sliding: the count resets when the window turns over, so a burst that
+-- straddles the boundary can spend up to twice the rate in under a second.
 --
 -- Cost is what the request asks the server to do, not how many packets it
 -- arrived in. A transaction charges one per operation: charging per call would

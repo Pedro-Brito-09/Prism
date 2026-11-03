@@ -30,6 +30,11 @@ const IS_SERVER = RunService:IsServer()
 const RUNNING = RunService:IsRunning()
 const WAIT_TIMEOUT = 10
 
+-- The largest packet the server will decode from a client. Twice the biggest
+-- single argument a client sends, a scene commit (MAX_COMMIT_BYTES in
+-- Scenes/Server), so a full commit and its framing always fit.
+const MAX_PACKET_BYTES = 1048576
+
 export type Codec<T> = Codecs.Codec<T>
 
 export type Entry = {
@@ -88,6 +93,12 @@ const function Unpack(Schema: {Codec<any>}, Buf: buffer, Extras: {any}?): {any}
         Offset += Length
     end
 
+    -- Pack measures before it writes, so a packet it built ends exactly where
+    -- its last argument does. Anything left over was not built by Pack.
+    if Offset ~= buffer.len(Buf) then
+        error(`Packet carries {buffer.len(Buf) - Offset} byte(s) past its last argument.`)
+    end
+
     return Args
 end
 
@@ -95,6 +106,14 @@ end
 -- malformed buffer has to fail as a dropped packet rather than a thrown error.
 const function Decode(Buf: any, Extras: any): (Entry?, {any}?)
     if typeof(Buf) ~= "buffer" or buffer.len(Buf) < 1 then
+        return nil, nil
+    end
+
+    -- Before the unpack, which is the expensive part: a flood of oversized
+    -- packets is turned away on its length alone, ahead of the rate limiter.
+    -- Only on the server, where the packet is client authored; what the server
+    -- sends, a scene snapshot among it, has no such ceiling.
+    if IS_SERVER and buffer.len(Buf) > MAX_PACKET_BYTES then
         return nil, nil
     end
 
