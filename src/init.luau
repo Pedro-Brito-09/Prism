@@ -1,10 +1,11 @@
 --!strict
 -- Requires are written out per branch rather than built from an interpolated
 -- path. Require by string needs a literal, and routing every module through a
--- helper erased the types, so Prism.Properties used to resolve to any.
+-- helper erases the types.
 --
--- Properties also used to be server only here even though Properties/Client
--- existed and was fully written, which left the client with a nil field.
+-- Only the documented modules are exposed. Everything else (the compressor,
+-- codecs, id pools and the rest) is internal and reached by path when needed,
+-- so it can change without breaking a game.
 
 const RunService = game:GetService("RunService")
 const IS_SERVER = RunService:IsServer()
@@ -37,8 +38,10 @@ if IS_SERVER then
 else
     -- Through any: each field is typed by the server half, assigned first, and
     -- the client half is a different module type with fewer members. Prism
-    -- reads as the server API on both sides, which is what it read as before
-    -- the solver started refusing the second assignment.
+    -- reads as the server API on both sides, so autocomplete on the client
+    -- offers server-only members. A known limitation: a union type breaks
+    -- autocomplete on both sides, and separate entry points would change the
+    -- API.
     Prism.Properties = require("@self/Properties/Client") :: any
     Prism.Objects = require("@self/Objects/Client") :: any
     Prism.Scenes = require("@self/Scenes/Client") :: any
@@ -57,16 +60,10 @@ else
 end
 
 Prism.CustomEnum = require("@self/CustomEnum")
-Prism.World = require("@self/World")
-Prism.Compressor = require("@self/Compressor")
 Prism.Networking = require("@self/Networking")
-Prism.Handles = require("@self/Handles")
-Prism.Encoding = require("@self/Encoding")
-Prism.Varint = require("@self/Varint")
-Prism.Codecs = require("@self/Codecs")
-Prism.IdPool = require("@self/IdPool")
-Prism.Logger = require("@self/Logger")
-Prism.Try = require("@self/Try")
+
+const Logger = require("@self/Logger")
+const Try = require("@self/Try")
 
 -- Announce only once every client module above has connected its handlers, then
 -- keep asking until the server answers. The server's Replication module can
@@ -79,12 +76,12 @@ if not IS_SERVER and RunService:IsRunning() then
     const Ready = Prism.Networking:Get("Prism.Ready")
 
     task.spawn(function()
-        const Acknowledged = Prism.Try(10, function()
+        const Acknowledged = Try(10, function()
             return Ready:Invoke()
         end)
 
         if not Acknowledged then
-            Prism.Logger:Warn("Server never acknowledged readiness; is Prism required on the server?")
+            Logger:Warn("Server never acknowledged readiness; is Prism required on the server?")
         end
     end)
 end
