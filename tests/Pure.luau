@@ -696,6 +696,25 @@ do
     ok(not PropertyTypes:Equals("Text", {} :: any, {} :: any), "only a Table compares by items")
 end
 
+-- NaN and infinity are numbers to typeof, and the clamp does not stop them:
+-- math.max(NaN, 0) is NaN. Let one in and it is set on the instance,
+-- replicated to everyone and saved.
+do
+    local Clamped = {MinValue = 0, MaxValue = 100}
+    local Numbers = {Of = "Number", Item = Clamped}
+
+    for _, bad in {0 / 0, math.huge, -math.huge} do
+        ok(not PropertyTypes:IsValid("Number", bad), `{bad} should not be a valid Number`)
+        ok(not PropertyTypes:IsValid("Number", bad, Clamped), `{bad} should not be a valid Number under a clamp`)
+        ok(PropertyTypes:FixValue("Number", bad, Clamped) == nil, `{bad} should be refused, not clamped into range`)
+        ok(not PropertyTypes:IsValid("Table", {1, bad}, Numbers), `a list holding {bad} should be refused`)
+        ok(PropertyTypes:FixValue("Table", {1, bad}, Numbers) == nil, `a list holding {bad} should not be fixed`)
+    end
+
+    ok(PropertyTypes:IsValid("Number", 1e308), "a large finite number is still valid")
+    ok(PropertyTypes:FixValue("Number", 1e308, Clamped) == 100, "and is clamped as before")
+end
+
 -- A property set to an equal list is no change, and keeps the list it held.
 do
     local Registry = {

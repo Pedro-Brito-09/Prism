@@ -5312,6 +5312,73 @@ T:Test("SceneSpace is refused on what cannot be placed", function()
     T:Eq(Links[2].SceneSpace, nil, "and angles are not a position")
 end)
 
+--=============================================================================
+-- Non-finite values
+--=============================================================================
+
+T:Describe("Non-finite values")
+
+-- NaN and infinity are numbers to typeof, and nothing looked inside a Vector,
+-- Color or CFrame. One that got in was set on the part, replicated to
+-- everyone and saved. Down here because this is the first object type with
+-- a CFrame and a Vector on it.
+const NAN = 0 / 0
+
+-- One bad value per type and component, with the property it is set on.
+const function NonFiniteCases(Crate: any, Block: any): {{Target: any, Property: number, Type: string, Value: any, What: string}}
+    const Cases = {}
+
+    for _, Bad in {NAN, math.huge, -math.huge} do
+        table.insert(Cases, {Target = Crate, Property = HealthId, Type = "Number", Value = Bad, What = `Number {Bad}`})
+        table.insert(Cases, {Target = Crate, Property = TintId, Type = "Color", Value = Color3.new(Bad, 0, 0), What = `Color R {Bad}`})
+        table.insert(Cases, {Target = Crate, Property = TintId, Type = "Color", Value = Color3.new(0, 0, Bad), What = `Color B {Bad}`})
+        table.insert(Cases, {Target = Block, Property = BulkId, Type = "Vector", Value = Vector3.new(Bad, 1, 1), What = `Vector X {Bad}`})
+        table.insert(Cases, {Target = Block, Property = BulkId, Type = "Vector", Value = Vector3.new(1, 1, Bad), What = `Vector Z {Bad}`})
+        table.insert(Cases, {Target = Block, Property = SpaceSpotId, Type = "CFrame", Value = CFrame.new(Bad, 0, 0), What = `CFrame position {Bad}`})
+        table.insert(Cases, {Target = Block, Property = SpaceSpotId, Type = "CFrame", Value = CFrame.new(0, 0, 0, Bad, 0, 0, 0, 1, 0, 0, 0, 1), What = `CFrame rotation {Bad}`})
+    end
+
+    return Cases
+end
+
+T:Test("a set carrying NaN or infinity is refused and changes nothing", function()
+    const Scene = Scenes.new({Name = "NonFiniteSet"})
+    const Copy = Scene:Load() :: any
+    const Crate = Copy:Create(CrateId)
+    const Block = Copy:Create(SpaceBlockId)
+
+    for _, Case in NonFiniteCases(Crate, Block) do
+        const Before = Case.Target:Get(Case.Property)
+        T:Ok(not (Case.Target:Set(Case.Property, Case.Value)), `{Case.What} refused`)
+        T:Eq(Case.Target:Get(Case.Property), Before, `{Case.What} left the value alone`)
+    end
+
+    Scene:Destroy()
+end)
+
+T:Test("a transaction carrying NaN or infinity is refused and changes nothing", function()
+    const Scene = Scenes.new({Name = "NonFiniteApply"})
+    const Copy = Scene:Load() :: any
+    const Crate = Copy:Create(CrateId)
+    const Block = Copy:Create(SpaceBlockId)
+
+    for _, Case in NonFiniteCases(Crate, Block) do
+        const Before = Case.Target:Get(Case.Property)
+        const Applied = Transactions.Apply(nil, {
+            {Kind = "Set", Target = Case.Target.RuntimeId, Property = Case.Property, Value = Case.Value, Type = Case.Type},
+        } :: any)
+
+        T:Ok(not Applied, `{Case.What} refused`)
+        T:Eq(Case.Target:Get(Case.Property), Before, `{Case.What} left the value alone`)
+    end
+
+    T:Ok(not Transactions.Apply(nil, {
+        {Kind = "Create", Object = SpaceBlockId, Instance = Copy.Id, Properties = {[BulkId] = Vector3.new(NAN, 1, 1)}},
+    } :: any), "a create carrying one is refused too")
+
+    Scene:Destroy()
+end)
+
 T:Describe("Inserted scenes")
 
 -- A hallway of one door and a block, committed, as the source of what follows.
