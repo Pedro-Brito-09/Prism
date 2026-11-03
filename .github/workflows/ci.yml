@@ -42,3 +42,31 @@ jobs:
         with:
           name: Prism-${{ github.sha }}
           path: dist/*.rbxmx
+
+  studio:
+    name: Server suite on Roblox
+    # After the checks, so a push that does not type check or build does not
+    # spend a publish and an execution finding out.
+    needs: analyze
+    # Once per push: a pull request from this repository is already a push,
+    # and running both would publish twice. A fork has neither the key nor the
+    # place, so it is skipped rather than failed.
+    if: github.event_name == 'push' && vars.ROBLOX_PLACE_ID != ''
+    runs-on: ubuntu-24.04
+    # One run at a time against the one test place: two at once would share
+    # its data stores, and the database section wipes its keys.
+    concurrency:
+      group: studio-test-place
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the test place
+        run: node scripts/build.js
+
+      - name: Run the server suite
+        env:
+          ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
+          ROBLOX_UNIVERSE_ID: ${{ vars.ROBLOX_UNIVERSE_ID }}
+          ROBLOX_PLACE_ID: ${{ vars.ROBLOX_PLACE_ID }}
+        run: node scripts/studio-tests.js

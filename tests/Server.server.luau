@@ -15,6 +15,7 @@
 const Players = game:GetService("Players")
 const ReplicatedStorage = game:GetService("ReplicatedStorage")
 const ServerStorage = game:GetService("ServerStorage")
+const RunService = game:GetService("RunService")
 
 const RUN_DATABASE = true
 const DATABASE_KEY = "PrismSelfTest"
@@ -207,7 +208,16 @@ T:Test("unknown channels are rejected", function()
     end, "unknown channel")
 end)
 
+-- Outside a running game -- an Open Cloud Luau Execution, which is how CI runs
+-- this suite -- a send goes nowhere before it is packed or checked, so these
+-- two can only be seen to throw with a game running.
+
 T:Test("schema arity is checked before transport", function()
+    if not RunService:IsRunning() then
+        T:Skip("no game is running, so nothing is packed")
+        return
+    end
+
     const Removed = Networking:Get("Objects.ObjectRemoved")
     T:Throws(function()
         Removed:FireAll(1, 2)
@@ -215,6 +225,11 @@ T:Test("schema arity is checked before transport", function()
 end)
 
 T:Test("server-to-client invokes are rejected", function()
+    if not RunService:IsRunning() then
+        T:Skip("no game is running, so nothing is sent")
+        return
+    end
+
     T:Throws(function()
         Networking:Get("Prism.Ready"):Invoke()
     end, "server invoke")

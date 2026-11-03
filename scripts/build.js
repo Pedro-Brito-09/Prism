@@ -3,6 +3,8 @@
 //
 //   dist/Prism.rbxmx          the framework: one ModuleScript called Prism
 //   dist/PrismTests.rbxmx     the Studio test suite, with its own copy of Prism
+//   dist/PrismCI.rbxl         a place CI publishes to run the server suite in;
+//                             see scripts/studio-tests.js
 //
 // Studio is where Prism is used, so the model is the product and this file is
 // the only thing that decides its layout. Every entry script is a Script with
@@ -121,6 +123,105 @@ const write = (node) => {
 };
 
 //=============================================================================
+// rbxl
+//=============================================================================
+
+// A place for Open Cloud, which refuses an XML place this small ("Invalid
+// Content stream") though Studio opens it. The binary format is what Studio
+// itself saves, written here uncompressed, which the format allows: a chunk
+// whose compressed length is 0 holds its data as is.
+//
+// Only what the nodes above can hold is written: Name and Source, both
+// strings, on services, Folders and ModuleScripts.
+
+const SERVICES = new Set(["ServerStorage"]);
+
+const u8 = (n) => Buffer.from([n]);
+
+const u32 = (n) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE(n);
+    return b;
+};
+
+const str = (s) => {
+    const bytes = Buffer.from(s, "utf8");
+    return Buffer.concat([u32(bytes.length), bytes]);
+};
+
+// Referents are stored as differences from the one before, each zigzagged and
+// the whole array split into byte planes, most significant byte first.
+const referents = (ids) => {
+    const out = Buffer.alloc(ids.length * 4);
+    let previous = 0;
+    ids.forEach((id, index) => {
+        const value = ((id - previous) << 1 ^ (id - previous) >> 31) >>> 0;
+        previous = id;
+        for (let plane = 0; plane < 4; plane++) {
+            out[plane * ids.length + index] = value >>> (24 - plane * 8) & 0xff;
+        }
+    });
+    return out;
+};
+
+const chunk = (name, data) => Buffer.concat([
+    Buffer.from(name, "latin1"), u32(0), u32(data.length), u32(0), data,
+]);
+
+const writeBinary = (services) => {
+    const instances = [];
+    const visit = (node, parent) => {
+        const id = instances.length;
+        instances.push({node, id, parent});
+        for (const child of node.Children) {
+            visit(child, id);
+        }
+    };
+    for (const service of services) {
+        visit(service, -1);
+    }
+
+    const classes = [...new Set(instances.map((i) => i.node.Class))].sort();
+    const chunks = [];
+
+    classes.forEach((className, classId) => {
+        const members = instances.filter((i) => i.node.Class === className);
+        const service = SERVICES.has(className);
+
+        chunks.push(chunk("INST", Buffer.concat([
+            u32(classId), str(className), u8(service ? 1 : 0), u32(members.length),
+            referents(members.map((i) => i.id)),
+            service ? Buffer.alloc(members.length, 1) : Buffer.alloc(0),
+        ])));
+
+        // 0x01 is String, which is also how a ProtectedString is stored.
+        const property = (name, values) => chunks.push(chunk("PROP", Buffer.concat([
+            u32(classId), str(name), u8(0x01), ...values.map(str),
+        ])));
+
+        property("Name", members.map((i) => i.node.Name));
+        if (members.every((i) => i.node.Source !== undefined)) {
+            property("Source", members.map((i) => i.node.Source));
+        }
+    });
+
+    chunks.push(chunk("PRNT", Buffer.concat([
+        u8(0), u32(instances.length),
+        referents(instances.map((i) => i.id)),
+        referents(instances.map((i) => i.parent)),
+    ])));
+    chunks.push(chunk("END\0", Buffer.from("</roblox>", "latin1")));
+
+    const header = Buffer.alloc(32);
+    header.write("<roblox!", 0, "latin1");
+    Buffer.from([0x89, 0xff, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header, 8);
+    header.writeUInt16LE(0, 14);
+    header.writeInt32LE(classes.length, 16);
+    header.writeInt32LE(instances.length, 20);
+    return Buffer.concat([header, ...chunks]);
+};
+
+//=============================================================================
 // Models
 //=============================================================================
 
@@ -141,12 +242,39 @@ const MODELS = {
         fromFile(path.join(ROOT, "tests", "Server.server.luau")),
         fromFile(path.join(ROOT, "tests", "Client.client.luau")),
     ]),
+
+    // ServerStorage
+    // └── PrismTests
+    //     ├── Prism
+    //     ├── Harness
+    //     └── Server   (a ModuleScript)
+    //
+    // An Open Cloud Luau Execution runs only the script it is handed -- the
+    // place's own Scripts do not start -- and there is no player, so no client
+    // half. The server suite becomes a module that script requires; a module
+    // has to return a value, and the suite returns nothing of its own.
+    "PrismCI.rbxl": () => {
+        const server = fromFile(path.join(ROOT, "tests", "Server.server.luau"), "Server");
+        server.Class = "ModuleScript";
+        server.RunContext = undefined;
+        server.Source += "\nreturn true\n";
+
+        return [{
+            Class: "ServerStorage",
+            Name: "ServerStorage",
+            Children: [folder("PrismTests", [
+                prism(),
+                fromFile(path.join(ROOT, "tests", "Harness.luau")),
+                server,
+            ])],
+        }];
+    },
 };
 
 fs.mkdirSync(DIST, {recursive: true});
 
 for (const [file, build] of Object.entries(MODELS)) {
     const out = path.join(DIST, file);
-    fs.writeFileSync(out, write(build()));
+    fs.writeFileSync(out, file.endsWith(".rbxl") ? writeBinary(build()) : write(build()));
     console.log(`${path.relative(ROOT, out)}  ${(fs.statSync(out).size / 1024).toFixed(0)} KB`);
 }
