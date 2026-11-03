@@ -309,7 +309,15 @@ const function FixNumber(Value: ValueFor<"Number">, Constraints: ConstraintsFor<
         const IntPrecision = math.round(Constraints.Precision * Constraints.Scale)
         const IntValue = math.round(Value * Constraints.Scale)
         const Steps = math.round((IntValue - IntMin) / IntPrecision)
-        Value = (IntMin + Steps * IntPrecision) / Constraints.Scale
+        const Snapped = (IntMin + Steps * IntPrecision) / Constraints.Scale
+
+        -- A value past what Value * Scale can hold snaps to infinity, and a
+        -- Precision that rounds to a step of zero snaps to NaN. IsValid has
+        -- already let the value in as finite, so it is left unsnapped rather
+        -- than turned into one it would have refused.
+        if IsFinite(Snapped) then
+            Value = Snapped
+        end
     end
 
     if Constraints.AllowDecimals == false then

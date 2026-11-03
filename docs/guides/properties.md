@@ -34,7 +34,13 @@ clamped, so `Color3.new(0.5, 0, 0)` reads back with a red of 128/255, about
 through a set once. Compare colors after a set, not the value passed in.
 
 A value that fails a rejecting constraint is refused — `Set` returns `false` —
-and one outside a clamping constraint is brought into range.
+and one outside a clamping constraint is brought into range. NaN and infinity
+are refused for every type that holds numbers, components included.
+
+`Precision` snaps by scaling the value to a whole number of steps, so a value
+too large for that scaling (around 1e306 with `Precision = 0.01`) is left
+unsnapped rather than turned into infinity. Give it a `MaxValue` to keep it
+in a range where steps mean something.
 
 `Object` is a reference to another object — a button's door, a path node's next
 node. It's stored as a local id, so it's saved and duplicated like one, or as an
