@@ -107,7 +107,7 @@ export type Role = {
 
 -- What crosses the wire. Every set is a sequential array here: remotes do not
 -- guarantee that non-sequential numeric keys survive serialization, and a map
--- sent as one used to arrive with entries missing, which made the client's Can
+-- sent as one can arrive with entries missing, which makes the client's Can
 -- answer true for blacklisted types.
 export type PropertyEntryPayload = {
     Property: PropertyId,

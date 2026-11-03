@@ -17,18 +17,13 @@
 -- nothing. A single refusal ends the transaction here, where the world has not
 -- moved yet.
 --
--- Then apply, creates before sets before destroys. That order was originally
--- what made the thing atomic rather than merely batched: a create could be
--- taken back by destroying what it made and a set by writing back what it
--- overwrote, while a destroy could not be taken back at all, so nothing
--- irreversible happened until everything reversible had already succeeded.
---
--- A destroy withdraws its object now rather than ending it -- that is what lets
--- a history hold it against an undo -- so the roll back reaches the destroys
--- too and the order is no longer load bearing. It is kept because it is still
--- the order the operations mean: a transaction that creates an object and sets
--- a property on it reads that way round, and one that edits an object and then
--- destroys it should not have the edit land after the removal.
+-- Then apply, creates before sets before destroys. A destroy withdraws its
+-- object rather than ending it -- that is what lets a history hold it against
+-- an undo -- so the roll back reaches the destroys too and atomicity does not
+-- depend on the order. It is kept because it is the order the operations mean:
+-- a transaction that creates an object and sets a property on it reads that way
+-- round, and one that edits an object and then destroys it should not have the
+-- edit land after the removal.
 
 const PropertyTypes = require("../Properties/Types")
 const Permissions = require("../Permissions/Server")
@@ -772,9 +767,8 @@ function Transactions.Apply(
             Prop:Set(Previous[Prop])
         end
 
-        -- Including the destroys that had already run, which is new: a destroy
-        -- withdraws an object rather than ending it, so the one operation that
-        -- used to be beyond recall is recoverable too. They were never
+        -- Including the destroys that had already run: a destroy withdraws an
+        -- object rather than ending it, so it is recoverable too. They were never
         -- announced -- the removals go out in bulk below, and this path does
         -- not reach that -- so no client ever knew they had gone.
         for _, Obj in Removed do
@@ -828,8 +822,7 @@ function Transactions.Apply(
     -- step falls off the stack.
     --
     -- Nothing answering means nothing is holding them, and a destroy that
-    -- nobody can undo is a destroy: they end here, which is what they used to
-    -- do the moment the loop above reached them.
+    -- nobody can undo is a destroy: they end here.
     local Kept = false
     if Plr and Tracked ~= false then
         const Record: ApplyRecord = {
@@ -843,11 +836,11 @@ function Transactions.Apply(
         }
 
         -- Every recorder is offered the record, and one answering true has
-        -- taken the step. The loop used to stop at that one, which quietly made
-        -- this a single-consumer hook: History registers here as Prism loads
-        -- and answers true for every edit that records a step, so a recorder a
-        -- game added afterwards never ran at all. A game using this to observe
-        -- -- to stamp who created what, say -- got nothing and no warning.
+        -- taken the step. The loop does not stop at that one, or this would be
+        -- a single-consumer hook: History registers here as Prism loads and
+        -- answers true for every edit that records a step, so a recorder a game
+        -- added afterwards would never run at all. A game using this to observe
+        -- -- to stamp who created what, say -- would get nothing and no warning.
         for _, Callback in Recorders do
             if Callback(Plr, Record) then
                 Kept = true

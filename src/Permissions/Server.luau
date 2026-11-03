@@ -403,9 +403,8 @@ function Permissions:Consume(Plr: Player, Cost: number?): boolean
     const Now = os.clock()
     const Entry = Budget[Plr]
 
-    -- A fresh window is not a free one. The old form returned true here without
-    -- comparing, which was harmless while every call cost one and a rate below
-    -- one denies anyway, and is not once a call can cost a thousand.
+    -- A fresh window is not a free one: a call can cost a thousand, so the
+    -- charge is compared against the rate here too.
     if not Entry or Now - Entry.Window >= RATE_WINDOW then
         Budget[Plr] = {Count = Charge, Window = Now}
         return Charge <= Rate

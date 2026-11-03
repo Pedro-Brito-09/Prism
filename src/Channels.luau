@@ -82,10 +82,10 @@ const Channels: {Channel} = {
     },
 
     {
-        -- Bulk replay of the property registry to a joining client. The replay
-        -- used to fire once per registry and once per live object, so a join
-        -- cost hundreds of packets in a single frame and blocked the server
-        -- thread that was building them.
+        -- Bulk replay of the property registry to a joining client. Batched,
+        -- because a fire per registry and per live object costs a join hundreds
+        -- of packets in a single frame and blocks the server thread building
+        -- them.
         Name = "Properties.RegistriesReplayed",
         Args = {Codecs.Array(Codecs.Any)},
     },
@@ -231,9 +231,8 @@ const Channels: {Channel} = {
     },
 
     {
-        -- Registries going away. Scenes announced theirs from the start;
-        -- properties used to drop theirs on the server and tell nobody, so
-        -- every client kept serving the old one for the rest of the session.
+        -- Registries going away. Without it a property dropped on the server
+        -- stays served by every client for the rest of the session.
         Name = "Properties.PropertyUnregistered",
         Args = {Codecs.u16}, -- PropertyId
     },
@@ -245,8 +244,8 @@ const Channels: {Channel} = {
 
     {
         -- A client asking to hold objects, all of them or none. Answers
-        -- whether it got them. Two clients dragging one object used to fight,
-        -- and the loser's screen jumped when its edits were rolled back.
+        -- whether it got them. Without a hold, two clients dragging one object
+        -- fight, and the loser's screen jumps when its edits are rolled back.
         Name = "Objects.Lock",
         Args = {Codecs.Array(Codecs.u32)}, -- RuntimeIds
         Returns = {Codecs.Bool},
@@ -312,9 +311,9 @@ const Channels: {Channel} = {
         -- Invoked rather than fired, though nothing waits on the answer. Every
         -- edit a player makes reaches the server through the remote function,
         -- and Roblox orders nothing between that and the remote event: a set
-        -- made just after History:Clear used to be recorded and then wiped by
-        -- a Forget that arrived behind it. On the same remote, the two land in
-        -- the order they were made.
+        -- made just after History:Clear could be recorded and then wiped by a
+        -- Forget arriving behind it. On the same remote, the two land in the
+        -- order they were made.
         Name = "History.Forget",
         Args = {Codecs.Bool}, -- RedoOnly
         Returns = {Codecs.Bool},

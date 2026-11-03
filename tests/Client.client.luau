@@ -1159,7 +1159,7 @@ end)
 
 -- A level written by a build that had a type and a property this one does not.
 T:Test("what this build cannot read survives a local save", function()
-    const Compressor = Prism.Compressor
+    const Compressor = require("./Prism/Compressor")
     const Foreign = Compressor:CompressScene(2, {
         {
             __type = "DecompressedObject",

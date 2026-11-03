@@ -94,7 +94,7 @@ end
 
 -- Every set arrives as a sequential array and is rebuilt into a map here:
 -- non-sequential numeric keys are not guaranteed to survive a remote, and a map
--- sent as one used to arrive with blacklist entries missing.
+-- sent as one can arrive with blacklist entries missing.
 Network.Assigned:Connect(function(Payload: Types.GlobalRightsPayload)
     Global = Shared.DecodeGlobal(Payload)
     Notify(nil)

@@ -25,8 +25,8 @@ const Selection = {}
 const Selected: {RuntimeId} = {}
 local Listeners: {(Selected: {Object}) -> ()}? = nil
 
--- Only a reference the workspace still holds is accepted. Selecting an id that
--- never arrived, or one already gone, used to sit in the list until something
+-- Only a reference the workspace still holds is accepted. Otherwise an id that
+-- never arrived, or one already gone, would sit in the list until something
 -- happened to walk past it.
 const function Resolve(Reference: Reference): RuntimeId?
     const Identifier = if type(Reference) == "number"

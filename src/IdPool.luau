@@ -23,13 +23,13 @@ export type IdPool = {
 
 const IdPool = {}
 
--- The pool hands out ids and is never told which one to hand out. It used to
--- take one, for registries that wanted to pin an id, and that was a way to
--- reuse a retired one: an explicit claim only checked whether the id was in use
--- now, not whether it had ever been. Unregister a Number property called Plays,
--- register a Number called Rating under its old id, and every saved record
--- applies its Plays value as a Rating -- the types match, so nothing detects
--- it. Not being able to ask is what makes that unreachable.
+-- The pool hands out ids and is never told which one to hand out. Taking one
+-- would be a way to reuse a retired id: an explicit claim can only check
+-- whether the id is in use now, not whether it has ever been. Unregister a
+-- Number property called Plays, register a Number called Rating under its old
+-- id, and every saved record applies its Plays value as a Rating -- the types
+-- match, so nothing detects it. Not being able to ask is what makes that
+-- unreachable.
 const function __claim(self: IdPool): number?
     const Reused = next(self.Free)
     if Reused then

@@ -25,18 +25,18 @@ const Harness = require("./Harness")
 const Networking = Prism.Networking
 const Properties = Prism.Properties
 const PropertyTypes = require("./Prism/Properties/Types")
-const Compressor = Prism.Compressor
+const Compressor = require("./Prism/Compressor")
 const Permissions = Prism.Permissions
 const CustomEnum = Prism.CustomEnum
-const Encoding = Prism.Encoding
+const Encoding = require("./Prism/Encoding")
 const Objects = Prism.Objects
-const Handles = Prism.Handles
+const Handles = require("./Prism/Handles")
 const Scenes = Prism.Scenes
-const World = Prism.World
-const IdPool = Prism.IdPool
-const Codecs = Prism.Codecs
-const Varint = Prism.Varint
-const Try = Prism.Try
+const World = require("./Prism/World")
+const IdPool = require("./Prism/IdPool")
+const Codecs = require("./Prism/Codecs")
+const Varint = require("./Prism/Varint")
+const Try = require("./Prism/Try")
 
 const T = Harness.new()
 

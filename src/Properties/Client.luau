@@ -44,8 +44,8 @@ end
 -- registries can arrive first. Until then the constraint is a placeholder
 -- carrying only the enum's name, which accepts the pending options the server's
 -- values decode to -- name and id, no Value -- so the client holds what the
--- server holds rather than the default. A nil constraint used to stand in, and
--- refused them all. Property instances share their registry's Constraints
+-- server holds rather than the default. A nil constraint would refuse them all.
+-- Property instances share their registry's Constraints
 -- table, so resolving it later reaches every object already holding the
 -- property, and Objects swaps the pending values for the real options.
 const Waiting: {[string]: {any}} = {}

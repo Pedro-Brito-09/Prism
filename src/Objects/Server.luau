@@ -1,6 +1,5 @@
 --!strict
 const CollectionService = game:GetService("CollectionService")
-const Players = game:GetService("Players")
 
 const Properties = require("../Properties/Server")
 const Permissions = require("../Permissions/Server")
@@ -16,6 +15,7 @@ const Room = require("../Room")
 const Listeners = require("../Listeners")
 const Logger = require("../Logger")
 const Types = require("./Types")
+const Locking = require("./Locks/Server")
 
 export type ObjectIdentifier = Types.ObjectIdentifier
 export type InstanceLinkRegistry = Types.InstanceLinkRegistry
@@ -39,17 +39,6 @@ const Registered: {[ObjectIdentifier]: ObjectRegistry} = {}
 -- in it, 2 MB for 34,918, so it is swapped for a fresh copy once it empties out.
 local Workspace: {[RuntimeId]: Object} = Room.new()
 
--- Who holds each locked object: the holder's user id, and the connection the
--- lock was taken on, which is what lets it go with the player who took it.
--- Who holds each locked object. The holder is whatever was handed in -- a
--- Player, a table standing in for one, a module, a string naming a tool -- and
--- UserId is filled in only where that resolves to a person, which is the part a
--- client can be told about.
---
--- A hold used to require a player, so the server holding an object meant
--- inventing a fake one. Nothing about a hold needs a person: it says this is
--- being worked on, leave it alone.
-const Locks: {[RuntimeId]: {UserId: number?, Holder: any}} = {}
 -- Never recycled, for the same reason property ids are not: a registry id is
 -- written into every saved object as its Registry, so handing the same id to a
 -- different object type later makes every stored object of the old type decode
@@ -59,8 +48,8 @@ const Ids = IdPool.new(nil, false)
 -- Every object appearing here and going, however it came and however it went:
 -- created, restored by a scene load, revived from a suspend, destroyed,
 -- suspended, or taken away with the copy that held it. Server scripts that
--- drive objects -- a spinner reading its speed -- used to poll GetWorkspace to
--- notice any of it.
+-- drive objects -- a spinner reading its speed -- do not have to poll
+-- GetWorkspace to notice any of it.
 --
 -- The client's twin, down to the argument: Restored says the object came back
 -- from a pack under the id it was saved with, which is a copy reading itself in
@@ -286,7 +275,7 @@ const function Withdraw(self: Object, Announce: boolean)
 
     -- Gone with its object. The packet saying the object went is all a client
     -- needs to drop the lock it knew about.
-    Locks[self.RuntimeId] = nil
+    Locking.Forget(self.RuntimeId)
 
     -- Out of the world rather than destroyed, and kept. To every client the two
     -- are the same thing -- a part with no parent is not in the DataModel, so
@@ -942,10 +931,10 @@ const function Enter(Obj: any, Ref: ObjectRegistry, Instance_: any, Announce: bo
 end
 
 -- InitialValues are applied before the links are wired and before the broadcast.
--- Restoring a saved object used to call Objects.new and then Set once per
--- property, which broadcast the defaults and then one PropertyChanged for each
--- property -- a 500 object level at ten properties each cost several thousand
--- packets, and every object's first packet carried state that was already wrong.
+-- Restoring through Objects.new and then a Set per property would broadcast the
+-- defaults and then one PropertyChanged for each property -- a 500 object level
+-- at ten properties each costs several thousand packets, and every object's
+-- first packet carries state that is already wrong.
 --
 -- LocalId is the object's id within its scene. Creating mints the next one;
 -- restoring from a pack passes the id the object was saved under, which is the
@@ -1263,7 +1252,7 @@ function Objects:Duplicate(Obj: Object, Target: any?): Object?
     const New = Objects.new(Obj.Registry, Shared.Snapshot(Obj), Target or SceneRegistry.Instances[Obj.InstanceId])
 
     -- Kept values travel with the rest, or duplicating a room and deleting the
-    -- original would lose them as surely as the save used to.
+    -- original would lose them.
     New.Unknown = if Obj.Unknown then table.clone(Obj.Unknown) else nil
     return New
 end
@@ -1376,282 +1365,41 @@ end
 -- Locks
 --=============================================================================
 
--- A lock is explicit: a client takes one when it starts on an object, and while
--- it holds it nobody else may edit or destroy that object. Presence comes with
--- it -- who holds what is told to the players the object's scene admits, and
--- nobody else, because who is editing a private level is part of the level.
-
--- The most one request may name, for the same reason a transaction has a cap.
-const MAX_LOCKS = 1024
-
--- The person a holder stands for, or nil where it stands for nobody. A bare
--- number is a user id, the way it is everywhere else a person is named -- Admit,
--- Evict and Grant all take a Player or a user id -- so releasing what somebody
--- holds works from either.
-const function UserIdOf(Who: any): number?
-    if typeof(Who) == "Instance" and (Who :: Instance):IsA("Player") then
-        return (Who :: Player).UserId
-    end
-
-    if type(Who) == "number" then
-        return Who
-    end
-
-    if type(Who) == "table" and type(Who.UserId) == "number" then
-        return Who.UserId
-    end
-
-    return nil
-end
-
--- Who holds what, to the players each object's scene admits. Zero means free.
-const function AnnounceLocks(Changed: {Object})
-    const ByScene: {[Types.SceneIdentifier]: {Ids: {RuntimeId}, Holders: {number}, Held: {boolean}}} = {}
-
-    for _, Obj in Changed do
-        local Batch = ByScene[Obj.Scene]
-        if not Batch then
-            Batch = {Ids = {}, Holders = {}, Held = {}}
-            ByScene[Obj.Scene] = Batch
-        end
-
-        const Held = Locks[Obj.RuntimeId]
-        table.insert(Batch.Ids, Obj.RuntimeId)
-
-        -- Zero where the holder is not a person. Held is what says whether
-        -- there is a hold, so zero is a user id nobody has rather than a way of
-        -- saying free.
-        table.insert(Batch.Holders, if Held then Held.UserId or 0 else 0)
-        table.insert(Batch.Held, Held ~= nil)
-    end
-
-    for Scene, Batch in ByScene do
-        Audience.Fire(Network.LocksChanged, Scene, "Admitted", Batch.Ids, Batch.Holders, Batch.Held)
-    end
-end
-
--- Takes every object named for Who, or none of them: an object someone else
--- holds refuses the lot, so a multi-object drag never ends up half held.
--- Taking one Who already holds is not a refusal.
--- Whether two holders are the same one. By user id where both resolve to a
--- person, so a Player and a table standing in for the same player are one
--- holder; by identity otherwise, which is what lets anything at all hold an
--- object.
-const function SameHolder(Held: {UserId: number?, Holder: any}, Who: any): boolean
-    const UserId = UserIdOf(Who)
-    if UserId and Held.UserId then
-        return Held.UserId == UserId
-    end
-
-    return Held.Holder == Who
-end
-
--- One object or a list, as on the client and in a transaction.
-const function Named(Refs: Object | {Object}): {Object}
-    return if (Refs :: any).RuntimeId ~= nil then {Refs :: Object} else Refs :: {Object}
-end
+-- A lock is explicit: while somebody holds an object nobody else may edit or
+-- destroy it. Kept in Locks/Server; these are its public face.
 
 function Objects:Lock(Refs: Object | {Object}, Who: any): boolean
-    if Who == nil then
-        return false
-    end
-
-    const List = Named(Refs)
-    for _, Obj in List do
-        const Held = Locks[Obj.RuntimeId]
-        if Obj.Destroyed or (Held and not SameHolder(Held, Who)) then
-            return false
-        end
-    end
-
-    const UserId = UserIdOf(Who)
-    for _, Obj in List do
-        Locks[Obj.RuntimeId] = {UserId = UserId, Holder = Who}
-    end
-
-    AnnounceLocks(List)
-    return true
+    return Locking.Lock(Refs, Who)
 end
 
--- Releases what Who holds among the objects named. With no Who it is the
--- server releasing anyone's. Answers false if any named object is held by
--- someone else, which stays theirs; the rest are released regardless.
 function Objects:Unlock(Refs: Object | {Object}, Who: any?): boolean
-    const Released = {}
-    local All = true
-
-    for _, Obj in Named(Refs) do
-        const Held = Locks[Obj.RuntimeId]
-        if not Held then
-            continue
-        end
-
-        if Who ~= nil and not SameHolder(Held, Who) then
-            All = false
-            continue
-        end
-
-        Locks[Obj.RuntimeId] = nil
-        table.insert(Released, Obj)
-    end
-
-    if #Released > 0 then
-        AnnounceLocks(Released)
-    end
-
-    return All
+    return Locking.Unlock(Refs, Who)
 end
 
--- The user id holding an object, or nil when it is free.
--- The user id holding an object, nil when it is free or held by something that
--- is not a person. GetHolder is the whole answer; this is the part a client can
--- be told and the part a game usually wants.
 function Objects:GetLock(Obj: Object): number?
-    const Held = Locks[Obj.RuntimeId]
-    return if Held then Held.UserId else nil
+    return Locking.GetLock(Obj)
 end
 
 function Objects:GetHolder(Obj: Object): any?
-    const Held = Locks[Obj.RuntimeId]
-    return if Held then Held.Holder else nil
+    return Locking.GetHolder(Obj)
 end
 
 function Objects:IsLocked(Obj: Object): boolean
-    return Locks[Obj.RuntimeId] ~= nil
+    return Locking.IsLocked(Obj)
 end
 
--- Everything one holder has, let go at once. What a player being evicted from a
--- scene comes down to, and what losing the right to edit one comes down to:
--- both leave somebody holding objects they may no longer touch, and nobody else
--- able to touch them either.
---
--- Scoped to a scene when one is named, because being shut out of one room is
--- not being shut out of the others.
-function Objects.ReleaseFor(Who: any, Scene: Types.SceneIdentifier?)
-    const Released = {}
+Objects.ReleaseFor = Locking.ReleaseFor
+Objects.LockedAgainst = Locking.LockedAgainst
+Objects.SendLocks = Locking.SendLocks
 
-    for Identifier, Held in Locks do
-        if not SameHolder(Held, Who) then
-            continue
-        end
-
-        const Obj = Workspace[Identifier]
-        if Obj and (Scene == nil or Obj.Scene == Scene) then
-            table.insert(Released, Obj)
-        end
-    end
-
-    if #Released > 0 then
-        Objects:Unlock(Released)
-    end
-end
-
--- Whether someone other than Plr holds the object, which is what every edit
--- path asks before it lets one through.
-function Objects.LockedAgainst(Obj: Object, Who: any): boolean
-    const Held = Locks[Obj.RuntimeId]
-    return Held ~= nil and not SameHolder(Held, Who)
-end
-
--- The locks among some objects, for a player a scene is being revealed to:
--- they are owed who holds what as well as the objects themselves.
-function Objects.SendLocks(Plr: Player, List: {Object})
-    const Ids = {}
-    const Holders = {}
-    const Flags = {}
-
-    for _, Obj in List do
-        const Held = Locks[Obj.RuntimeId]
-        if Held and not Obj.Destroyed then
-            table.insert(Ids, Obj.RuntimeId)
-
-            -- Zero where the holder is not a person, exactly as AnnounceLocks
-            -- sends it. UserId is nil for a holder that is a module or a
-            -- string, and table.insert of a nil leaves a hole that shifts
-            -- every later holder against its id.
-            table.insert(Holders, Held.UserId or 0)
-            table.insert(Flags, true)
-        end
-    end
-
-    if #Ids > 0 then
-        Network.LocksChanged:Fire(Plr, Ids, Holders, Flags)
-    end
-end
-
--- Resolves what a client named, refusing the whole request over one it may not
--- have: an object that is gone, in a scene it was never admitted to, or one it
--- may not edit. A lock on something you cannot change would only be a way to
--- stop others changing it.
-const function Claimable(Plr: Player, Ids: {RuntimeId}): {Object}?
-    if #Ids > MAX_LOCKS or not Permissions:Consume(Plr, #Ids) then
-        return nil
-    end
-
-    const List = {}
-    for _, Identifier in Ids do
-        const Obj = Workspace[Identifier]
-        if not Obj or Obj.Destroyed or not Audience.Sees(Plr, Obj.Scene) or not Permissions:Can(Plr, "Edit", Obj) then
-            return nil
-        end
-
-        table.insert(List, Obj)
-    end
-
-    return List
-end
-
-Network.Lock.OnInvoke = function(Plr: Player, Ids: {RuntimeId}): boolean
-    const List = Claimable(Plr, Ids)
-    return List ~= nil and Objects:Lock(List, Plr)
-end
-
--- Releasing needs no rights: a player who lost them since should still be able
--- to let go. Objects that are gone are simply skipped.
-Network.Unlock.OnInvoke = function(Plr: Player, Ids: {RuntimeId}): boolean
-    if #Ids > MAX_LOCKS or not Permissions:Consume(Plr) then
-        return false
-    end
-
-    const List: {Object} = {}
-    for _, Identifier in Ids do
-        const Obj = Workspace[Identifier]
-        if Obj and not Obj.Destroyed then
-            table.insert(List, Obj)
-        end
-    end
-
-    return Objects:Unlock(List, Plr)
-end
-
--- A lock goes with the connection it was taken on.
--- A hold goes with whoever had it. Leaving is the obvious way to lose one;
--- Permissions below is the other, and Scenes calls ReleaseFor when it evicts
--- somebody.
-Players.PlayerRemoving:Connect(function(Plr: Player)
-    Objects.ReleaseFor(Plr)
-end)
-
--- Rights over a scene changed for somebody. A hold is worth having only where
--- an edit would be allowed, so one held by a player who may no longer edit
--- there is a hold nobody benefits from and nobody else can take: they keep the
--- object to themselves without being able to do anything with it.
-Permissions.OnSceneRights(function(UserId: number, Scene: Types.SceneIdentifier)
-    -- By user id throughout. Asking Players for the person would answer nil for
-    -- anybody not connected, and rights are granted to people who have not
-    -- arrived yet -- Scenes.new takes a whole collaborator list.
-    const Rights = Permissions:GetOn(Scene, UserId)
-    if Rights and Rights.CanEdit then
-        return
-    end
-
-    Objects.ReleaseFor(UserId, Scene)
+Locking.Bind(function(Identifier: RuntimeId): Object?
+    return Workspace[Identifier]
 end)
 
 Network.SetProperty.OnInvoke = function(Plr: Player, Identifier: RuntimeId, PropId: PropertyTypes.PropertyIdentifier, Compressed: buffer): boolean
-    -- Budget first. Check used to run after the workspace lookup, so a client
-    -- spamming runtime ids that do not exist returned early and never spent any
-    -- of its allowance -- the one flood the limiter most needed to catch.
+    -- Budget first, ahead of the workspace lookup: otherwise a client spamming
+    -- runtime ids that do not exist returns early and never spends any of its
+    -- allowance -- the one flood the limiter most needs to catch.
     if not Permissions:Consume(Plr) then
         return false
     end
@@ -1736,8 +1484,7 @@ Network.Destroy.OnInvoke = function(Plr: Player, Identifier: RuntimeId): boolean
 
     -- Retired rather than destroyed: a player's own destroy is theirs to take
     -- back, and this is the channel a lone Object:Destroy on the client comes
-    -- down. Nothing keeping it means it is gone as immediately as it used to
-    -- be.
+    -- down. Nothing keeping it means it is gone immediately.
     Objects.Retire(Plr, Obj, true)
     return true
 end

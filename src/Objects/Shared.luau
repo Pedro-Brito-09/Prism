@@ -28,11 +28,11 @@ const Types = require("./Types")
 const function NoDisconnect() end
 
 -- Name -> id, built once when the object is. Get, Set and OnChange all take a
--- name as readily as an id, and resolving one used to scan every property on
--- the object -- over a hash keyed table, so two properties sharing a name
--- resolved to whichever one iteration happened to reach first. Built from the
--- registry's ordered property list instead: the lookup is constant, and the
--- name declared first wins every time.
+-- name as readily as an id. Scanning every property on the object would go
+-- over a hash keyed table, so two properties sharing a name would resolve to
+-- whichever one iteration happened to reach first. Built from the registry's
+-- ordered property list instead: the lookup is constant, and the name declared
+-- first wins every time.
 --
 -- One map a list, shared by every object of the type, rather than one an
 -- object: it was about 1 KB each, 35 MB on a 34,918-object level. Every object
@@ -79,9 +79,9 @@ const function GetProperty(
 end
 
 -- The object level counterpart to Set and Get: the same reference, resolved the
--- same way. Watching a property used to mean reaching into Properties by id,
--- which forced the caller to hold the id even though every other method on the
--- object accepts a name.
+-- same way, so watching a property does not mean reaching into Properties by
+-- id, which would force the caller to hold the id even though every other
+-- method on the object accepts a name.
 const function OnChange(
     self: Types.Object,
     Reference: Types.PropertyReference,
@@ -118,7 +118,7 @@ end
 -- the property is enough to learn both whether it exists and what type it is.
 --
 -- A member that exists but currently holds nil reports as unknown rather than
--- as the string "nil", which is truthy and used to sail past the caller's guard
+-- as the string "nil", which is truthy and would sail past the caller's guard
 -- and then fail the type comparison with a misleading message.
 const function GetInstancePropertyType(Inst: Instance, Name: string): string?
     const Ok, Value = pcall(function()
@@ -182,9 +182,9 @@ const NOT_SPATIAL: {[string]: true} = {
 
 -- Links are checked once, against the template, when the type is registered on
 -- the server. A client receives them already checked, beside the template they
--- were checked against. Every clone has the same class and the same members, so the answer never
--- differs between them, and these checks used to run inside Objects.new, which
--- meant one malformed link warned once for every object ever created from that
+-- were checked against. Every clone has the same class and the same members,
+-- so the answer never differs between them. Checking inside Objects.new would
+-- warn about one malformed link once for every object ever created from that
 -- registry.
 const function ValidateLinks(
     Name: string,
@@ -310,9 +310,9 @@ end
 -- has two to hold.
 --
 -- Settled says the instance already holds the values, which a part the server
--- built and replicated does: a client wiring one used to write every value
--- back onto it, the same value it held, 330,259 writes on a real level and a
--- fifth of the time an arriving object took.
+-- built and replicated does. Without it a client wiring one writes every value
+-- back onto it, the same value it holds: 330,259 writes on a real level and a
+-- fifth of the time an arriving object takes.
 --
 -- Origin is that of the copy holding the object, nil at the default. A SceneSpace
 -- link in a moved copy starts from the default when the object holds no value:
@@ -865,8 +865,8 @@ end
 -- What a restored object keeps of its save without understanding it: records
 -- the pack could not place at all, and values for properties its type no
 -- longer lists. Construct skips the second kind -- rightly, an object carries
--- only its type's properties -- which used to mean removing a property from a
--- type and saving erased every value it held, silently. Kept as tagged bytes,
+-- only its type's properties -- so without this, removing a property from a
+-- type and saving would erase every value it held, silently. Kept as tagged bytes,
 -- written back by a save and by nothing else. Nil when there is nothing.
 const function Leftovers(Obj: Types.Object, Decompressed: any): {[PropertyTypes.PropertyIdentifier]: buffer}?
     local Kept: {[PropertyTypes.PropertyIdentifier]: buffer}? = nil
