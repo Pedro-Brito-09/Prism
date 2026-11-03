@@ -62,7 +62,9 @@ publishes it to a dedicated test place and runs it through an Open Cloud Luau
 Execution, which runs only the script it is handed. The job fails unless the
 suite reports no failures.
 
-An execution has no players, so the tests that need one skip themselves and the
+An execution has no players and no running game, so the tests that need either
+skip themselves -- one announcing to a player, and the two that check a send is
+refused, since outside a game a send stops before it is checked -- and the
 client suite does not run: those still need **Test > Play**. It is also capped at
 five minutes. The database section runs there, against the test place's own
 data stores.
