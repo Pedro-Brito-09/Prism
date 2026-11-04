@@ -8,8 +8,9 @@
 
     The Database section is on: it writes to real DataStore and MemoryStore keys
     and needs Studio API access enabled. Set RUN_DATABASE to false to skip it.
-    It wipes its two keys, PrismSelfTest and PrismSelfTestBurst, before it starts
-    and after it finishes, so they never hold more than one run's records.
+    It wipes its three keys, PrismSelfTest, PrismSelfTestBurst and
+    PrismSelfTestPages, before it starts and after it finishes, so they never
+    hold more than one run's records.
 ]]
 
 const Players = game:GetService("Players")
@@ -6257,6 +6258,7 @@ if RUN_DATABASE then
     T:Test("starts from empty stores", function()
         T:Ok(Wipe(DATABASE_KEY), "the main key")
         T:Ok(Wipe(`{DATABASE_KEY}Burst`), "and the burst key")
+        T:Ok(Wipe(`{DATABASE_KEY}Pages`), "and the paging key")
     end)
 
     -- ShardLimit is deliberately tiny so the seal path runs after a handful of
@@ -6451,22 +6453,29 @@ if RUN_DATABASE then
     end)
 
     T:Test("FindPage walks the shards a page at a time and misses nothing", function()
-        -- The burst key, which the test above left with twenty records in
-        -- shards of 120 bytes, so several. The main key's eight records fit in
-        -- one shard of 400, where a page is the whole database.
+        -- A key of its own whose every create seals the shard it lands in, so
+        -- three records are three shards and an empty tail. The main and burst
+        -- keys cannot stand in: packed in columns, their records come to fewer
+        -- bytes than their limits, and each stays in one shard.
         const Paged = Prism.Database.new({
-            Key = `{DATABASE_KEY}Burst`,
+            Key = `{DATABASE_KEY}Pages`,
             InitialMetadata = {Title, Plays},
-            ShardLimit = 120,
+            ShardLimit = 1,
             Expiration = 1,
         })
+
+        for Index = 1, 3 do
+            T:Ok((Paged:Create()), `create {Index}`)
+        end
+
+        Paged:Refresh()
 
         const function Everything()
             return true
         end
 
         const All = Paged:Find(Everything)
-        T:Eq(#All, 20, "the burst left its twenty records to page through")
+        T:Eq(#All, 3, "the three records to page through")
 
         -- One shard a page, so the first page has to hand back a cursor.
         const First, Next = Paged:FindPage(Everything)
@@ -6587,6 +6596,7 @@ if RUN_DATABASE then
     T:Test("removes its test keys", function()
         T:Ok(Wipe(DATABASE_KEY), "the main key")
         T:Ok(Wipe(`{DATABASE_KEY}Burst`), "and the burst key")
+        T:Ok(Wipe(`{DATABASE_KEY}Pages`), "and the paging key")
     end)
 end
 
