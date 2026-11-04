@@ -46,9 +46,10 @@ validate both live delivery and late-join replay. A failed test prints its group
 and assertion, then fails the corresponding script.
 
 > **Warning: the database tests write to real data stores.** They use the
-> DataStore and MemoryStore keys `PrismSelfTest` and `PrismSelfTestBurst`, need
-> Studio API access enabled, and are **on by default**: `RUN_DATABASE` near the
-> top of `tests/Server.server.luau` switches them. They **wipe both keys** before
+> DataStore and MemoryStore keys `PrismSelfTest`, `PrismSelfTestBurst` and
+> `PrismSelfTestPages`, need Studio API access enabled, and are **on by
+> default**: `RUN_DATABASE` near the top of `tests/Server.server.luau` switches
+> them. They **wipe all three keys** before
 > they start and after they finish, so never point them at a key that holds
 > anything you want. Set `RUN_DATABASE = false` in any place whose data stores
 > you care about.

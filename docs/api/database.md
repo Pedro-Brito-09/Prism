@@ -24,6 +24,7 @@
 | `:RegisterCache(name, config)` | | |
 | `:Get(cache, page?)` | `{Records, HasMore}` | |
 | `:Find(predicate, limit?)` | `{record}` | Stops once it has enough |
+| `:FindPage(predicate, fromShard?, maxShards?)` | `{record}, nextShard?` | Every match in at most `maxShards` shards (default 1) from `fromShard` (default 1). `nextShard` is nil after the last |
 | `:Refresh()` | | |
 
 ## A record

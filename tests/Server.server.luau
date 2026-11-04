@@ -8,8 +8,9 @@
 
     The Database section is on: it writes to real DataStore and MemoryStore keys
     and needs Studio API access enabled. Set RUN_DATABASE to false to skip it.
-    It wipes its two keys, PrismSelfTest and PrismSelfTestBurst, before it starts
-    and after it finishes, so they never hold more than one run's records.
+    It wipes its three keys, PrismSelfTest, PrismSelfTestBurst and
+    PrismSelfTestPages, before it starts and after it finishes, so they never
+    hold more than one run's records.
 ]]
 
 const Players = game:GetService("Players")
@@ -6257,6 +6258,7 @@ if RUN_DATABASE then
     T:Test("starts from empty stores", function()
         T:Ok(Wipe(DATABASE_KEY), "the main key")
         T:Ok(Wipe(`{DATABASE_KEY}Burst`), "and the burst key")
+        T:Ok(Wipe(`{DATABASE_KEY}Pages`), "and the paging key")
     end)
 
     -- ShardLimit is deliberately tiny so the seal path runs after a handful of
@@ -6450,6 +6452,68 @@ if RUN_DATABASE then
         T:Eq(#None, 0, "no matches")
     end)
 
+    T:Test("FindPage walks the shards a page at a time and misses nothing", function()
+        -- A key of its own whose every create seals the shard it lands in, so
+        -- three records are three shards and an empty tail. The main and burst
+        -- keys cannot stand in: packed in columns, their records come to fewer
+        -- bytes than their limits, and each stays in one shard.
+        const Paged = Prism.Database.new({
+            Key = `{DATABASE_KEY}Pages`,
+            InitialMetadata = {Title, Plays},
+            ShardLimit = 1,
+            Expiration = 1,
+        })
+
+        for Index = 1, 3 do
+            T:Ok((Paged:Create()), `create {Index}`)
+        end
+
+        Paged:Refresh()
+
+        const function Everything()
+            return true
+        end
+
+        const All = Paged:Find(Everything)
+        T:Eq(#All, 3, "the three records to page through")
+
+        -- One shard a page, so the first page has to hand back a cursor.
+        const First, Next = Paged:FindPage(Everything)
+        T:Ok(#First > 0, "the first page found records")
+        T:Eq(Next, 2, "and points at the second shard")
+
+        const Seen: {[number]: number} = {}
+        local Pages = 0
+        local Cursor: number? = 1
+        while Cursor do
+            const Records, After = Paged:FindPage(Everything, Cursor)
+            for _, Record in Records do
+                Seen[Record.Id] = (Seen[Record.Id] or 0) + 1
+            end
+
+            Pages += 1
+            T:Ok(After == nil or After == (Cursor :: number) + 1, `page {Pages} moves on one shard`)
+            Cursor = After
+        end
+
+        T:Ok(Pages > 1, `paged through more than one shard, got {Pages}`)
+
+        local Count = 0
+        for Id, Times in Seen do
+            Count += 1
+            T:Eq(Times, 1, `id {Id} seen once`)
+        end
+        T:Eq(Count, #All, "every record Find sees, and nothing else")
+
+        const Whole, Done = Paged:FindPage(Everything, 1, Pages)
+        T:Eq(#Whole, #All, "a page as large as the database reads all of it")
+        T:Eq(Done, nil, "and says it is done")
+
+        const Past, Beyond = Paged:FindPage(Everything, Pages + 5)
+        T:Eq(#Past, 0, "a cursor past the end finds nothing")
+        T:Eq(Beyond, nil, "and goes nowhere")
+    end)
+
     T:Test("REGRESSION: returned records are frozen", function()
         db:Refresh()
         const Record = db:GetById(Created[1])
@@ -6532,6 +6596,7 @@ if RUN_DATABASE then
     T:Test("removes its test keys", function()
         T:Ok(Wipe(DATABASE_KEY), "the main key")
         T:Ok(Wipe(`{DATABASE_KEY}Burst`), "and the burst key")
+        T:Ok(Wipe(`{DATABASE_KEY}Pages`), "and the paging key")
     end)
 end
 

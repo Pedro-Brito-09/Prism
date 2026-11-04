@@ -594,6 +594,30 @@ const function __find<T>(self: Database<T>, Predicate: Predicate, Limit: number?
     return Found
 end
 
+-- Find a few shards at a time. Find only stops once it has enough, so a search
+-- that matches little reads every shard in one call; this reads at most
+-- MaxShards of them and hands back where to carry on.
+--
+-- Every match in the shards it reads, with no limit: a page that stopped
+-- partway through a shard would have to say where in it, and a cursor of whole
+-- shards cannot, so carrying on would skip the rest of that shard.
+const function __find_page<T>(self: Database<T>, Predicate: Predicate, FromShard: number?, MaxShards: number?): ({Metadata}, number?)
+    const Manifest = GetManifest(self)
+    const First = math.max(1, math.floor(FromShard or 1))
+    const Last = math.min(Manifest.Count, First + math.max(1, math.floor(MaxShards or 1)) - 1)
+    const Found = {}
+
+    for Index = First, Last do
+        for _, Record in GetShard(self, Index) do
+            if Predicate(Record) then
+                table.insert(Found, Record)
+            end
+        end
+    end
+
+    return Found, if Last < Manifest.Count then Last + 1 else nil
+end
+
 --=============================================================================
 -- Writing
 --=============================================================================
@@ -967,6 +991,7 @@ function Database.new<T>(Config: {
     db.Get = __get
     db.GetById = __get_by_id
     db.Find = __find
+    db.FindPage = __find_page
     db.Edit = __edit
     db.Delete = __delete
     db.Link = __link
