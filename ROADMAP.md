@@ -30,6 +30,10 @@ Read this before picking anything up. It is how every item under Done landed.
   Before an item is ticked, run `node scripts/build.js`, insert
   `dist/PrismTests.rbxmx` into an empty place and Play with one player; both
   suites end with a pass count. A fix lands with a test that fails without it.
+  CI also runs the server suite on Roblox on every push (see
+  `docs/internals/testing.md`), so a broken server test turns the push red;
+  the client suite and the tests that need a player or a running game still
+  need the Play.
 - **A release is a tag.** `git tag v1.2.0 && git push origin v1.2.0` runs the
   checks, builds both models and publishes them as that release. `dist/` is
   not committed, so there is no model to forget to rebuild. Ask Pedro before
@@ -96,6 +100,18 @@ checker would have caught. `default.project.json` is gone now that the models
 from files to instances and could write `sourcemap.json` itself, so Rojo is no
 longer needed for it.
 
+Also decided against, for now: **batching database creates.** Every `Create`
+is an `UpdateAsync` on the one tail shard, which decodes and re-encodes the
+whole shard, so creates at once queue on that key -- the CI log shows the
+DataStore queue warnings from the burst test. A local queue flushed as one
+`UpdateAsync` every few seconds would turn thirty creates into one or two
+writes, at the cost of seconds of latency per create and a concurrent path
+(seals mid-batch, one failure failing the batch) to get right. Creates today
+all land, only slower, and a game that creates records now and then never
+contends. Revisit if creates start returning `false` with the queue full, or
+the game creates records from many servers at once; handing each server its
+own range of ids is the step after that.
+
 Deliberately not queued: object hierarchy and grouping, and anything spatial
 (bounding boxes, region queries, box select). A level editor generally wants
 both, and there is nothing in `src/` for either. They are also the two largest
@@ -105,6 +121,66 @@ and actually reaches for a group or a box select, so the shape is observed
 rather than guessed.
 
 ## Done
+
+The six entries below landed on 2026-11-03 and 11-04. Each ran the pure suite
+and, through the new CI job, the server suite on Roblox, green; the client
+suite has not been played on them yet. None of them changes what a client
+does beyond the shared validation the pure suite covers.
+
+- [x] **The database tests really seal.** The main key's eight records and
+      the burst key's twenty came to fewer bytes than their `ShardLimit`s of
+      400 and 120 once records were packed in columns, so neither ever left
+      its first shard, and the tests that said they walked several shards
+      walked one. Both limits are 1 now, so every create seals, and each test
+      checks through `FindPage` that a second shard exists. The burst is eight
+      creates, not twenty: a one-record tail lands one create a round, and
+      twenty ran past `CREATE_ROUNDS`.
+
+- [x] **`FindPage`, a search a few shards at a time.** `Find` stops once it has
+      enough, so a search that matches little read every shard in one call.
+      `FindPage(predicate, fromShard?, maxShards?)` reads at most `maxShards`
+      (one by default) and returns every match in them with the shard to carry
+      on from, nil after the last. A page has no limit of its own: one that
+      stopped partway through a shard would need a cursor inside it. `Find`
+      is unchanged, so nothing breaks. Its test pages a key of its own,
+      `PrismSelfTestPages`, with a `ShardLimit` of 1.
+
+- [x] **The server suite runs on Roblox in CI.** A job after the checks builds
+      `dist/PrismCI.rbxl` -- the suite as a ModuleScript in ServerStorage --
+      publishes it to a dedicated test place and requires it through an Open
+      Cloud Luau Execution, failing unless the suite reports no failures. It
+      needs the `ROBLOX_API_KEY` secret and the `ROBLOX_UNIVERSE_ID` and
+      `ROBLOX_PLACE_ID` variables, and is skipped without them. The place is
+      written in the binary format: Open Cloud refused the XML one with
+      "Invalid Content stream". An execution has no player and no running
+      game, so the tests needing either skip themselves -- the announce test,
+      and the arity and server-invoke checks, since outside a game a send
+      returns before it is checked; keeping those in Studio was chosen over
+      checking before the early return. The whole suite, database included,
+      runs in under two minutes of the five allowed.
+
+- [x] **CI green again.** `refactor/modulos-comentarios-api` had the suites
+      require internal modules through `require("./Prism/...")`, which the
+      analyser cannot resolve any more than `require("./Prism")`, and the
+      ratchet failed every push from then. The baseline took the twelve
+      unknown requires, and `docs/internals/testing.md` says which stand.
+
+- [x] **The commit and packet caps live together.** `src/Limits.luau` holds
+      `MAX_COMMIT_BYTES` and `MAX_PACKET_BYTES`, the second derived from the
+      first, so raising the commit cap cannot leave commits the decoder drops
+      without a word. The pure suite checks a full commit fits with room for
+      its framing. The values are unchanged.
+
+- [x] **No NaN or infinity in a property.** `IsValid` refuses them in Number,
+      every component of Color, Vector and CFrame, and so in lists of them:
+      they passed the clamp, since `math.max(NaN, x)` is NaN, and were set,
+      replicated and saved. The same change made the server drop a client
+      packet over `MAX_PACKET_BYTES` before unpacking it, and a packet with
+      bytes past its last argument. `Precision` could produce the same values
+      after validation -- 1e308 at `Scale` 100 snapped to infinity, a step
+      rounding to zero to NaN -- so a snap is now kept only when it is finite.
+      The pure suite covers both, failing without each fix; the server suite
+      sets every bad value through `Set` and `Transactions.Apply`.
 
 - [x] **An unload gives the room back.** After an unload the server read
       9.9-12.5 MB against 4.0-4.3 MB before the level was built, and a client
