@@ -6340,12 +6340,18 @@ if RUN_DATABASE then
     end)
 
     -- Creates that run at once, on one server, against a tail that every one of
-    -- them seals: ShardLimit is 1, since packed in columns twenty records come
-    -- to fewer bytes than any limit that would seal every couple. Each used to
-    -- read the same tail from the manifest and append to it after another had
-    -- sealed it, leaving records past the boundary readers look them up by:
-    -- thirty at once left eighteen of them unreachable by id. Its own key, so a burst does not reshape the shards
-    -- the tests above and below walk.
+    -- them seals. Each used to read the same tail from the manifest and append
+    -- to it after another had sealed it, leaving records past the boundary
+    -- readers look them up by: thirty at once left eighteen of them unreachable
+    -- by id. Its own key, so a burst does not reshape the shards the tests above
+    -- and below walk.
+    --
+    -- ShardLimit is 1 because packed in columns a record left at its defaults
+    -- costs about a byte, and no limit in bytes seals every few of them without
+    -- breaking when the format changes. A tail that holds one record takes one
+    -- create a round, and each create it turns away chases the next tail, so a
+    -- burst past CREATE_ROUNDS (10) leaves creates giving up: twenty at once lost
+    -- four that way and timed out on the rest. Eight stay inside it.
     T:Test("creates at once all land where they can be found", function()
         const Burst = Prism.Database.new({
             Key = `{DATABASE_KEY}Burst`,
@@ -6355,8 +6361,8 @@ if RUN_DATABASE then
         })
 
         const Ids = {}
-        local Pending = 20
-        for _ = 1, 20 do
+        local Pending = 8
+        for _ = 1, 8 do
             task.spawn(function()
                 const Ok, Id = Burst:Create()
                 if Ok and Id then
@@ -6371,7 +6377,7 @@ if RUN_DATABASE then
             return Pending == 0
         end, 120, "every create finished", 0.5)
 
-        T:Eq(#Ids, 20, "every create succeeded")
+        T:Eq(#Ids, 8, "every create succeeded")
 
         const Seen = {}
         for _, Id in Ids do
