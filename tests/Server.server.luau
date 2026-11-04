@@ -6261,12 +6261,15 @@ if RUN_DATABASE then
         T:Ok(Wipe(`{DATABASE_KEY}Pages`), "and the paging key")
     end)
 
-    -- ShardLimit is deliberately tiny so the seal path runs after a handful of
-    -- records instead of needing three megabytes of them.
+    -- ShardLimit is 1 so every create seals the shard it lands in, and the eight
+    -- records below are eight shards and an empty tail. It read 400, which was
+    -- meant to seal after a handful of records, but packed in columns the eight
+    -- come to fewer bytes than that and never left the first shard: the tests
+    -- below said they walked several shards and walked one.
     const db = Prism.Database.new({
         Key = DATABASE_KEY,
         InitialMetadata = {Title, Plays},
-        ShardLimit = 400,
+        ShardLimit = 1,
         Expiration = 1,
     })
 
@@ -6319,6 +6322,13 @@ if RUN_DATABASE then
 
     T:Test("sharding sealed at least once", function()
         db:Refresh()
+
+        -- A cursor back from the first page means there is a second shard.
+        const _, Next = db:FindPage(function()
+            return true
+        end)
+        T:Ok(Next ~= nil, "more than one shard")
+
         const Page = db:Get("Oldest", 1)
         T:Ok(#Page.Records > 0, "records readable across shards")
 
@@ -6329,17 +6339,18 @@ if RUN_DATABASE then
         end
     end)
 
-    -- Creates that run at once, on one server, against a tail that seals every
-    -- couple of records. Each used to read the same tail from the manifest and
-    -- append to it after another had sealed it, leaving records past the
-    -- boundary readers look them up by: thirty at once left eighteen of them
-    -- unreachable by id. Its own key, so a burst does not reshape the shards
+    -- Creates that run at once, on one server, against a tail that every one of
+    -- them seals: ShardLimit is 1, since packed in columns twenty records come
+    -- to fewer bytes than any limit that would seal every couple. Each used to
+    -- read the same tail from the manifest and append to it after another had
+    -- sealed it, leaving records past the boundary readers look them up by:
+    -- thirty at once left eighteen of them unreachable by id. Its own key, so a burst does not reshape the shards
     -- the tests above and below walk.
     T:Test("creates at once all land where they can be found", function()
         const Burst = Prism.Database.new({
             Key = `{DATABASE_KEY}Burst`,
             InitialMetadata = {Title, Plays},
-            ShardLimit = 120,
+            ShardLimit = 1,
             Expiration = 1,
         })
 
@@ -6373,6 +6384,11 @@ if RUN_DATABASE then
             const Record = Burst:GetById(Id)
             T:Ok(Record and Record.Id == Id, `id {Id} found by id`)
         end
+
+        const _, Next = Burst:FindPage(function()
+            return true
+        end)
+        T:Ok(Next ~= nil, "the burst sealed more than one shard")
     end)
 
     T:Test("id ordered paging walks in both directions", function()
@@ -6454,9 +6470,9 @@ if RUN_DATABASE then
 
     T:Test("FindPage walks the shards a page at a time and misses nothing", function()
         -- A key of its own whose every create seals the shard it lands in, so
-        -- three records are three shards and an empty tail. The main and burst
-        -- keys cannot stand in: packed in columns, their records come to fewer
-        -- bytes than their limits, and each stays in one shard.
+        -- three records are three shards and an empty tail. The main key seals
+        -- the same way, but other tests edit, link and delete in it, and
+        -- this one wants a database whose every record it knows.
         const Paged = Prism.Database.new({
             Key = `{DATABASE_KEY}Pages`,
             InitialMetadata = {Title, Plays},
