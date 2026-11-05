@@ -841,11 +841,13 @@ Network.Redo.OnInvoke = function(Plr: Player, Step: number): boolean
 end
 
 Network.Forget.OnInvoke = function(Plr: Player, RedoOnly: boolean): boolean
-    -- Charged like every other request a client can make.
-    if not Permissions:Consume(Plr) then
-        return false
-    end
-
+    -- Not charged, unlike the other handlers. A refusal here would go unseen:
+    -- the client fires this and moves on, so its stacks would drop steps the
+    -- server kept, and a later redo could replay one that was meant to be gone.
+    -- Retrying is no fix either, since a retry lands behind edits made after
+    -- it and wipes what they recorded. Nor is there anything to protect: it
+    -- touches only this player's own history, and once the stacks are empty a
+    -- second call finds nothing to do.
     if RedoOnly then
         History:Fork(Plr)
     else

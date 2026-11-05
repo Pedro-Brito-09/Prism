@@ -2762,6 +2762,34 @@ T:Test("a transaction is charged one action per operation", function()
     end
 end)
 
+T:Test("a packet is charged before it is decompressed", function()
+    -- The remote's own handler, called with a stand-in the way the commit
+    -- tests call theirs: a server-only run has no client to invoke it.
+    const ApplyRemote = Networking:Get("Transactions.Apply").OnInvoke
+
+    const Plr = Ghost(-3003)
+    Permissions:Grant(Plr, "TestBuilder") -- Rate = 5
+    Scenes:GetDefault():Grant(Plr, "TestBuilder")
+
+    const Obj = Objects.new(BareId)
+    const Valid = Compressor:CompressTransaction({
+        {Kind = "Set", Target = Obj.RuntimeId, Property = TitleId, Value = "Charged", Type = "Text"},
+    } :: any)
+
+    -- Bytes that do not decode. Each is refused; what matters is that each
+    -- still spends one action, or a client could make the server unpack
+    -- packets forever without touching its allowance.
+    for _ = 1, 5 do
+        T:Ok(not (ApplyRemote(Plr, buffer.create(1), false)), "a malformed packet is refused")
+    end
+
+    T:Ok(not (ApplyRemote(Plr, Valid, false)), "the malformed packets spent the budget")
+
+    Scenes:GetDefault():Revoke(Plr)
+    Permissions:Revoke(Plr)
+    Obj:Destroy()
+end)
+
 T:Test("an object duplicates into its own copy, values and all", function()
     const Copy = Scenes.new({Name = "TestDuplicated"}):Load()
     const Original = Copy:Create(CrateId, {[TitleId] = "Original", [HealthId] = 40})
