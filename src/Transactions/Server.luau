@@ -878,6 +878,14 @@ function Transactions.new(): Transaction
 end
 
 Network.Apply.OnInvoke = function(Plr: Player, Compressed: buffer, Untracked: boolean): (boolean, {ObjectTypes.RuntimeId})
+    -- Budget first, ahead of decompressing: otherwise a client can make the
+    -- server unpack packet after packet, malformed ones included, without
+    -- spending any of its allowance. The per-operation charge in Apply still
+    -- follows once the list is known; this one is the price of being read.
+    if not Permissions:Consume(Plr) then
+        return false, {}
+    end
+
     -- Bytes a client authored: a malformed list is a dropped packet, not an
     -- error thrown out of the remote handler.
     const Ok, Operations = pcall(function()

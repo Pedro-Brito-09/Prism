@@ -841,6 +841,11 @@ Network.Redo.OnInvoke = function(Plr: Player, Step: number): boolean
 end
 
 Network.Forget.OnInvoke = function(Plr: Player, RedoOnly: boolean): boolean
+    -- Charged like every other request a client can make.
+    if not Permissions:Consume(Plr) then
+        return false
+    end
+
     if RedoOnly then
         History:Fork(Plr)
     else
